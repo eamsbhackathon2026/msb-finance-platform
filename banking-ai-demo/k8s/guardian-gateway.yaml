@@ -51,14 +51,13 @@ spec:
                 secretKeyRef:
                   name: guardian-agent
                   key: API_KEY
-            # CÒN TRỐNG CÓ CHỦ ĐÍCH. Tạo agent trong nền tảng cần provider_id,
-            # mà provider cần API key của một nhà cung cấp LLM — thứ duy nhất
-            # chưa có. Gateway coi agent là "chưa cấu hình" khi biến này rỗng và
-            # dùng kịch bản trả lời có sẵn, nên để trống KHÔNG làm hỏng chat.
-            # Điền agent id vào đây là chat chuyển sang LLM thật, không cần sửa
-            # một dòng code nào.
+            # Agent "Trợ lý Tài chính Guardian" trong nền tảng agent-platform:
+            # provider GreenNode MaaS (model z-ai/glm-5.2-hackathon) + 3 tool trỏ
+            # về chính gateway (customer-profile, monthly-overview,
+            # quarterly-spending). Có id này, gateway.agent_answer() gọi
+            # POST /v1/agents/{id}/runs và chat dùng LLM thật thay cho kịch bản.
             - name: AGENT_ID
-              value: ""
+              value: "01a0aaef-d140-79ce-86ed-bf7cf90b097f"
           ports:
             - containerPort: 8080
           readinessProbe:
