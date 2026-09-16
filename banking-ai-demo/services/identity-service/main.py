@@ -101,7 +101,18 @@ app = FastAPI(
 )
 setup_docs(app, SERVICE_NAME)
 
+# Các giá trị hợp lệ lấy từ CHECK constraint đang có trên database, không phải
+# từ suy đoán. Khai báo lại ở đây để request sai trả 422 kèm danh sách giá trị
+# đúng, thay vì để psycopg ném CheckViolation ra thành 500 không đọc được:
+#
+#   ck_user_status   ACTIVE | LOCKED | DISABLED
+#   ck_user_role     CUSTOMER | ADMIN
+#   ck_role_scope    APP | BACKOFFICE
+#   ck_role_status   ACTIVE | INACTIVE
+#   ck_user_customer CUSTOMER phải có customer_id, ADMIN phải để trống
 USER_STATUS = Literal["ACTIVE", "DISABLED", "LOCKED"]
+USER_ROLE = Literal["CUSTOMER", "ADMIN"]
+ROLE_SCOPE = Literal["APP", "BACKOFFICE"]
 
 
 # ---------------------------------------------------------------------------
@@ -109,7 +120,7 @@ USER_STATUS = Literal["ACTIVE", "DISABLED", "LOCKED"]
 # ---------------------------------------------------------------------------
 class RoleUpsert(BaseModel):
     role_name: str = Field(..., min_length=1)
-    role_scope: str = Field(..., min_length=1, description="Phạm vi áp dụng, ví dụ APP hoặc OPS")
+    role_scope: ROLE_SCOPE = Field(..., description="APP cho ứng dụng khách, BACKOFFICE cho vận hành nội bộ")
     permissions: list[str] = Field(default_factory=list)
     role_status: Literal["ACTIVE", "INACTIVE"] = "ACTIVE"
 
@@ -173,7 +184,7 @@ def _fetch_user(user_id: int) -> dict:
 # ---------------------------------------------------------------------------
 @app.get("/users", tags=["users"], summary="Danh sách tài khoản đăng nhập")
 def list_users(
-    role: str | None = Query(None, description="Lọc theo vai trò, ví dụ ADMIN"),
+    role: USER_ROLE | None = Query(None, description="Lọc theo vai trò"),
     user_status: USER_STATUS | None = Query(None, description="Lọc theo trạng thái"),
     q: str | None = Query(None, description="Tìm theo tên đăng nhập, khớp tiền tố"),
     limit: int = Query(50, ge=1, le=200),

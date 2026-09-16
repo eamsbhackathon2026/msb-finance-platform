@@ -379,6 +379,23 @@ mà chưa khai báo — thay vì để người đọc tự đối chiếu hai d
 Khai báo vai trò bằng `PUT /roles/{role_code}`, idempotent nên gọi lại không tạo
 bản ghi thứ hai.
 
+### Giá trị hợp lệ lấy từ ràng buộc của database
+
+Database có sẵn các `CHECK` constraint; service khai báo lại đúng chúng trong
+kiểu dữ liệu để request sai nhận **422 kèm danh sách giá trị đúng**, thay vì
+`CheckViolation` biến thành `500 Internal Server Error` không đọc được.
+
+| Ràng buộc | Giá trị hợp lệ |
+|---|---|
+| `ck_role_scope` | `APP`, `BACKOFFICE` |
+| `ck_role_status` | `ACTIVE`, `INACTIVE` |
+| `ck_user_role` | `CUSTOMER`, `ADMIN` |
+| `ck_user_status` | `ACTIVE`, `LOCKED`, `DISABLED` |
+| `ck_user_customer` | `CUSTOMER` phải có `customer_id`; `ADMIN` phải để trống |
+
+`ck_user_customer` đáng chú ý: không thể tạo tài khoản nội bộ gắn với một khách
+hàng cụ thể, và ngược lại.
+
 ### Khoá tài khoản
 
 Sai mật khẩu liên tiếp `MAX_FAILED_LOGIN` lần (mặc định 5) thì trạng thái chuyển

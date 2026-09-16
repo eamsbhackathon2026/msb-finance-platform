@@ -258,3 +258,37 @@ def test_manifest_agent_va_info():
     assert len(tools["tools"]) == 6
     info = client.get("/info").json()
     assert info["owns_tables"] == ["app_role", "app_user"]
+
+
+# ---------------------------------------------------------------------------
+# Ràng buộc của database được chặn ngay ở tầng API
+# ---------------------------------------------------------------------------
+def test_role_scope_ngoai_danh_sach_bi_tu_choi_bang_422():
+    """Database có ck_role_scope chỉ nhận APP hoặc BACKOFFICE.
+
+    Không chặn ở đây thì psycopg ném CheckViolation và bên gọi nhận 500 kèm
+    "Internal Server Error" — không biết giá trị nào mới đúng.
+    """
+    r = client.put("/roles/ADMIN", json={
+        "role_name": "Quản trị", "role_scope": "OPS", "permissions": [],
+    })
+    assert r.status_code == 422
+    assert "APP" in str(r.json()) and "BACKOFFICE" in str(r.json())
+
+
+def test_role_scope_hop_le_duoc_chap_nhan(monkeypatch):
+    monkeypatch.setattr(main, "execute_returning", lambda *a, **k: {**VAI_TRO_ADMIN, "role_scope": "BACKOFFICE"})
+    for scope in ("APP", "BACKOFFICE"):
+        r = client.put("/roles/X", json={"role_name": "X", "role_scope": scope, "permissions": []})
+        assert r.status_code == 200, scope
+
+
+def test_role_status_ngoai_danh_sach_bi_tu_choi():
+    r = client.put("/roles/ADMIN", json={
+        "role_name": "Quản trị", "role_scope": "APP", "permissions": [], "role_status": "XOA",
+    })
+    assert r.status_code == 422
+
+
+def test_loc_theo_vai_tro_ngoai_danh_sach_bi_tu_choi():
+    assert client.get("/users?role=SIEU_NHAN").status_code == 422

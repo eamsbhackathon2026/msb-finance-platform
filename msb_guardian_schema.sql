@@ -436,10 +436,10 @@ COMMIT;
 CREATE TABLE IF NOT EXISTS app_role (
     role_code    VARCHAR      PRIMARY KEY,
     role_name    VARCHAR      NOT NULL,
-    role_scope   VARCHAR      NOT NULL,
+    role_scope   VARCHAR      NOT NULL,   -- ck_role_scope: APP | BACKOFFICE
     -- Danh sách quyền dạng chuỗi, ví dụ ["ops.read","ops.decide"].
     permissions  JSONB        NOT NULL DEFAULT '[]'::jsonb,
-    role_status  VARCHAR      NOT NULL DEFAULT 'ACTIVE',
+    role_status  VARCHAR      NOT NULL DEFAULT 'ACTIVE',  -- ck_role_status: ACTIVE | INACTIVE
     created_at   TIMESTAMPTZ  NOT NULL DEFAULT now()
 );
 
@@ -448,13 +448,13 @@ CREATE TABLE IF NOT EXISTS app_user (
     username           VARCHAR      NOT NULL,
     -- bcrypt, 60 ký tự. KHÔNG endpoint nào được trả cột này ra ngoài.
     password_hash      VARCHAR      NOT NULL,
-    role               VARCHAR      NOT NULL,
+    role               VARCHAR      NOT NULL,  -- ck_user_role: CUSTOMER | ADMIN
     -- NULL với tài khoản nội bộ (ADMIN); có giá trị với tài khoản khách hàng.
     customer_id        INTEGER      REFERENCES customer(customer_id),
     full_name          VARCHAR,
     email              VARCHAR,
     phone_no           VARCHAR,
-    -- ACTIVE | DISABLED (quản trị viên tắt) | LOCKED (tự khoá do sai mật khẩu)
+    -- ck_user_status: ACTIVE | DISABLED (quản trị viên tắt) | LOCKED (tự khoá)
     user_status        VARCHAR      NOT NULL DEFAULT 'ACTIVE',
     failed_login_count INTEGER      NOT NULL DEFAULT 0,
     last_login_at      TIMESTAMPTZ,
@@ -462,6 +462,10 @@ CREATE TABLE IF NOT EXISTS app_user (
     updated_at         TIMESTAMPTZ  NOT NULL DEFAULT now()
 );
 
+-- ck_user_customer: tài khoản CUSTOMER bắt buộc có customer_id, tài khoản ADMIN
+-- bắt buộc để trống. Ràng buộc này khiến không thể tạo tài khoản nội bộ gắn với
+-- một khách hàng cụ thể, và ngược lại.
+--
 -- Database hiện chưa có ràng buộc duy nhất trên username. Tra cứu theo tên đăng
 -- nhập vì vậy lấy bản ghi đầu tiên; thêm ràng buộc này khi dữ liệu đã sạch:
 --   CREATE UNIQUE INDEX app_user_username_key ON app_user (username);
