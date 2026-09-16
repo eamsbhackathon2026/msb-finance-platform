@@ -470,6 +470,37 @@ về 0%.
 **Số tài khoản hiển thị** dùng `account_id` làm phần đuôi. Không endpoint nào của
 domain trả số tài khoản thật — đó là chủ ý, không phải thiếu sót.
 
+### Luồng agent — đã dựng xong, chờ một API key LLM
+
+Thiết lập trong `hackathon-agent-platform` được tạo **hoàn toàn qua API công
+khai của nó**, không sửa một dòng code nào trong repo đó.
+
+| Thành phần | Trạng thái |
+|---|---|
+| Tài khoản owner | ✅ `owner@msb-guardian.local` (mật khẩu trong `deploy/.env.production` của repo agent) |
+| Kết nối API → gateway | ✅ `http://guardian-gateway.finance-demo.svc.cluster.local` |
+| Tool `quarterly-spending` | ✅ `GET /api/copilot/quarters` |
+| Tool `monthly-overview` | ✅ `GET /api/copilot/overview` |
+| Tool `customer-profile` | ✅ `GET /api/session/customer` |
+| API key cho gateway | ✅ Secret `guardian-agent` trong `finance-demo` |
+| Provider LLM | ❌ **chưa có** — cần API key của GreenNode, Gemini hoặc endpoint tương thích OpenAI |
+| Agent | ❌ chặn bởi provider: `AgentCreateRequest` bắt buộc `provider_id` |
+
+**Đã kiểm chứng nền tảng agent gọi được gateway.** Chạy thử tool
+`quarterly-spending` trả `ok: true`, HTTP 200, đúng dữ liệu quý thật — nghĩa là
+hàng rào egress cho qua và DNS cross-namespace hoạt động.
+
+Còn đúng ba bước, làm trong giao diện admin-web hoặc bằng API:
+
+```
+1. Tạo provider   POST /v1/providers   (kind: greennode | gemini | openai_compatible)
+2. Tạo agent      POST /v1/agents      (provider_id, model, gắn 3 tool ở trên)
+3. Điền AGENT_ID  vào k8s/guardian-gateway.yaml rồi push
+```
+
+`AGENT_ID` để trống là **có chủ đích**: gateway coi agent là chưa cấu hình và
+dùng kịch bản trả lời có sẵn, nên chat vẫn chạy bình thường trong lúc chờ.
+
 ### agent-service — chỉ gọi, không sửa
 
 Chat hỏi `agent-service` khi có đủ `AGENT_SERVICE_URL`, `AGENT_API_KEY`,

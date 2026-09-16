@@ -43,16 +43,22 @@ spec:
             # gian vẫn giống nhịp cũ mà không kéo dài thêm.
             - name: RISK_ASSESS_DELAY_MS
               value: "800"
-            # agent-service nằm ở namespace khác nên phải dùng tên đầy đủ. Bỏ
-            # comment khi đã có API key và agent id — nền tảng agent có xác thực
-            # riêng, phần thiết lập đó không thuộc repo này.
-            # - name: AGENT_SERVICE_URL
-            #   value: "http://agent-service.agent-platform.svc.cluster.local:8080"
-            # - name: AGENT_API_KEY
-            #   valueFrom:
-            #     secretKeyRef: { name: guardian-agent, key: API_KEY }
-            # - name: AGENT_ID
-            #   value: ""
+            # agent-service nằm ở namespace khác nên phải dùng tên đầy đủ.
+            - name: AGENT_SERVICE_URL
+              value: "http://agent-service.agent-platform.svc.cluster.local:8080"
+            - name: AGENT_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: guardian-agent
+                  key: API_KEY
+            # CÒN TRỐNG CÓ CHỦ ĐÍCH. Tạo agent trong nền tảng cần provider_id,
+            # mà provider cần API key của một nhà cung cấp LLM — thứ duy nhất
+            # chưa có. Gateway coi agent là "chưa cấu hình" khi biến này rỗng và
+            # dùng kịch bản trả lời có sẵn, nên để trống KHÔNG làm hỏng chat.
+            # Điền agent id vào đây là chat chuyển sang LLM thật, không cần sửa
+            # một dòng code nào.
+            - name: AGENT_ID
+              value: ""
           ports:
             - containerPort: 8080
           readinessProbe:

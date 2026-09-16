@@ -231,26 +231,34 @@ def agent_configured() -> bool:
 async def agent_answer(question: str) -> str | None:
     """Hỏi agent-service một câu và lấy câu trả lời dạng văn bản.
 
-    Dùng đúng hợp đồng công khai của nền tảng: tạo run đồng bộ cho agent đã
-    cấu hình. Mọi lỗi đều trả None để phần gọi rơi về kịch bản có sẵn.
+    Dùng đúng hợp đồng công khai của nền tảng (api/openapi.yaml trong repo
+    hackathon-agent-platform):
+
+        POST /v1/agents/{agentId}/runs
+        {"input": {"message": "..."}, "mode": "sync"}
+        → 200 {"status": "...", "output": "câu trả lời", ...}
+
+    `input` là OBJECT có khóa `message`, không phải chuỗi, và chế độ đồng bộ
+    khai bằng `mode: "sync"` chứ không phải `stream: false`. Gửi sai thì nền
+    tảng trả 400 validation_failed và chat lặng lẽ rơi về kịch bản có sẵn —
+    nhìn bên ngoài y như chưa cấu hình agent.
+
+    Mọi lỗi đều trả None để phần gọi dùng kịch bản có sẵn.
     """
     if not agent_configured():
         return None
     _mark_touched()
     try:
-        async with httpx.AsyncClient(timeout=max(PEER_TIMEOUT, 30.0)) as client:
+        async with httpx.AsyncClient(timeout=max(PEER_TIMEOUT, 60.0)) as client:
             r = await client.post(
                 f"{AGENT_SERVICE_URL}/v1/agents/{AGENT_ID}/runs",
                 headers={"Authorization": f"Bearer {AGENT_API_KEY}"},
-                json={"input": question, "stream": False},
+                json={"input": {"message": question}, "mode": "sync"},
             )
             r.raise_for_status()
             body = r.json()
-        for key in ("output", "content", "answer", "text"):
-            value = body.get(key)
-            if isinstance(value, str) and value.strip():
-                return value
-        return None
+        output = body.get("output")
+        return output if isinstance(output, str) and output.strip() else None
     except Exception:
         mark_degraded()
         return None
