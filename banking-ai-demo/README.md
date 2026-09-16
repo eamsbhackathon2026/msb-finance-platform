@@ -341,6 +341,83 @@ base64 -i ~/.kube/vks-finance-demo.yaml | pbcopy      # macOS
 gh secret set KUBE_CONFIG < <(base64 -w0 ~/.kube/vks-finance-demo.yaml)
 ```
 
+## guardian-gateway — backend cho web app
+
+Service thứ sáu, đứng riêng khỏi 5 service domain. Nó tồn tại để
+[`msb-guardian-fe`](https://github.com/eamsbhackathon2026/msb-guardian-fe) có đúng
+một địa chỉ và một hợp đồng để gọi.
+
+Web app gọi 7 đường dẫn cùng origin dưới `/api/*`, đã gộp sẵn theo màn hình. 5
+service domain thì phơi ra 74 endpoint ở mức chi tiết hơn hẳn — ví dụ màn
+Financial Copilot cần gộp `portfolio` + `insights` + `cashflow-forecast` +
+`recommendations` từ 2 service khác nhau. Gộp ở server giữ cho trình duyệt không
+phải biết 5 địa chỉ và không phải tự nắn dữ liệu.
+
+| Endpoint | Màn hình dùng |
+|---|---|
+| `GET /api/copilot/overview` | Financial Copilot — Tổng quan |
+| `POST /api/copilot/chat` | Chat AI (Server-Sent Events) |
+| `POST /api/risk/assess` | Scam Shield — cảnh báo chặn giao dịch |
+| `GET /api/ops/metrics` | Ops Dashboard — 4 chỉ số KPI |
+| `GET /api/ops/alerts` | Ops Dashboard — danh sách cảnh báo |
+| `GET /api/ops/alerts/{id}` | Chi tiết case |
+| `POST /api/ops/alerts/{id}/decision` | Ghi quyết định xử lý |
+
+Kiểu dữ liệu trả về là bản dịch 1-1 của `src/data/types.ts` bên FE, đặt trong
+`services/guardian-gateway/models.py`.
+
+**Gateway CHƯA gọi sang 5 service domain.** Dữ liệu lấy từ `catalog.py` — bản
+đối chiếu của `src/data/demo-scenarios.ts`, giữ đúng từng con số để chuyển giữa
+demo mode và live mode không làm đổi nội dung màn hình. Bước nối vào domain là
+việc sau; cấu trúc file giữ nguyên để lúc đó chỉ phải đổi nguồn dữ liệu chứ
+không phải đổi hợp đồng.
+
+### Vì sao mọi response đều có header `X-Guardian-Data-Source`
+
+`guardedCall` trong `src/lib/demo-mode.ts` bắt mọi lỗi và timeout 6s rồi **âm
+thầm** rơi về dữ liệu demo. Gateway chết hẳn thì màn hình vẫn đẹp như thường —
+nhìn giao diện không thể biết FE đang gọi được backend hay không.
+
+Nên mỗi response mang `X-Guardian-Data-Source: stub` (đổi thành `domain` qua
+biến môi trường `GUARDIAN_DATA_SOURCE` khi đã nối service thật). Mở tab Network
+thấy header này là chắc chắn dữ liệu đến từ gateway. Cách thứ hai: mở FE với
+`?demo=0&debug=1`, xem badge góc màn hình và log `[demo-mode] ...: LIVE` trong
+Console.
+
+### Hai biến môi trường
+
+| Biến | Mặc định | Nội dung |
+|---|---|---|
+| `GUARDIAN_DATA_SOURCE` | `stub` | Giá trị trả ra trong header nguồn dữ liệu |
+| `RISK_ASSESS_DELAY_MS` | `2000` | Độ trễ cố ý của `/api/risk/assess` |
+
+`RISK_ASSESS_DELAY_MS` cần giải thích: màn "Đang phân tích giao dịch..." bên FE
+hiển thị theo `isPending` của react-query, tức là nó dài **đúng bằng** thời gian
+chờ API. Demo mode giả lập 1.800–2.200ms; gateway trả tức thì sẽ làm màn đó loé
+qua rồi biến mất. Giữ 2000 để chuyển demo→live không đổi nhịp trình bày; đặt `0`
+nếu muốn đo tốc độ thật.
+
+### Chạy local
+
+```bash
+cd services/guardian-gateway
+pip install -r requirements.txt
+uvicorn main:app --port 8000        # cổng 8000 đúng như proxy trong vite.config.ts
+python -m pytest -q                 # 29 test, không cần database
+```
+
+Sau đó chạy FE với `npm run dev` rồi mở `http://localhost:5173/?demo=0&debug=1`.
+
+### Port-forward sau khi deploy
+
+Gateway **không** nằm trong biến `SERVICES` của Makefile — `make sync-common`,
+`make build` và `make port-forward` chỉ áp cho 5 service domain, vì gateway
+không dùng `common.py` và không chạm database. Mở riêng:
+
+```bash
+kubectl -n finance-demo port-forward svc/guardian-gateway 8086:80
+```
+
 ## Giới hạn hiện tại
 
 - Chưa có xác thực / phân quyền trên API. Trong phạm vi hackathon các service chạy
@@ -350,3 +427,8 @@ gh secret set KUBE_CONFIG < <(base64 -w0 ~/.kube/vks-finance-demo.yaml)
   dung do bên gọi truyền vào; `llm_trace` đã sẵn sàng để ghi nhật ký mọi lượt gọi.
 - `fraud_case` chứa đáp án kỳ vọng của bộ kiểm thử nên **không được expose** ra ứng
   dụng khách hàng.
+- `guardian-gateway` mới dựng xong hợp đồng với web app, chưa gọi sang 5 service
+  domain — số liệu nó trả về đến từ `catalog.py`.
+- Bên FE còn hai chỗ chưa chạy live kể cả khi gateway đã sẵn sàng: `streamChat`
+  không nhận `chart` ở nhánh live, và `getCaseTimeline` chưa có nhánh gọi mạng
+  nào (cả hai trong `src/lib/api.ts`).

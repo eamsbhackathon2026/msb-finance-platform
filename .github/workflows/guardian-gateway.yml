@@ -1,0 +1,109 @@
+name: build-guardian-gateway
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'banking-ai-demo/services/guardian-gateway/**'
+      - 'banking-ai-demo/k8s/guardian-gateway.yaml'
+      - '.github/workflows/guardian-gateway.yml'
+  workflow_dispatch: {}
+
+env:
+  # Host registry, project, namespace để công khai; credentials (VCR_*, KUBE_CONFIG)
+  # lấy từ GitHub Secrets — KHÔNG hardcode.
+  SERVICE: guardian-gateway
+  REGISTRY: vcr.vngcloud.vn
+  IMAGE_REPO: vcr.vngcloud.vn/114544-ea-hackathon/guardian-gateway
+  NAMESPACE: finance-demo
+  MANIFEST: banking-ai-demo/k8s/guardian-gateway.yaml
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # Không có bước kiểm tra common.py như 5 service domain: gateway không
+      # dùng services/_common/common.py (không chạm database, chưa gọi service
+      # nào) nên cũng không nằm trong `make sync-common`.
+
+      - name: Cài dependencies
+        working-directory: banking-ai-demo/services/guardian-gateway
+        run: pip install -r requirements.txt
+
+      - name: Chạy test
+        working-directory: banking-ai-demo/services/guardian-gateway
+        run: python -m pytest -q
+
+  build-and-push:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to VNG Container Registry (vCR)
+        uses: docker/login-action@v3
+        with:
+          registry: vcr.vngcloud.vn
+          username: ${{ secrets.VCR_USERNAME }}
+          password: ${{ secrets.VCR_PASSWORD }}
+
+      - name: Build and push image (tag = commit SHA)
+        uses: docker/build-push-action@v6
+        with:
+          context: banking-ai-demo/services/guardian-gateway
+          push: true
+          tags: |
+            ${{ env.IMAGE_REPO }}:${{ github.sha }}
+            ${{ env.IMAGE_REPO }}:latest
+
+  deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v4
+
+      - name: Write kubeconfig from secret (base64)
+        run: |
+          mkdir -p "$HOME/.kube"
+          echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > "$HOME/.kube/config"
+          chmod 600 "$HOME/.kube/config"
+
+      - name: Ensure imagePullSecret vcr-cred
+        run: |
+          kubectl -n "${{ env.NAMESPACE }}" create secret docker-registry vcr-cred \
+            --docker-server="${{ env.REGISTRY }}" \
+            --docker-username='${{ secrets.VCR_USERNAME }}' \
+            --docker-password='${{ secrets.VCR_PASSWORD }}' \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+      # Không kiểm tra secret guardian-db như 5 service domain: gateway không
+      # kết nối database.
+
+      - name: Deploy image (commit SHA) to VKS
+        run: |
+          sed "s#:latest#:${{ github.sha }}#" "${{ env.MANIFEST }}" \
+            | kubectl -n "${{ env.NAMESPACE }}" apply -f -
+          kubectl -n "${{ env.NAMESPACE }}" rollout status deployment/${{ env.SERVICE }} --timeout=120s
+
+      - name: In trạng thái khi rollout hỏng
+        if: failure()
+        run: |
+          kubectl -n "${{ env.NAMESPACE }}" get pods -l app=${{ env.SERVICE }} -o wide || true
+          kubectl -n "${{ env.NAMESPACE }}" describe deployment/${{ env.SERVICE }} | tail -30 || true
+          echo "ImagePullBackOff nghĩa là image chưa có trên vCR."

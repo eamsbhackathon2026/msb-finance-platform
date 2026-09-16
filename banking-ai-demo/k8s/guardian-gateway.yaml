@@ -1,0 +1,75 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: guardian-gateway
+  namespace: finance-demo
+  labels:
+    app: guardian-gateway
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: guardian-gateway
+  template:
+    metadata:
+      labels:
+        app: guardian-gateway
+    spec:
+      imagePullSecrets:
+        - name: vcr-cred
+      containers:
+        - name: guardian-gateway
+          # CI thay :latest bằng commit SHA (xem README).
+          image: vcr.vngcloud.vn/114544-ea-hackathon/guardian-gateway:latest
+          imagePullPolicy: IfNotPresent
+          env:
+            # Đổi thành "domain" khi gateway đã gọi 5 service thật. Giá trị này
+            # đi ra header X-Guardian-Data-Source nên nhìn tab Network là biết
+            # response đến từ đâu, không phải đoán.
+            - name: GUARDIAN_DATA_SOURCE
+              value: "stub"
+            # Màn "Đang phân tích giao dịch..." bên FE dài đúng bằng thời gian
+            # chờ API. Demo mode giả lập ~2s; giữ 2000 để chuyển demo→live
+            # không đổi nhịp trình bày. Đặt "0" nếu muốn trả tức thì.
+            - name: RISK_ASSESS_DELAY_MS
+              value: "2000"
+          ports:
+            - containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 3
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 20
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 50m
+              memory: 96Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: guardian-gateway
+  namespace: finance-demo
+  labels:
+    app: guardian-gateway
+spec:
+  # ClusterIP: FE gọi qua tên service trong cùng namespace, không mở ra Internet.
+  type: ClusterIP
+  selector:
+    app: guardian-gateway
+  ports:
+    - port: 80
+      targetPort: 8080
+      protocol: TCP
