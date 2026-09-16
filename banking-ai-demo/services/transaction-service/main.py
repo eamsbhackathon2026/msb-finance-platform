@@ -423,6 +423,124 @@ def quarterly_summary(
     }
 
 
+_MONTH_NAMES_VI = (
+    "", "Tháng 1", "Tháng 2", "Tháng 3", "Tháng 4", "Tháng 5", "Tháng 6",
+    "Tháng 7", "Tháng 8", "Tháng 9", "Tháng 10", "Tháng 11", "Tháng 12",
+)
+
+
+@app.get("/transactions/{customer_id}/monthly-comparison", tags=["transaction"])
+def monthly_comparison(
+    customer_id: int,
+    months: int = Query(6, ge=2, le=24, description="Số tháng gần nhất cần so sánh"),
+    include_transfers: bool = Query(
+        False, description="Tính cả chuyển khoản đi vào phần chi tiêu"
+    ),
+):
+    """So sánh chi tiêu GIỮA CÁC THÁNG, kèm mức thay đổi so với tháng liền trước.
+
+    Khác monthly-summary (chỉ liệt kê từng tháng độc lập) ở chỗ endpoint này trả
+    thẳng con số so sánh: mỗi tháng có `delta_vs_prev_pct` cho tổng chi, và mỗi
+    nhóm có `delta_vs_prev_pct` so với chính nhóm đó ở tháng trước. Đây là thứ
+    trả lời câu "tháng này so với tháng trước thế nào" mà không bắt bên gọi tự
+    trừ hai danh sách — cùng khuôn với quarterly-summary, chỉ đổi đơn vị sang
+    tháng.
+    """
+    _require_transactions(customer_id)
+    # Lấy dư một tháng rồi cắt: tháng cũ nhất trong cửa sổ dùng làm mốc so sánh
+    # cho tháng kế, bản thân delta của nó thì bỏ.
+    start = (now_vn() - timedelta(days=31 * (months + 1))).strftime("%Y%m%d")
+    rows = query(
+        """
+        SELECT * FROM transaction_history
+        WHERE customer_id = %s AND transaction_date >= %s AND status = 'POSTED'
+        ORDER BY transaction_date
+        """,
+        (customer_id, start),
+    )
+
+    excluded = () if include_transfers else TRANSFER_CATEGORIES
+    buckets: dict[str, dict] = defaultdict(
+        lambda: {"income": 0.0, "expense": 0.0, "count": 0,
+                 "by_category": defaultdict(float), "excluded_amount": 0.0}
+    )
+    for r in rows:
+        date = r.get("transaction_date") or ""
+        if len(date) < 6:
+            continue
+        b = buckets[date[:6]]  # YYYYMM
+        amount = float(num(r.get("amount")))
+        b["count"] += 1
+        if r.get("direction") == "IN":
+            b["income"] += amount
+            continue
+        category = r.get("category") or "OTHER"
+        if category in excluded:
+            b["excluded_amount"] += amount
+            continue
+        b["expense"] += amount
+        b["by_category"][category] += amount
+
+    periods = sorted(buckets)
+    summary = []
+    for i, period in enumerate(periods):
+        b = buckets[period]
+        total = b["expense"] or 1
+        prev = buckets[periods[i - 1]] if i > 0 else None
+        truoc = prev["by_category"] if prev else {}
+        by_cat = sorted(b["by_category"].items(), key=lambda kv: kv[1], reverse=True)
+        year, month = int(period[:4]), int(period[4:6])
+        summary.append({
+            "period": period,
+            "year": year,
+            "month": month,
+            "label": f"{_MONTH_NAMES_VI[month]}/{year}",
+            "income": round(b["income"]),
+            "expense": round(b["expense"]),
+            "net": round(b["income"] - b["expense"]),
+            "count": b["count"],
+            "excluded_transfer_amount": round(b["excluded_amount"]),
+            # Thay đổi TỔNG chi so với tháng trước — con số cho bảng so sánh tháng.
+            "delta_vs_prev_pct": (
+                round((b["expense"] - prev["expense"]) * 100 / prev["expense"], 1)
+                if prev and prev["expense"] else None
+            ),
+            "by_category": [
+                {
+                    "category": c,
+                    "amount": round(v),
+                    "pct": round(v * 100 / total),
+                    "rank": j + 1,
+                    "delta_vs_prev_pct": (
+                        round((v - truoc[c]) * 100 / truoc[c], 1)
+                        if truoc.get(c) else None
+                    ),
+                }
+                for j, (c, v) in enumerate(by_cat)
+            ],
+        })
+
+    # Cắt bỏ tháng dư đã lấy thêm làm mốc.
+    summary = summary[-months:]
+    totals: dict[str, float] = defaultdict(float)
+    for m in summary:
+        for c in m["by_category"]:
+            totals[c["category"]] += c["amount"]
+    grand = sum(totals.values()) or 1
+
+    return {
+        "customer_id": customer_id,
+        "months": len(summary),
+        "include_transfers": include_transfers,
+        "excluded_categories": list(excluded),
+        "summary": summary,
+        "category_totals": [
+            {"category": c, "amount": round(v), "pct": round(v * 100 / grand)}
+            for c, v in sorted(totals.items(), key=lambda kv: kv[1], reverse=True)
+        ],
+    }
+
+
 @app.get("/transactions/{customer_id}/cashflow-forecast", tags=["transaction"])
 def cashflow_forecast(customer_id: int, horizon: int = Query(3, ge=1, le=12)):
     """Dự báo net theo trung bình có trọng số: 3 tháng gần nhất nặng hơn các tháng cũ.
@@ -891,6 +1009,17 @@ AGENT_TOOLS = [
         params={"customer_id": "int", "quarters": "int, mặc định 8",
                 "include_transfers": "bool, mặc định false"},
         returns="summary[] theo quý với by_category[] kèm delta_vs_prev_pct, và category_totals[].",
+    ),
+    tool(
+        "get_monthly_comparison",
+        "So sánh chi tiêu GIỮA CÁC THÁNG kèm mức thay đổi so với tháng liền trước "
+        "(cả tổng chi lẫn từng nhóm). Dùng khi khách hỏi 'tháng này so với tháng "
+        "trước/tháng 8 thế nào' hoặc muốn bảng so sánh nhiều tháng.",
+        "GET", "/transactions/{customer_id}/monthly-comparison",
+        params={"customer_id": "int", "months": "int, mặc định 6",
+                "include_transfers": "bool, mặc định false"},
+        returns="summary[] theo tháng, mỗi tháng có delta_vs_prev_pct (tổng) và "
+                "by_category[] kèm delta_vs_prev_pct; và category_totals[].",
     ),
     tool(
         "get_cashflow_forecast",

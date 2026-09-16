@@ -259,3 +259,67 @@ def test_ngay_hong_dinh_dang_bi_bo_qua_khong_lam_vo(monkeypatch):
 def test_quarterly_co_trong_manifest_agent():
     tools = client.get("/agent/tools").json()["tools"]
     assert any(t["name"] == "get_quarterly_summary" for t in tools)
+
+
+# ---------------------------------------------------------------------------
+# So sánh theo tháng (monthly-comparison)
+# ---------------------------------------------------------------------------
+def monthly_cmp(monkeypatch, rows, **params):
+    monkeypatch.setattr(main, "query", lambda *a, **k: rows)
+    monkeypatch.setattr(main, "query_one", lambda *a, **k: {"x": 1})
+    r = client.get("/transactions/100001/monthly-comparison", params=params)
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+def test_mc_gom_dung_thang(monkeypatch):
+    rows = [tx(1_000_000, date="20260615"), tx(2_000_000, date="20260715"),
+            tx(3_000_000, date="20260815")]
+    d = monthly_cmp(monkeypatch, rows, months=24)
+    ky = {m["period"]: m["expense"] for m in d["summary"]}
+    assert ky == {"202606": 1_000_000, "202607": 2_000_000, "202608": 3_000_000}
+
+
+def test_mc_nhan_thang_doc_duoc(monkeypatch):
+    m = monthly_cmp(monkeypatch, [tx(1_000_000, date="20260815")])["summary"][-1]
+    assert m["period"] == "202608" and m["label"] == "Tháng 8/2026"
+    assert m["year"] == 2026 and m["month"] == 8
+
+
+def test_mc_delta_tong_chi_so_thang_truoc(monkeypatch):
+    # Tổng chi tháng 8 (3tr) so tháng 7 (2tr) = +50%; nhóm FOOD cũng +50%.
+    rows = [tx(2_000_000, date="20260715", cat="FOOD"),
+            tx(3_000_000, date="20260815", cat="FOOD")]
+    d = monthly_cmp(monkeypatch, rows)
+    m8 = [m for m in d["summary"] if m["period"] == "202608"][0]
+    assert m8["delta_vs_prev_pct"] == 50.0
+    assert m8["by_category"][0]["delta_vs_prev_pct"] == 50.0
+
+
+def test_mc_thang_dau_khong_co_moc(monkeypatch):
+    d = monthly_cmp(monkeypatch, [tx(2_000_000, date="20260715", cat="FOOD")])
+    assert d["summary"][0]["delta_vs_prev_pct"] is None
+    assert d["summary"][0]["by_category"][0]["delta_vs_prev_pct"] is None
+
+
+def test_mc_loai_chuyen_khoan_khoi_chi_tieu(monkeypatch):
+    rows = [tx(1_000_000, date="20260815", cat="FOOD"),
+            tx(9_000_000, date="20260815", cat="TRANSFER_P2P")]
+    m = monthly_cmp(monkeypatch, rows)["summary"][-1]
+    assert m["expense"] == 1_000_000
+    assert m["excluded_transfer_amount"] == 9_000_000
+    assert [c["category"] for c in m["by_category"]] == ["FOOD"]
+
+
+def test_mc_ty_trong_cong_100_va_xep_hang(monkeypatch):
+    rows = [tx(6_000_000, date="20260815", cat="FOOD"),
+            tx(3_000_000, date="20260816", cat="BILLS"),
+            tx(1_000_000, date="20260817", cat="HEALTH")]
+    m = monthly_cmp(monkeypatch, rows)["summary"][-1]
+    assert [c["pct"] for c in m["by_category"]] == [60, 30, 10]
+    assert [c["rank"] for c in m["by_category"]] == [1, 2, 3]
+
+
+def test_mc_agent_tool_dang_ky(monkeypatch):
+    names = {t["name"] for t in client.get("/agent/tools").json()["tools"]}
+    assert "get_monthly_comparison" in names
