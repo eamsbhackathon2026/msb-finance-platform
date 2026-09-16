@@ -41,6 +41,8 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 import catalog
+import domain
+import mappers
 from models import (
     AssessRequest,
     CaseDetail,
@@ -71,10 +73,6 @@ SERVICE_NAME = "guardian-gateway"
 def _now_hms() -> str:
     """Giờ Việt Nam dạng HH:MM:SS, khớp định dạng các mốc có sẵn trong timeline."""
     return datetime.now(timezone(timedelta(hours=7))).strftime("%H:%M:%S")
-
-# Nguồn dữ liệu hiện tại. Đổi thành "domain" khi đã nối 5 service thật — giá trị
-# này đi ra header nên biết ngay đang chạy bằng gì mà không cần đọc code.
-DATA_SOURCE = os.getenv("GUARDIAN_DATA_SOURCE", "stub")
 
 # Màn "Đang phân tích giao dịch..." bên FE hiển thị theo isPending của
 # react-query, tức là nó dài đúng bằng thời gian chờ API. Demo mode giả lập
@@ -109,11 +107,16 @@ app = FastAPI(
 async def stamp_data_source(request: Request, call_next):
     """Đánh dấu nguồn dữ liệu lên mọi response.
 
-    Không có dấu này thì không có cách nào phân biệt 'FE đang gọi gateway thật'
-    với 'FE đã im lặng rơi về mock' ngoài việc đọc Console.
+    Giá trị tính theo TỪNG REQUEST chứ không phải hằng số: "domain" khi mọi lời
+    gọi sang service domain đều thành công, "degraded" khi có ít nhất một cái
+    hỏng và phần đó lấy từ catalog.py, "stub" khi không gọi domain lần nào.
+
+    Không có dấu này thì không có cách nào phân biệt 'gateway đang đọc database
+    thật' với 'gateway đã lặng lẽ rơi về dữ liệu tạm' ngoài việc đọc log.
     """
+    domain.reset_request_state()
     response = await call_next(request)
-    response.headers["X-Guardian-Data-Source"] = DATA_SOURCE
+    response.headers["X-Guardian-Data-Source"] = domain.data_source()
     response.headers["X-Guardian-Service"] = SERVICE_NAME
     return response
 
@@ -131,6 +134,24 @@ _protections: dict[str, bool] = {}
 # Đây là mắt xích khép vòng: khách bấm huỷ ở màn Scam Shield thì chuyên viên
 # vận hành nhìn thấy ngay trong case, thay vì chỉ đổi màn hình phía khách.
 _customer_steps: list[CaseTimelineStep] = []
+
+# decision_id của lần chấm điểm gần nhất. risk-scoring cần nó để ghi hành động,
+# mà FE thì không có khái niệm decision_id — nó chỉ biết "khách vừa bấm huỷ".
+_last_decision_id: str | None = None
+
+# Hành động của khách so với hợp đồng của risk-scoring-service.
+DOMAIN_ACTIONS = {
+    "cancelled": ("cancel", "prevented"),
+    "reported": ("cancel", "prevented"),
+    "proceeded": ("continue", "proceeded"),
+}
+
+# Quyết định của chuyên viên vận hành so với hợp đồng đó.
+DOMAIN_DECISIONS = {
+    "confirmed": ("cancel", "prevented"),
+    "dismissed": ("continue", "proceeded"),
+    "investigating": ("hold", "held"),
+}
 
 
 def _alert_by_id(alert_id: str) -> ScamAlert:
@@ -156,12 +177,96 @@ def score_for_amount(amount: int) -> int:
     return max(12, min(97, round(raw)))
 
 
+async def _ops_context() -> tuple[list[dict], dict[int, str], dict[str, str]] | None:
+    """Ba mẩu dữ liệu mà mọi màn Ops đều cần, lấy trong ba lời gọi thay vì N.
+
+    Trả None khi không lấy được danh sách quyết định — không có nó thì không
+    dựng được màn nào, các phần còn lại có cũng vô nghĩa.
+    """
+    decisions = await domain.risk_decisions(limit=50)
+    if not decisions:
+        return None
+    rows = decisions.get("decisions") or []
+
+    # Tên khách: lấy cả danh sách một lần rồi tra trong bộ nhớ, thay vì gọi
+    # /customers/{id} cho từng quyết định.
+    people = await domain.customers()
+    names = {
+        int(c["customer_id"]): c.get("name_masked") or "—"
+        for c in ((people or {}).get("customers") or [])
+    }
+
+    # Trạng thái xử lý nằm ở action-feedback, khoá theo decision_id.
+    case_rows = await domain.cases(limit=100)
+    statuses = {
+        c["decision_id"]: mappers.CASE_STATUS_MAP.get(c.get("status", ""), "pending")
+        for c in ((case_rows or {}).get("cases") or [])
+        if c.get("decision_id")
+    }
+    # Quyết định của chuyên viên trong phiên này đè lên trạng thái từ database.
+    statuses.update(_decisions)
+    return rows, names, statuses
+
+
+async def _scenario_names() -> dict[str, str]:
+    """Tên kịch bản theo decision_id.
+
+    Bản ghi risk_decision chỉ nhắc mã kịch bản trong câu giải thích của cơ chế
+    nâng mức, mà nâng mức chỉ xảy ra với một phần quyết định. View /ops/decisions
+    thì có sẵn scenario_name cho mọi dòng — một lời gọi là đủ cho cả danh sách.
+    """
+    view = await domain.ops_decisions(limit=50)
+    return {
+        d["decision_id"]: d["scenario_name"]
+        for d in ((view or {}).get("decisions") or [])
+        if d.get("decision_id") and d.get("scenario_name")
+    }
+
+
+_SCENARIO_RE = re.compile(r"\bS\d{2}\b")
+
+
+def _scenario_id_in(text: str) -> str | None:
+    """Rút mã kịch bản (S01…) từ câu giải thích của cơ chế nâng mức."""
+    m = _SCENARIO_RE.search(text)
+    return m.group(0) if m else None
+
+
+async def _precheck_for(amount: int) -> dict | None:
+    """Dựng đầu vào cho engine từ hồ sơ khách và fraud case, rồi gọi precheck."""
+    pf = await domain.portfolio(domain.DEMO_CUSTOMER_ID)
+    accounts = (pf or {}).get("accounts") or []
+    if not accounts:
+        return None
+    case = await domain.fraud_case(domain.DEMO_FRAUD_CASE_ID)
+    series = ((case or {}).get("injection") or {}).get("series") or []
+    memo = series[0].get("memo") if series else None
+    ben = catalog.MAIN_BENEFICIARY
+    return await domain.precheck({
+        "customer_id": domain.DEMO_CUSTOMER_ID,
+        "account_id": accounts[0]["account_id"],
+        "amount": amount,
+        "beneficiary_bank_code": ben.bank_name[:3].upper(),
+        "beneficiary_account_no": ben.account_no.replace(" ", ""),
+        "memo": memo,
+    })
+
+
 @app.get("/api/copilot/overview", response_model=CopilotOverview, tags=["copilot"],
          # ctaLabel là optional bên TS: bỏ hẳn field khi không có, thay vì trả null.
          response_model_exclude_none=True,
          summary="Tổng quan chi tiêu tháng cho màn Financial Copilot")
 async def copilot_overview() -> CopilotOverview:
-    return catalog.COPILOT_OVERVIEW
+    monthly = await domain.monthly_summary(domain.DEMO_CUSTOMER_ID)
+    if not monthly:
+        return catalog.COPILOT_OVERVIEW
+    ins = await domain.insights(domain.DEMO_CUSTOMER_ID)
+    mapped = mappers.map_overview(monthly, ins)
+    if mapped is None:
+        # Gọi được nhưng không có kỳ nào — vẫn là suy giảm, phải đánh dấu.
+        domain.mark_degraded()
+        return catalog.COPILOT_OVERVIEW
+    return mapped
 
 
 @app.post("/api/copilot/chat", tags=["copilot"],
@@ -172,11 +277,19 @@ async def copilot_chat(payload: ChatRequest) -> StreamingResponse:
     Định dạng phải khớp đúng bộ parse bên FE: mỗi dòng `data: {"token": "..."}`,
     kết thúc bằng `data: [DONE]`. FE bỏ qua dòng không bắt đầu bằng `data:`.
     """
+    # agent-service trả lời nếu đã được cấu hình. Nền tảng agent có xác thực
+    # riêng và cần một agent tạo sẵn trong đó; phần thiết lập ấy thuộc phạm vi
+    # người khác nên gateway chỉ gọi, không tự tạo. Chưa cấu hình hoặc gọi hỏng
+    # thì dùng kịch bản trả lời có sẵn.
     reply, chart = catalog.FALLBACK_REPLY, None
-    for pattern, text, attached in catalog.SCRIPTED_REPLIES:
-        if re.search(pattern, payload.message, re.IGNORECASE):
-            reply, chart = text, attached
-            break
+    from_agent = await domain.agent_answer(payload.message)
+    if from_agent:
+        reply = from_agent
+    else:
+        for pattern, text, attached in catalog.SCRIPTED_REPLIES:
+            if re.search(pattern, payload.message, re.IGNORECASE):
+                reply, chart = text, attached
+                break
 
     async def stream() -> AsyncIterator[bytes]:
         # Tách giữ nguyên khoảng trắng, giống replayAsStream bên FE, để ghép lại
@@ -208,35 +321,88 @@ async def copilot_chat(payload: ChatRequest) -> StreamingResponse:
           response_model_exclude_none=True,
           summary="Chấm điểm rủi ro cho một lệnh chuyển tiền")
 async def assess_risk(payload: AssessRequest) -> RiskAssessment:
+    """Chấm điểm bằng engine thật trong risk-scoring-service.
+
+    Engine cần nhiều hơn số tiền: khách nào, tài khoản nào, người nhận nào, nội
+    dung chuyển khoản gì. FE chỉ gửi amount nên phần còn lại lấy từ hồ sơ khách
+    và fraud case — cùng bộ đầu vào mà bộ kiểm thử engine đang dùng.
+    """
+    global _last_decision_id
+    pre = await _precheck_for(payload.amount)
+    if pre and pre.get("decision_id"):
+        _last_decision_id = pre["decision_id"]
     if RISK_ASSESS_DELAY_MS > 0:
         await asyncio.sleep(RISK_ASSESS_DELAY_MS / 1000)
-    return catalog.build_assessment(score_for_amount(payload.amount), catalog.MAIN_SCENARIO)
+    if not pre:
+        return catalog.build_assessment(score_for_amount(payload.amount), catalog.MAIN_SCENARIO)
+    scen = await domain.scenario(pre["scenario_id"]) if pre.get("scenario_id") else None
+    if scen is None:
+        # Engine trả kịch bản trong phần nâng mức chứ không phải trường riêng.
+        escalation = (pre.get("factors") or {}).get("scenario_escalation") or {}
+        sid = _scenario_id_in(escalation.get("detail") or "")
+        scen = await domain.scenario(sid) if sid else None
+    return mappers.map_assessment(pre, scen)
 
 
 @app.get("/api/ops/metrics", response_model=OpsMetrics, tags=["ops"],
          summary="Bốn chỉ số KPI của Ops Dashboard")
 async def ops_metrics() -> OpsMetrics:
-    return catalog.OPS_METRICS
+    summary = await domain.ops_summary()
+    decisions = await domain.risk_decisions(limit=50)
+    if not summary or not decisions:
+        return catalog.OPS_METRICS
+    return mappers.map_metrics(summary, decisions.get("decisions") or [])
 
 
 @app.get("/api/ops/alerts", response_model=list[ScamAlert], tags=["ops"],
          response_model_exclude_none=True,
          summary="Danh sách cảnh báo đang theo dõi")
 async def ops_alerts() -> list[ScamAlert]:
-    return [_alert_by_id(a.id) for a in catalog.OPS_ALERTS]
+    ctx = await _ops_context()
+    if ctx is None:
+        return [_alert_by_id(a.id) for a in catalog.OPS_ALERTS]
+    rows, names, statuses = ctx
+    known = ((await domain.beneficiaries(domain.DEMO_CUSTOMER_ID)) or {}).get("beneficiaries") or []
+    by_decision = await _scenario_names()
+    return [
+        mappers.map_alert(
+            d, names, known, statuses,
+            {"scenario_name": by_decision[d["decision_id"]]} if d["decision_id"] in by_decision else None,
+        )
+        for d in rows
+    ]
 
 
 @app.get("/api/ops/alerts/{alert_id}", response_model=ScamAlert, tags=["ops"],
          response_model_exclude_none=True,
          summary="Chi tiết một cảnh báo")
 async def ops_alert(alert_id: str) -> ScamAlert:
-    return _alert_by_id(alert_id)
+    dec = await domain.risk_decision(alert_id)
+    if not dec:
+        # id dạng ALT-xxxx là của dữ liệu tạm; domain dùng UUID.
+        return _alert_by_id(alert_id)
+    ctx = await _ops_context()
+    names, statuses = (ctx[1], ctx[2]) if ctx else ({}, dict(_decisions))
+    known = ((await domain.beneficiaries(int(dec.get("customer_id") or 0))) or {}).get("beneficiaries") or []
+    scen = await domain.scenario(dec["scenario_id"]) if dec.get("scenario_id") else None
+    return mappers.map_alert(dec, names, known, statuses, scen)
 
 
 @app.post("/api/ops/alerts/{alert_id}/decision", response_model=OkResponse, tags=["ops"],
           summary="Ghi quyết định xử lý của chuyên viên vận hành")
 async def ops_decision(alert_id: str, payload: DecisionRequest) -> OkResponse:
-    _alert_by_id(alert_id)  # 404 nếu id không tồn tại, trước khi ghi bất cứ gì
+    # id dạng UUID là quyết định thật trong database; ghi thẳng xuống
+    # risk-scoring. id dạng ALT-xxxx là dữ liệu tạm, chỉ ghi trong bộ nhớ.
+    dec = await domain.risk_decision(alert_id)
+    if dec:
+        action_taken, outcome = DOMAIN_DECISIONS[payload.decision]
+        await domain.transfer_action({
+            "decision_id": alert_id,
+            "action_taken": action_taken,
+            "outcome": outcome,
+        })
+    else:
+        _alert_by_id(alert_id)  # 404 nếu id không tồn tại, trước khi ghi gì
     _decisions[alert_id] = payload.decision
     return OkResponse(ok=True)
 
@@ -246,15 +412,23 @@ async def ops_decision(alert_id: str, payload: DecisionRequest) -> OkResponse:
 @app.get("/api/home", response_model=HomeContent, tags=["session"],
          summary="Nội dung động của màn Home và màn đăng nhập")
 async def home_content() -> HomeContent:
-    return catalog.HOME_CONTENT
+    cust = await domain.customer(domain.DEMO_CUSTOMER_ID)
+    if not cust:
+        return catalog.HOME_CONTENT
+    ins = await domain.insights(domain.DEMO_CUSTOMER_ID)
+    return mappers.map_home(cust, ins, datetime.now(timezone(timedelta(hours=7))))
 
 
 @app.get("/api/session/customer", response_model=Customer, tags=["session"],
          summary="Khách hàng của phiên hiện tại")
 async def session_customer() -> Customer:
-    # Chưa có đăng nhập: luôn trả khách hàng của kịch bản demo. Khi có xác thực
-    # thì đọc từ token thay vì hằng số, chữ ký hàm giữ nguyên.
-    return catalog.CUSTOMER
+    # Chưa có đăng nhập nên khách hàng của phiên là DEMO_CUSTOMER_ID. Khi có xác
+    # thực thì đọc id từ token, phần còn lại của hàm giữ nguyên.
+    cust = await domain.customer(domain.DEMO_CUSTOMER_ID)
+    if not cust:
+        return catalog.CUSTOMER
+    pf = await domain.portfolio(domain.DEMO_CUSTOMER_ID)
+    return mappers.map_customer(cust, pf)
 
 
 # ---- Màn Scam Shield ---------------------------------------------------------
@@ -262,25 +436,84 @@ async def session_customer() -> Customer:
 @app.get("/api/transfer/pending", response_model=PendingTransfer, tags=["risk"],
          summary="Lệnh chuyển tiền đang chờ duyệt")
 async def transfer_pending() -> PendingTransfer:
-    return catalog.PENDING_TRANSFER
+    """Lệnh chuyển tiền mà màn Scam Shield đang xét.
+
+    Lấy số tiền và nội dung từ fraud case trong scam-knowledge — đó là bộ kiểm
+    thử engine, nên số tiền ở đây chắc chắn đủ để engine đẩy sang mức can thiệp.
+    Người nhận là tài khoản mới nên không có trong danh sách người nhận của
+    khách; giữ phần mô tả người nhận trong catalog.
+    """
+    case = await domain.fraud_case(domain.DEMO_FRAUD_CASE_ID)
+    series = ((case or {}).get("injection") or {}).get("series") or []
+    if not series:
+        return catalog.PENDING_TRANSFER
+    return catalog.PENDING_TRANSFER.model_copy(update={"amount": int(series[0].get("amount") or 0)})
 
 
 @app.get("/api/risk/explain", response_model=RiskExplain, tags=["risk"],
          response_model_exclude_none=True,
          summary='Dữ liệu màn "Vì sao chúng tôi cảnh báo?"')
 async def risk_explain() -> RiskExplain:
-    return catalog.RISK_EXPLAIN
+    """Giải thích cảnh báo bằng dữ liệu thật.
+
+    Ba khối: điểm và phân rã yếu tố từ engine, dòng thời gian hành vi của người
+    nhận từ sự kiện tài khoản của khách, và kịch bản lừa đảo từ playbook.
+    """
+    case = await domain.fraud_case(domain.DEMO_FRAUD_CASE_ID)
+    series = ((case or {}).get("injection") or {}).get("series") or []
+    amount = int(series[0].get("amount") or 0) if series else catalog.SCAM_AMOUNT
+    pre = await _precheck_for(amount)
+    if not pre:
+        return catalog.RISK_EXPLAIN
+
+    sid = pre.get("scenario_id") or _scenario_id_in(
+        ((pre.get("factors") or {}).get("scenario_escalation") or {}).get("detail") or ""
+    )
+    scen = await domain.scenario(sid) if sid else None
+    assessment = mappers.map_assessment(pre, scen)
+
+    # Dòng thời gian: sự kiện tài khoản ngay trước giao dịch chính là bằng chứng
+    # mà yếu tố recent_context dựa vào, nên đưa đúng chúng lên màn hình.
+    events = await domain.account_events(domain.DEMO_CUSTOMER_ID)
+    timeline = mappers.map_event_timeline((events or {}).get("events") or [], amount)
+
+    similar = catalog.SIMILAR_SCENARIO
+    if scen:
+        similar = similar.model_copy(update={
+            "name": scen.get("scenario_name") or similar.name,
+            "description": scen.get("advice_body") or similar.description,
+        })
+    return RiskExplain(
+        assessment=assessment,
+        beneficiary_timeline=timeline or catalog.BENEFICIARY_TIMELINE,
+        similar_scenario=similar,
+    )
 
 
 @app.get("/api/safety-center", response_model=SafetyCenter, tags=["risk"],
          summary="Trung tâm an toàn")
 async def safety_center() -> SafetyCenter:
+    base = catalog.SAFETY_CENTER
+    case_rows = await domain.cases(limit=50)
+    if case_rows is not None:
+        mine = [c for c in (case_rows.get("cases") or [])
+                if int(c.get("customer_id") or 0) == domain.DEMO_CUSTOMER_ID]
+        history = mappers.map_safety_history(mine)
+        if history:
+            blocked = sum(1 for h in history if h.status == "blocked")
+            base = base.model_copy(update={
+                "history": history,
+                "blocked_count": blocked,
+                "warned_count": len(history),
+                "reported_count": sum(1 for h in history if h.status == "processing"),
+            })
+
     if not _protections:
-        return catalog.SAFETY_CENTER
+        return base
     # Trả về trạng thái khách đã bật/tắt, không phải giá trị mặc định.
     layers = [p.model_copy(update={"enabled": _protections.get(p.key, p.enabled)})
-              for p in catalog.SAFETY_CENTER.protections]
-    return catalog.SAFETY_CENTER.model_copy(update={"protections": layers})
+              for p in base.protections]
+    return base.model_copy(update={"protections": layers})
 
 
 @app.patch("/api/safety-center/protections/{key}", response_model=OkResponse, tags=["risk"],
@@ -302,6 +535,19 @@ async def transfer_action(payload: TransferActionRequest) -> TransferActionRespo
     một bước vào dòng thời gian, nên chuyên viên vận hành nhìn thấy ngay.
     """
     status, step_label, message = catalog.CUSTOMER_ACTIONS[payload.action]
+
+    # Ghi xuống risk-scoring để vòng đời quyết định khép lại trong database,
+    # không chỉ trong bộ nhớ gateway. Cần decision_id của lần chấm gần nhất —
+    # chưa chấm lần nào thì chỉ ghi nhận cục bộ.
+    if _last_decision_id:
+        action_taken, outcome = DOMAIN_ACTIONS[payload.action]
+        await domain.transfer_action({
+            "decision_id": _last_decision_id,
+            "action_taken": action_taken,
+            "outcome": outcome,
+        })
+        _decisions[_last_decision_id] = status
+
     _decisions[catalog.CUSTOMER_CASE_ID] = status
     _customer_steps.append(
         CaseTimelineStep(id=f"ct-cust-{len(_customer_steps) + 1}", time=_now_hms(), label=step_label, done=True)
@@ -327,7 +573,13 @@ async def ops_alert_detail(alert_id: str) -> CaseDetail:
 @app.get("/api/ops/dashboard", response_model=OpsDashboard, tags=["ops"],
          summary="Phần bổ trợ của Ops Dashboard (delta, biểu đồ, đầu vào mô hình)")
 async def ops_dashboard() -> OpsDashboard:
-    return catalog.OPS_DASHBOARD
+    decisions = await domain.risk_decisions(limit=50)
+    if not decisions:
+        return catalog.OPS_DASHBOARD
+    return mappers.map_dashboard(
+        decisions.get("decisions") or [],
+        catalog.OPS_DASHBOARD.model_inputs,  # mô tả đầu vào mô hình, không phải dữ liệu
+    )
 
 
 @app.get("/api/ops/alerts/{alert_id}/timeline", response_model=list[CaseTimelineStep], tags=["ops"],
@@ -346,7 +598,11 @@ async def ops_alert_timeline(alert_id: str) -> list[CaseTimelineStep]:
 @app.get("/api/copilot/intro", response_model=CopilotIntro, tags=["copilot"],
          summary="Lời chào, câu hỏi gợi ý và nhãn tháng của màn Copilot")
 async def copilot_intro() -> CopilotIntro:
-    return catalog.COPILOT_INTRO
+    monthly = await domain.monthly_summary(domain.DEMO_CUSTOMER_ID)
+    overview = mappers.map_overview(monthly, None) if monthly else None
+    if overview is None:
+        return catalog.COPILOT_INTRO
+    return catalog.COPILOT_INTRO.model_copy(update={"month_label": overview.budget.month_label})
 
 
 # ---- Vận hành ----------------------------------------------------------------
@@ -363,8 +619,10 @@ async def info() -> dict:
     return {
         "service": SERVICE_NAME,
         "description": "Backend-for-frontend cho msb-guardian-fe. Phục vụ 7 endpoint FE gọi.",
-        "data_source": DATA_SOURCE,
-        "integrated_with_domain_services": False,
+        "data_source": domain.data_source(),
+        "integrated_with_domain_services": domain.DOMAIN_ENABLED,
+        "demo_customer_id": domain.DEMO_CUSTOMER_ID,
+        "agent_service_configured": domain.agent_configured(),
         "endpoints": [
             "GET /api/home",
             "GET /api/session/customer",
@@ -387,7 +645,7 @@ async def info() -> dict:
             "POST /api/ops/alerts/{alert_id}/decision",
         ],
         "pending_work": [
-            "Nối các endpoint vào 5 service domain và agent-service thay cho catalog.py",
+            "agent-service: cần API key và agent id thì chat mới dùng LLM thật",
         ],
     }
 

@@ -22,17 +22,37 @@ spec:
           # CI thay :latest bằng commit SHA (xem README).
           image: vcr.vngcloud.vn/114544-ea-hackathon/guardian-gateway:latest
           imagePullPolicy: IfNotPresent
+          envFrom:
+            # Địa chỉ 5 service domain, dùng chung ConfigMap với chính các service
+            # đó nên không có chỗ nào khai báo trùng.
+            - configMapRef:
+                name: guardian-endpoints
           env:
-            # Đổi thành "domain" khi gateway đã gọi 5 service thật. Giá trị này
-            # đi ra header X-Guardian-Data-Source nên nhìn tab Network là biết
-            # response đến từ đâu, không phải đoán.
-            - name: GUARDIAN_DATA_SOURCE
-              value: "stub"
+            # Đặt "false" để chạy hoàn toàn bằng dữ liệu tạm trong catalog.py —
+            # hữu ích khi trình bày offline hoặc khi domain đang bảo trì.
+            - name: DOMAIN_ENABLED
+              value: "true"
+            # Khách hàng của kịch bản demo: người cao tuổi trong fraud case F01
+            # (giả danh công an), đúng câu chuyện màn Scam Shield kể.
+            - name: DEMO_CUSTOMER_ID
+              value: "100008"
+            - name: DEMO_FRAUD_CASE_ID
+              value: "F01"
             # Màn "Đang phân tích giao dịch..." bên FE dài đúng bằng thời gian
-            # chờ API. Demo mode giả lập ~2s; giữ 2000 để chuyển demo→live
-            # không đổi nhịp trình bày. Đặt "0" nếu muốn trả tức thì.
+            # chờ API. Engine thật đã mất một khoảng; giảm còn 800ms để tổng thời
+            # gian vẫn giống nhịp cũ mà không kéo dài thêm.
             - name: RISK_ASSESS_DELAY_MS
-              value: "2000"
+              value: "800"
+            # agent-service nằm ở namespace khác nên phải dùng tên đầy đủ. Bỏ
+            # comment khi đã có API key và agent id — nền tảng agent có xác thực
+            # riêng, phần thiết lập đó không thuộc repo này.
+            # - name: AGENT_SERVICE_URL
+            #   value: "http://agent-service.agent-platform.svc.cluster.local:8080"
+            # - name: AGENT_API_KEY
+            #   valueFrom:
+            #     secretKeyRef: { name: guardian-agent, key: API_KEY }
+            # - name: AGENT_ID
+            #   value: ""
           ports:
             - containerPort: 8080
           readinessProbe:

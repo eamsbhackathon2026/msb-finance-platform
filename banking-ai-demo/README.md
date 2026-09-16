@@ -366,30 +366,82 @@ phải biết 5 địa chỉ và không phải tự nắn dữ liệu.
 Kiểu dữ liệu trả về là bản dịch 1-1 của `src/data/types.ts` bên FE, đặt trong
 `services/guardian-gateway/models.py`.
 
-**Gateway CHƯA gọi sang 5 service domain.** Dữ liệu lấy từ `catalog.py` — bản
-đối chiếu của `src/data/demo-scenarios.ts`, giữ đúng từng con số để chuyển giữa
-demo mode và live mode không làm đổi nội dung màn hình. Bước nối vào domain là
-việc sau; cấu trúc file giữ nguyên để lúc đó chỉ phải đổi nguồn dữ liệu chứ
-không phải đổi hợp đồng.
+### Gateway đọc dữ liệu thật từ 5 service domain
 
-### Vì sao mọi response đều có header `X-Guardian-Data-Source`
+`domain.py` gọi sang 5 service, `mappers.py` dịch sang hợp đồng FE. Chia hai file
+vì hai việc khác nhau: gọi mạng có thể hỏng, còn dịch dữ liệu là hàm thuần và
+kiểm tra được mà không cần service nào chạy.
+
+| Endpoint FE | Lấy từ |
+|---|---|
+| `/api/session/customer` | `customer-profile` `/customers/{id}` + `/portfolio` |
+| `/api/home` | `/customers/{id}` + `transaction` `/insights` |
+| `/api/copilot/overview` | `transaction` `/transactions/{id}/monthly-summary` + `/insights` |
+| `/api/risk/assess` | `risk-scoring` `POST /transfer/precheck` — **engine 6 yếu tố thật** |
+| `/api/risk/explain` | precheck + `scam-knowledge` `/scams/{id}` + `customer-profile` `/events` |
+| `/api/transfer/pending` | `scam-knowledge` `/fraud-cases/{id}` |
+| `/api/transfer/action` | `risk-scoring` `POST /transfer/action` |
+| `/api/safety-center` | `action-feedback` `/cases` |
+| `/api/ops/*` | `risk-scoring` `/risk-decisions`, `/ops/summary`, `/ops/decisions` |
+| `/api/ops/alerts/{id}/decision` | `risk-scoring` `POST /transfer/action` |
+
+`catalog.py` vẫn còn và trở thành **đường lui**: service nào hỏng thì phần dữ
+liệu đó lấy từ đây thay vì để màn hình trắng. 5 service deploy độc lập nên một
+cái chết không được kéo theo cả web app.
+
+### Ba giá trị được SUY RA, không lấy thẳng từ database
+
+Ghi rõ ở đây để không ai nhầm chúng với số liệu thật:
+
+**Ngân sách tháng** — domain không có khái niệm ngân sách. Lấy 120% chi tiêu.
+Từng thử dùng thu nhập của kỳ, nhưng thu nhập gồm cả tiền tất toán sổ tiết kiệm:
+tháng 09 ra ngân sách 527 triệu trong khi chi tiêu thật 2,4 triệu.
+
+**Chuyển khoản bị loại khỏi phân tích chi tiêu** — chuyển tiền đi không phải tiêu
+dùng. Để nguyên thì một lệnh 620 triệu chiếm 100% biểu đồ và các nhóm thật bị ép
+về 0%.
+
+**Số tài khoản hiển thị** dùng `account_id` làm phần đuôi. Không endpoint nào của
+domain trả số tài khoản thật — đó là chủ ý, không phải thiếu sót.
+
+### agent-service — chỉ gọi, không sửa
+
+Chat hỏi `agent-service` khi có đủ `AGENT_SERVICE_URL`, `AGENT_API_KEY`,
+`AGENT_ID`; thiếu bất kỳ cái nào hoặc gọi hỏng thì dùng kịch bản trả lời có sẵn.
+Nền tảng agent có xác thực riêng và cần một agent tạo sẵn bên trong nó — phần
+thiết lập ấy **thuộc repo khác**, gateway không tự làm và không sửa gì ở đó.
+
+Service nằm khác namespace nên địa chỉ nội bộ là
+`http://agent-service.agent-platform.svc.cluster.local:8080`.
+
+### Header `X-Guardian-Data-Source` cho biết dữ liệu đến từ đâu
 
 `guardedCall` trong `src/lib/demo-mode.ts` bắt mọi lỗi và timeout 6s rồi **âm
 thầm** rơi về dữ liệu demo. Gateway chết hẳn thì màn hình vẫn đẹp như thường —
 nhìn giao diện không thể biết FE đang gọi được backend hay không.
 
-Nên mỗi response mang `X-Guardian-Data-Source: stub` (đổi thành `domain` qua
-biến môi trường `GUARDIAN_DATA_SOURCE` khi đã nối service thật). Mở tab Network
-thấy header này là chắc chắn dữ liệu đến từ gateway. Cách thứ hai: mở FE với
-`?demo=0&debug=1`, xem badge góc màn hình và log `[demo-mode] ...: LIVE` trong
-Console.
+Mỗi response mang header này với một trong ba giá trị, tính theo **từng request**:
 
-### Hai biến môi trường
+| Giá trị | Nghĩa |
+|---|---|
+| `domain` | mọi lời gọi sang service domain đều thành công |
+| `degraded` | có ít nhất một lời gọi hỏng, phần đó lấy từ `catalog.py` |
+| `stub` | không gọi domain lần nào (`DOMAIN_ENABLED=false`, hoặc endpoint tĩnh) |
+
+Mở tab Network là biết ngay, không phải đoán. `degraded` nghĩa là màn hình vẫn
+đẹp nhưng một phần số liệu không phải dữ liệu thật — đúng thứ cần nhìn thấy
+trước khi trình bày.
+
+### Biến môi trường
 
 | Biến | Mặc định | Nội dung |
 |---|---|---|
-| `GUARDIAN_DATA_SOURCE` | `stub` | Giá trị trả ra trong header nguồn dữ liệu |
-| `RISK_ASSESS_DELAY_MS` | `2000` | Độ trễ cố ý của `/api/risk/assess` |
+| `DOMAIN_ENABLED` | `true` | `false` để chạy hoàn toàn bằng `catalog.py` |
+| `DEMO_CUSTOMER_ID` | `100008` | Khách hàng của kịch bản demo |
+| `DEMO_FRAUD_CASE_ID` | `F01` | Fraud case cung cấp số tiền và nội dung chuyển khoản |
+| `RISK_ASSESS_DELAY_MS` | `800` | Độ trễ cố ý thêm vào `/api/risk/assess` |
+| `PEER_TIMEOUT_SECONDS` | `5` | Thời gian chờ mỗi lời gọi sang domain |
+| `AGENT_SERVICE_URL` / `AGENT_API_KEY` / `AGENT_ID` | rỗng | Thiếu thì chat dùng kịch bản có sẵn |
 
 `RISK_ASSESS_DELAY_MS` cần giải thích: màn "Đang phân tích giao dịch..." bên FE
 hiển thị theo `isPending` của react-query, tức là nó dài **đúng bằng** thời gian

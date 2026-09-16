@@ -9,6 +9,12 @@ bộ test chạy trong tích tắc thay vì vài chục giây.
 import os
 import sys
 
+# Test chạy tách khỏi 5 service domain: chúng không tồn tại trong môi trường
+# test, và nếu để bật thì mỗi lời gọi phải chờ hết timeout rồi mới rơi về dữ
+# liệu tạm — bộ test sẽ mất hàng phút và kết quả phụ thuộc mạng.
+# Phần ánh xạ domain được kiểm tra riêng bằng hàm thuần trong test_mappers.py.
+os.environ.setdefault("DOMAIN_ENABLED", "false")
+
 os.environ.setdefault("RISK_ASSESS_DELAY_MS", "0")
 os.environ.setdefault("CHAT_TOKEN_DELAY_MS", "0")
 
