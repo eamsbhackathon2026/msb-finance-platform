@@ -253,13 +253,19 @@ async def agent_answer(question: str) -> str | None:
     hackathon-agent-platform):
 
         POST /v1/agents/{agentId}/runs
+        X-API-Key: <khóa api-key, scope runs:write>
         {"input": {"message": "..."}, "mode": "sync"}
         → 200 {"status": "...", "output": "câu trả lời", ...}
 
-    `input` là OBJECT có khóa `message`, không phải chuỗi, và chế độ đồng bộ
-    khai bằng `mode: "sync"` chứ không phải `stream: false`. Gửi sai thì nền
-    tảng trả 400 validation_failed và chat lặng lẽ rơi về kịch bản có sẵn —
-    nhìn bên ngoài y như chưa cấu hình agent.
+    Hai cái dễ sai, cả hai đều cho ra 4xx rồi chat lặng lẽ rơi về kịch bản —
+    nhìn bên ngoài y như chưa cấu hình agent:
+
+    1) XÁC THỰC. api-key phải đi trong header `X-API-Key`, KHÔNG phải
+       `Authorization: Bearer`. Endpoint runs nhận cả JWT (bearer) lẫn api-key,
+       nhưng api-key chỉ được nhận diện qua X-API-Key; gửi api-key dưới dạng
+       Bearer sẽ nhận 401 unauthenticated.
+    2) THÂN REQUEST. `input` là OBJECT có khóa `message`, không phải chuỗi, và
+       chế độ đồng bộ khai bằng `mode: "sync"` chứ không phải `stream: false`.
 
     Mọi lỗi đều trả None để phần gọi dùng kịch bản có sẵn.
     """
@@ -270,7 +276,7 @@ async def agent_answer(question: str) -> str | None:
         async with httpx.AsyncClient(timeout=max(PEER_TIMEOUT, 60.0)) as client:
             r = await client.post(
                 f"{AGENT_SERVICE_URL}/v1/agents/{AGENT_ID}/runs",
-                headers={"Authorization": f"Bearer {AGENT_API_KEY}"},
+                headers={"X-API-Key": AGENT_API_KEY},
                 json={"input": {"message": question}, "mode": "sync"},
             )
             r.raise_for_status()
