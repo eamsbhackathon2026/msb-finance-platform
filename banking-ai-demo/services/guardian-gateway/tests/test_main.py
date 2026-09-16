@@ -167,9 +167,13 @@ def test_note_la_tuy_chon():
 
 # ---- POST /api/copilot/chat (SSE) --------------------------------------------
 
-def _doc_token(body: str) -> tuple[list[str], bool]:
-    """Giải mã stream đúng như bộ parse trong src/lib/api.ts."""
-    tokens, thay_done = [], False
+def _doc_token(body: str) -> tuple[list[str], bool, dict | None]:
+    """Giải mã stream đúng như bộ parse trong src/lib/api.ts.
+
+    Stream có hai loại sự kiện: {"token": "..."} lặp lại, và tối đa một
+    {"chart": {...}} phát sau khi hết token.
+    """
+    tokens, thay_done, chart = [], False, None
     for line in body.split("\n"):
         if not line.startswith("data:"):
             continue
@@ -177,15 +181,19 @@ def _doc_token(body: str) -> tuple[list[str], bool]:
         if payload == "[DONE]":
             thay_done = True
             continue
-        tokens.append(json.loads(payload)["token"])
-    return tokens, thay_done
+        parsed = json.loads(payload)
+        if "token" in parsed:
+            tokens.append(parsed["token"])
+        elif "chart" in parsed:
+            chart = parsed["chart"]
+    return tokens, thay_done, chart
 
 
 def test_chat_tra_dung_dinh_dang_sse():
     r = client.post("/api/copilot/chat", json={"message": "Tháng này tôi tiêu nhiều nhất vào đâu?"})
     assert r.status_code == 200
     assert r.headers["content-type"].startswith("text/event-stream")
-    tokens, thay_done = _doc_token(r.text)
+    tokens, thay_done, _ = _doc_token(r.text)
     assert thay_done, "thiếu dòng kết thúc data: [DONE]"
     assert tokens, "không có token nào"
 
@@ -194,20 +202,20 @@ def test_ghep_token_lai_ra_dung_cau_tra_loi():
     # Tách theo (\s+) và giữ nguyên khoảng trắng: ghép lại phải khớp từng ký tự,
     # nếu không câu trả lời hiện ra sẽ dính chữ.
     r = client.post("/api/copilot/chat", json={"message": "Tôi có thể tiết kiệm bao nhiêu?"})
-    tokens, _ = _doc_token(r.text)
+    tokens, _, _ = _doc_token(r.text)
     assert "".join(tokens) == catalog.SCRIPTED_REPLIES[1][1]
 
 
 def test_cau_hoi_la_roi_ve_cau_tra_loi_mac_dinh():
     r = client.post("/api/copilot/chat", json={"message": "thời tiết hôm nay thế nào"})
-    tokens, _ = _doc_token(r.text)
+    tokens, _, _ = _doc_token(r.text)
     assert "".join(tokens) == catalog.FALLBACK_REPLY
 
 
 def test_tieng_viet_khong_bi_escape_thanh_unicode():
     r = client.post("/api/copilot/chat", json={"message": "chi tiêu"})
     assert "\\u1ec1" not in r.text  # ensure_ascii=False
-    tokens, _ = _doc_token(r.text)
+    tokens, _, _ = _doc_token(r.text)
     assert "₫" in "".join(tokens)
 
 
@@ -231,17 +239,119 @@ def test_moi_response_deu_co_header_nguon_du_lieu():
 def test_info_noi_ro_chua_noi_domain():
     body = client.get("/info").json()
     assert body["integrated_with_domain_services"] is False
-    assert len(body["endpoints"]) == 7
+    assert len(body["endpoints"]) == 14
 
 
-def test_openapi_phuc_vu_dung_7_endpoint_cua_fe():
+def test_openapi_phuc_vu_dung_cac_endpoint_fe_goi():
     paths = client.get("/openapi.json").json()["paths"]
     assert {p for p in paths if p.startswith("/api/")} == {
+        "/api/session/customer",
         "/api/copilot/overview",
+        "/api/copilot/suggestions",
         "/api/copilot/chat",
+        "/api/transfer/pending",
         "/api/risk/assess",
+        "/api/risk/explain",
+        "/api/safety-center",
         "/api/ops/metrics",
+        "/api/ops/dashboard",
         "/api/ops/alerts",
         "/api/ops/alerts/{alert_id}",
+        "/api/ops/alerts/{alert_id}/timeline",
         "/api/ops/alerts/{alert_id}/decision",
     }
+
+
+# ---- Các endpoint gộp theo màn hình ------------------------------------------
+
+CUSTOMER_KEYS = {"id", "name", "maskedAccount", "balance"}
+TIMELINE_EVENT_KEYS = {"id", "label", "time", "tone"}
+SAFETY_CENTER_KEYS = {"safetyScore", "scoreLabel", "blockedCount", "warnedCount",
+                      "reportedCount", "history", "protections"}
+OPS_DASHBOARD_KEYS = {"deltas", "hourlyAlerts", "scenarioCounts", "modelInputs"}
+CASE_STEP_KEYS = {"id", "time", "label", "done"}
+
+
+def test_khach_hang_cua_phien():
+    body = client.get("/api/session/customer").json()
+    assert set(body) == CUSTOMER_KEYS
+    assert body["maskedAccount"] == "**** 4821"
+    assert body["balance"] == 47_820_000
+
+
+def test_lenh_chuyen_tien_dang_cho():
+    body = client.get("/api/transfer/pending").json()
+    assert set(body) == {"amount", "beneficiary"}
+    assert body["amount"] == 85_000_000
+    assert set(body["beneficiary"]) == BENEFICIARY_KEYS
+
+
+def test_man_giai_thich_rui_ro():
+    body = client.get("/api/risk/explain").json()
+    assert set(body) == {"assessment", "beneficiaryTimeline", "similarScenario"}
+    assert set(body["assessment"]) == RISK_ASSESSMENT_KEYS
+    assert body["assessment"]["score"] == 87
+    for ev in body["beneficiaryTimeline"]:
+        # detail là optional bên TS nên chỉ được phép thiếu, không được là null.
+        assert TIMELINE_EVENT_KEYS <= set(ev) <= TIMELINE_EVENT_KEYS | {"detail"}
+        assert ev["tone"] in {"neutral", "warning", "danger"}
+    assert body["similarScenario"]["reportedCases"] == 1_284
+
+
+def test_trung_tam_an_toan():
+    body = client.get("/api/safety-center").json()
+    assert set(body) == SAFETY_CENTER_KEYS
+    assert len(body["protections"]) == 4
+    # store.ts dựng map protections theo key nên key phải là duy nhất.
+    keys = [p["key"] for p in body["protections"]]
+    assert len(keys) == len(set(keys))
+    for h in body["history"]:
+        assert h["status"] in {"blocked", "ignored", "processing"}
+
+
+def test_ops_dashboard():
+    body = client.get("/api/ops/dashboard").json()
+    assert set(body) == OPS_DASHBOARD_KEYS
+    # deltas phải khớp đúng 4 khoá của OpsMetrics, vì FE tra delta theo tên KPI.
+    assert set(body["deltas"]) == OPS_METRICS_KEYS
+    for d in body["deltas"].values():
+        assert set(d) == {"valueLabel", "up"}
+    assert len(body["hourlyAlerts"]) == 24
+    assert len(body["modelInputs"]) == 4
+
+
+def test_dong_thoi_gian_cua_case():
+    body = client.get("/api/ops/alerts/ALT-4092/timeline").json()
+    assert all(set(step) == CASE_STEP_KEYS for step in body)
+    assert body[-1]["done"] is False   # bước cuối là "chờ quyết định"
+
+
+def test_dong_thoi_gian_cua_case_khong_ton_tai_tra_404():
+    assert client.get("/api/ops/alerts/ALT-0000/timeline").status_code == 404
+
+
+def test_goi_y_cau_hoi():
+    body = client.get("/api/copilot/suggestions").json()
+    assert isinstance(body, list) and len(body) == 3
+    # Mỗi gợi ý phải khớp một kịch bản trả lời, nếu không bấm vào sẽ ra câu
+    # trả lời mặc định — người xem tưởng chat hỏng.
+    for q in body:
+        r = client.post("/api/copilot/chat", json={"message": q})
+        tokens, _, _ = _doc_token(r.text)
+        assert "".join(tokens) != catalog.FALLBACK_REPLY, q
+
+
+def test_chat_ve_chi_tieu_kem_bieu_do():
+    r = client.post("/api/copilot/chat", json={"message": "Tháng này tôi tiêu nhiều nhất vào đâu?"})
+    tokens, done, chart = _doc_token(r.text)
+    assert done and tokens
+    assert chart is not None, "câu hỏi về chi tiêu phải kèm biểu đồ"
+    assert chart["type"] == "bar"
+    assert len(chart["data"]) == 5
+    assert set(chart["data"][0]) == {"label", "value"}
+
+
+def test_chat_khac_khong_kem_bieu_do():
+    r = client.post("/api/copilot/chat", json={"message": "Tôi có thể tiết kiệm bao nhiêu?"})
+    _, _, chart = _doc_token(r.text)
+    assert chart is None

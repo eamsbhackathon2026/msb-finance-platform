@@ -108,3 +108,121 @@ class DecisionRequest(Contract):
 
 class OkResponse(Contract):
     ok: bool
+
+
+# ---- Màn Home / Login ---------------------------------------------------------
+
+class Customer(Contract):
+    id: str
+    name: str
+    masked_account: str
+    balance: int
+
+
+# ---- Màn Scam Shield ----------------------------------------------------------
+
+class PendingTransfer(Contract):
+    """Lệnh chuyển tiền đang chờ duyệt mà màn cảnh báo đang xét."""
+    amount: int
+    beneficiary: Beneficiary
+
+
+class TimelineEvent(Contract):
+    id: str
+    label: str
+    detail: str | None = None
+    time: str
+    tone: Literal["neutral", "warning", "danger"]
+
+
+class SimilarScenario(Contract):
+    name: str
+    description: str
+    reported_cases: int
+
+
+class RiskExplain(Contract):
+    """Toàn bộ dữ liệu màn "Vì sao chúng tôi cảnh báo?" trong một lời gọi."""
+    assessment: RiskAssessment
+    beneficiary_timeline: list[TimelineEvent]
+    similar_scenario: SimilarScenario
+
+
+# ---- Màn Trung tâm an toàn ----------------------------------------------------
+
+class SafetyHistoryItem(Contract):
+    id: str
+    date: str
+    amount: int
+    scenario_name: str
+    status: Literal["blocked", "ignored", "processing"]
+
+
+class ProtectionLayer(Contract):
+    key: str
+    label: str
+    description: str
+    enabled: bool
+
+
+class SafetyCenter(Contract):
+    safety_score: int
+    score_label: str
+    blocked_count: int
+    warned_count: int
+    reported_count: int
+    history: list[SafetyHistoryItem]
+    protections: list[ProtectionLayer]
+
+
+# ---- Màn Ops Dashboard --------------------------------------------------------
+
+class KpiDelta(Contract):
+    value_label: str
+    up: bool
+
+
+class OpsDeltas(Contract):
+    """Khớp Record<keyof OpsMetrics, KpiDelta> bên TypeScript."""
+    scanned_today: KpiDelta
+    alerts_fired: KpiDelta
+    cancel_rate_pct: KpiDelta
+    protected_value_vnd: KpiDelta
+
+
+class HourlyAlertPoint(Contract):
+    hour: str
+    count: int
+
+
+class ScenarioCount(Contract):
+    name: str
+    count: int
+
+
+class OpsDashboard(Contract):
+    """Phần bổ trợ của Ops Dashboard; KPI chính vẫn ở /api/ops/metrics."""
+    deltas: OpsDeltas
+    hourly_alerts: list[HourlyAlertPoint]
+    scenario_counts: list[ScenarioCount]
+    model_inputs: list[str]
+
+
+class CaseTimelineStep(Contract):
+    id: str
+    time: str
+    label: str
+    done: bool
+
+
+# ---- Chat ---------------------------------------------------------------------
+
+class ChatChartPoint(Contract):
+    label: str
+    value: int
+
+
+class ChatChart(Contract):
+    type: Literal["bar"]
+    title: str
+    data: list[ChatChartPoint]

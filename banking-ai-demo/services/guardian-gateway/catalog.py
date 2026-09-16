@@ -14,13 +14,29 @@ from __future__ import annotations
 from models import (
     Beneficiary,
     BudgetSummary,
+    CaseTimelineStep,
+    ChatChart,
+    ChatChartPoint,
     CopilotOverview,
+    Customer,
+    HourlyAlertPoint,
     Insight,
+    KpiDelta,
+    OpsDashboard,
+    OpsDeltas,
     OpsMetrics,
+    PendingTransfer,
+    ProtectionLayer,
     RiskAssessment,
+    RiskExplain,
     RiskSignal,
+    SafetyCenter,
+    SafetyHistoryItem,
     ScamAlert,
+    ScenarioCount,
+    SimilarScenario,
     SpendingCategory,
+    TimelineEvent,
 )
 
 SCAM_AMOUNT = 85_000_000
@@ -225,31 +241,36 @@ OPS_ALERTS = [
     ),
 ]
 
-SPENDING_CHART = {
-    "type": "bar",
-    "title": "Chi tiêu theo nhóm · Tháng 9/2026",
-    "data": [{"label": c.label_vi, "value": c.amount} for c in CATEGORIES],
-}
+SPENDING_CHART = ChatChart(
+    type="bar",
+    title="Chi tiêu theo nhóm · Tháng 9/2026",
+    data=[ChatChartPoint(label=c.label_vi, value=c.amount) for c in CATEGORIES],
+)
 
 # Câu trả lời viết sẵn cho chat. Thứ tự có ý nghĩa: mẫu khớp đầu tiên thắng.
+# (mẫu khớp, nội dung, biểu đồ kèm theo hoặc None).
+# Vị trí 1 giữ nguyên là nội dung để test cũ không phải sửa.
 SCRIPTED_REPLIES = [
     (
         r"tiêu nhiều nhất|tiêu bao nhiêu|chi tiêu",
         "Từ 01/09 đến 15/09 bạn đã chi 12.460.000 ₫, bằng 69% ngân sách tháng. Nhóm lớn nhất "
         "là Ăn uống với 4.230.000 ₫ — tăng 34% so với tháng 8, chủ yếu từ GrabFood và cà phê "
         "sáng. Dưới đây là bức tranh đầy đủ theo nhóm:",
+        SPENDING_CHART,
     ),
     (
         r"tiết kiệm",
         "Với nhịp chi hiện tại, dự kiến cuối tháng bạn dư khoảng 6.500.000 ₫ sau khi trừ các "
         "hoá đơn định kỳ. Tôi gợi ý trích 3.000.000 ₫ vào Tiết kiệm mục tiêu ngay hôm nay — "
         "phần còn lại vẫn đủ thoải mái cho 2 tuần cuối tháng.",
+        None,
     ),
     (
         r"dự báo|số dư",
         "Số dư hiện tại là 47.820.000 ₫. Sau khi trừ các khoản chi dự kiến (hoá đơn nước, di "
         "chuyển và ăn uống theo thói quen ~5.500.000 ₫), số dư ngày 30/09 ước tính khoảng "
         "42.300.000 ₫. Không có hoá đơn lớn nào đến hạn trong 2 tuần tới.",
+        None,
     ),
 ]
 
@@ -257,3 +278,127 @@ FALLBACK_REPLY = (
     "Tôi có thể giúp bạn phân tích chi tiêu, dự báo dòng tiền và gợi ý tiết kiệm dựa trên "
     'giao dịch của bạn tại MSB. Bạn thử hỏi: "Tháng này tôi tiêu nhiều nhất vào đâu?" nhé.'
 )
+
+
+# ============ KHÁCH HÀNG ============
+
+CUSTOMER = Customer(
+    id="cus-001",
+    name="Nguyễn Minh Anh",
+    masked_account="**** 4821",
+    balance=47_820_000,
+)
+
+
+# ============ LỆNH CHUYỂN TIỀN ĐANG CHỜ (màn Scam Shield) ============
+
+PENDING_TRANSFER = PendingTransfer(amount=SCAM_AMOUNT, beneficiary=MAIN_BENEFICIARY)
+
+BENEFICIARY_TIMELINE = [
+    TimelineEvent(id="tl-1", time="13/09/2026", label="Tài khoản người nhận được mở tại VPBank", tone="neutral"),
+    TimelineEvent(
+        id="tl-2",
+        time="14/09/2026",
+        label="Nhận giao dịch đầu tiên 92.000.000 ₫",
+        detail="Từ một nạn nhân khác, đã có báo cáo tra soát",
+        tone="warning",
+    ),
+    TimelineEvent(
+        id="tl-3",
+        time="14–15/09/2026",
+        label="12 báo cáo lừa đảo từ cộng đồng",
+        detail="Ghi nhận trên hệ thống cảnh báo liên ngân hàng",
+        tone="danger",
+    ),
+    TimelineEvent(id="tl-4", time="Hôm nay · 09:41", label="Giao dịch 85.000.000 ₫ của bạn được tạm giữ", tone="danger"),
+]
+
+SIMILAR_SCENARIO = SimilarScenario(
+    name=MAIN_SCENARIO,
+    description=(
+        "Kẻ gian gọi điện tự xưng công an, thông báo bạn liên quan tới một vụ án và yêu cầu "
+        'chuyển tiền vào "tài khoản tạm giữ" để chứng minh vô tội. Chúng tạo áp lực tâm lý, '
+        "yêu cầu giữ bí mật và thao túng nạn nhân chuyển tiền ngay trong cuộc gọi."
+    ),
+    reported_cases=1_284,
+)
+
+RISK_EXPLAIN = RiskExplain(
+    assessment=MAIN_ASSESSMENT,
+    beneficiary_timeline=BENEFICIARY_TIMELINE,
+    similar_scenario=SIMILAR_SCENARIO,
+)
+
+
+# ============ TRUNG TÂM AN TOÀN ============
+
+SAFETY_CENTER = SafetyCenter(
+    safety_score=92,
+    score_label="Rất an toàn",
+    blocked_count=3,
+    warned_count=7,
+    reported_count=2,
+    history=[
+        SafetyHistoryItem(id="sh-1", date="2026-09-15", amount=85_000_000, scenario_name=MAIN_SCENARIO, status="processing"),
+        SafetyHistoryItem(id="sh-2", date="2026-08-28", amount=12_000_000, scenario_name="Trúng thưởng giả", status="blocked"),
+        SafetyHistoryItem(id="sh-3", date="2026-08-15", amount=5_600_000, scenario_name="Giả mạo người thân", status="ignored"),
+        SafetyHistoryItem(id="sh-4", date="2026-08-02", amount=32_000_000, scenario_name="Đầu tư ảo", status="blocked"),
+    ],
+    protections=[
+        ProtectionLayer(key="realtime", label="Cảnh báo lừa đảo realtime", description="Chấm điểm rủi ro mọi giao dịch chuyển tiền", enabled=True),
+        ProtectionLayer(key="beneficiary", label="Kiểm tra tài khoản nhận", description="Đối chiếu danh sách cảnh báo liên ngân hàng", enabled=True),
+        ProtectionLayer(key="limit", label="Giới hạn giao dịch lớn", description="Xác nhận thêm với giao dịch trên 50.000.000 ₫", enabled=True),
+        ProtectionLayer(key="biometric", label="Xác thực sinh trắc học", description="Face ID cho mọi giao dịch chuyển tiền", enabled=False),
+    ],
+)
+
+
+# ============ OPS DASHBOARD ============
+
+OPS_DASHBOARD = OpsDashboard(
+    deltas=OpsDeltas(
+        scanned_today=KpiDelta(value_label="+12% so với hôm qua", up=True),
+        alerts_fired=KpiDelta(value_label="+8% so với hôm qua", up=True),
+        cancel_rate_pct=KpiDelta(value_label="+5 điểm so với hôm qua", up=True),
+        protected_value_vnd=KpiDelta(value_label="+1,2 tỷ so với hôm qua", up=True),
+    ),
+    hourly_alerts=[
+        HourlyAlertPoint(hour=h, count=c)
+        for h, c in [
+            ("00h", 1), ("01h", 0), ("02h", 1), ("03h", 0), ("04h", 1), ("05h", 2),
+            ("06h", 4), ("07h", 7), ("08h", 12), ("09h", 16), ("10h", 14), ("11h", 11),
+            ("12h", 8), ("13h", 7), ("14h", 9), ("15h", 10), ("16h", 8), ("17h", 6),
+            ("18h", 5), ("19h", 6), ("20h", 8), ("21h", 4), ("22h", 2), ("23h", 0),
+        ]
+    ],
+    scenario_counts=[
+        ScenarioCount(name=MAIN_SCENARIO, count=48),
+        ScenarioCount(name="Đầu tư ảo", count=34),
+        ScenarioCount(name="Giả nhân viên ngân hàng", count=26),
+        ScenarioCount(name="Trúng thưởng giả", count=19),
+        ScenarioCount(name="Giả mạo người thân", count=15),
+    ],
+    model_inputs=[
+        "Lịch sử giao dịch 12 tháng của khách hàng",
+        "Danh sách cảnh báo cộng đồng & liên ngân hàng",
+        "Hành vi thiết bị & phiên đăng nhập",
+        "Hồ sơ tài khoản người nhận",
+    ],
+)
+
+CASE_TIMELINE = [
+    CaseTimelineStep(id="ct-1", time="09:41:02", label="Khách hàng khởi tạo lệnh chuyển 85.000.000 ₫", done=True),
+    CaseTimelineStep(id="ct-2", time="09:41:03", label="Risk Engine chấm điểm 87/100 — mức cao", done=True),
+    CaseTimelineStep(id="ct-3", time="09:41:03", label="Hiển thị cảnh báo Scam Shield cho khách hàng", done=True),
+    CaseTimelineStep(id="ct-4", time="09:41:20", label="Tạo case cho chuyên viên vận hành", done=True),
+    CaseTimelineStep(id="ct-5", time="—", label="Chờ quyết định xử lý", done=False),
+]
+
+
+# ============ GỢI Ý CÂU HỎI CHO CHAT ============
+
+CHAT_SUGGESTIONS = [
+    "Tháng này tôi tiêu nhiều nhất vào đâu?",
+    "Tôi có thể tiết kiệm bao nhiêu?",
+    "Dự báo số dư cuối tháng",
+]

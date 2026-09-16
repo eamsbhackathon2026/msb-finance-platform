@@ -42,12 +42,18 @@ from fastapi.responses import JSONResponse, StreamingResponse
 import catalog
 from models import (
     AssessRequest,
+    CaseTimelineStep,
     ChatRequest,
     CopilotOverview,
+    Customer,
     DecisionRequest,
     OkResponse,
+    OpsDashboard,
     OpsMetrics,
+    PendingTransfer,
     RiskAssessment,
+    RiskExplain,
+    SafetyCenter,
     ScamAlert,
 )
 
@@ -77,6 +83,7 @@ app = FastAPI(
         "domain. Kiểm tra header `X-Guardian-Data-Source` để biết response đến từ đâu."
     ),
     openapi_tags=[
+        {"name": "session", "description": "Khách hàng của phiên hiện tại."},
         {"name": "copilot", "description": "Financial Copilot — tổng quan chi tiêu và chat."},
         {"name": "risk", "description": "Scam Shield — chấm điểm rủi ro cho một lệnh chuyển tiền."},
         {"name": "ops", "description": "Ops Dashboard — chỉ số vận hành, danh sách cảnh báo, quyết định xử lý."},
@@ -143,10 +150,10 @@ async def copilot_chat(payload: ChatRequest) -> StreamingResponse:
     Định dạng phải khớp đúng bộ parse bên FE: mỗi dòng `data: {"token": "..."}`,
     kết thúc bằng `data: [DONE]`. FE bỏ qua dòng không bắt đầu bằng `data:`.
     """
-    reply = catalog.FALLBACK_REPLY
-    for pattern, text in catalog.SCRIPTED_REPLIES:
+    reply, chart = catalog.FALLBACK_REPLY, None
+    for pattern, text, attached in catalog.SCRIPTED_REPLIES:
         if re.search(pattern, payload.message, re.IGNORECASE):
-            reply = text
+            reply, chart = text, attached
             break
 
     async def stream() -> AsyncIterator[bytes]:
@@ -156,6 +163,11 @@ async def copilot_chat(payload: ChatRequest) -> StreamingResponse:
             chunk = json.dumps({"token": token}, ensure_ascii=False)
             yield f"data: {chunk}\n\n".encode()
             await asyncio.sleep(CHAT_TOKEN_DELAY_MS / 1000)
+        if chart is not None:
+            # Sự kiện riêng sau khi hết token. FE bỏ qua object không có "token"
+            # nếu chưa hỗ trợ, nên thêm dòng này không làm hỏng client cũ.
+            payload_chart = json.dumps({"chart": chart.model_dump(by_alias=True)}, ensure_ascii=False)
+            yield f"data: {payload_chart}\n\n".encode()
         yield b"data: [DONE]\n\n"
 
     return StreamingResponse(
@@ -207,6 +219,60 @@ async def ops_decision(alert_id: str, payload: DecisionRequest) -> OkResponse:
     return OkResponse(ok=True)
 
 
+# ---- Màn Home / Login --------------------------------------------------------
+
+@app.get("/api/session/customer", response_model=Customer, tags=["session"],
+         summary="Khách hàng của phiên hiện tại")
+async def session_customer() -> Customer:
+    # Chưa có đăng nhập: luôn trả khách hàng của kịch bản demo. Khi có xác thực
+    # thì đọc từ token thay vì hằng số, chữ ký hàm giữ nguyên.
+    return catalog.CUSTOMER
+
+
+# ---- Màn Scam Shield ---------------------------------------------------------
+
+@app.get("/api/transfer/pending", response_model=PendingTransfer, tags=["risk"],
+         summary="Lệnh chuyển tiền đang chờ duyệt")
+async def transfer_pending() -> PendingTransfer:
+    return catalog.PENDING_TRANSFER
+
+
+@app.get("/api/risk/explain", response_model=RiskExplain, tags=["risk"],
+         response_model_exclude_none=True,
+         summary='Dữ liệu màn "Vì sao chúng tôi cảnh báo?"')
+async def risk_explain() -> RiskExplain:
+    return catalog.RISK_EXPLAIN
+
+
+@app.get("/api/safety-center", response_model=SafetyCenter, tags=["risk"],
+         summary="Trung tâm an toàn")
+async def safety_center() -> SafetyCenter:
+    return catalog.SAFETY_CENTER
+
+
+# ---- Màn Ops -----------------------------------------------------------------
+
+@app.get("/api/ops/dashboard", response_model=OpsDashboard, tags=["ops"],
+         summary="Phần bổ trợ của Ops Dashboard (delta, biểu đồ, đầu vào mô hình)")
+async def ops_dashboard() -> OpsDashboard:
+    return catalog.OPS_DASHBOARD
+
+
+@app.get("/api/ops/alerts/{alert_id}/timeline", response_model=list[CaseTimelineStep], tags=["ops"],
+         summary="Dòng thời gian xử lý của một case")
+async def ops_alert_timeline(alert_id: str) -> list[CaseTimelineStep]:
+    _alert_by_id(alert_id)  # 404 nếu id không tồn tại
+    return catalog.CASE_TIMELINE
+
+
+# ---- Gợi ý câu hỏi cho chat --------------------------------------------------
+
+@app.get("/api/copilot/suggestions", response_model=list[str], tags=["copilot"],
+         summary="Câu hỏi gợi ý hiển thị dưới ô chat")
+async def copilot_suggestions() -> list[str]:
+    return catalog.CHAT_SUGGESTIONS
+
+
 # ---- Vận hành ----------------------------------------------------------------
 
 @app.get("/health", tags=["vận hành"], summary="Kiểm tra sống")
@@ -224,18 +290,23 @@ async def info() -> dict:
         "data_source": DATA_SOURCE,
         "integrated_with_domain_services": False,
         "endpoints": [
+            "GET /api/session/customer",
             "GET /api/copilot/overview",
+            "GET /api/copilot/suggestions",
             "POST /api/copilot/chat",
+            "GET /api/transfer/pending",
             "POST /api/risk/assess",
+            "GET /api/risk/explain",
+            "GET /api/safety-center",
             "GET /api/ops/metrics",
+            "GET /api/ops/dashboard",
             "GET /api/ops/alerts",
             "GET /api/ops/alerts/{alert_id}",
+            "GET /api/ops/alerts/{alert_id}/timeline",
             "POST /api/ops/alerts/{alert_id}/decision",
         ],
         "pending_work": [
-            "Nối 7 endpoint vào 5 service domain thay cho catalog.py",
-            "FE: streamChat chưa nhận chart ở nhánh live (src/lib/api.ts)",
-            "FE: getCaseTimeline chưa có nhánh gọi mạng (src/lib/api.ts)",
+            "Nối các endpoint vào 5 service domain và agent-service thay cho catalog.py",
         ],
     }
 
