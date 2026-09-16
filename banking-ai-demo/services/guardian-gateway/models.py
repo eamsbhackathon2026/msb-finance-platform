@@ -280,6 +280,9 @@ class ChatTable(Contract):
     rows: list[ChatTableRow]
     total_label: str
     total_amount: int
+    # Nhãn cột đầu: "Nhóm" khi mỗi dòng là một nhóm chi tiêu, "Tháng" khi bảng
+    # so sánh các tháng. FE viết hoa khi hiển thị.
+    row_header: str = "Nhóm"
 
 
 # ---- Màn Home / Copilot -------------------------------------------------------

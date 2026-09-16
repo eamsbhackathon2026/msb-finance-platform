@@ -596,7 +596,7 @@ def test_chat_chi_tieu_thang_dinh_kem_bang_va_bieu_do():
     assert table is not None, "câu hỏi chi tiêu tháng phải kèm bảng"
     assert chart is not None and chart["type"] == "bar"
     # Hợp đồng bảng khớp FE
-    assert set(table) == {"title", "rows", "totalLabel", "totalAmount"}
+    assert set(table) == {"title", "rows", "totalLabel", "totalAmount", "rowHeader"}
     assert table["rows"] and set(table["rows"][0]) >= {"label", "amount", "pct"}
     # Số trong bảng cộng đúng bằng tổng, và bằng dữ liệu biểu đồ (một nguồn số).
     assert sum(row["amount"] for row in table["rows"]) == table["totalAmount"]

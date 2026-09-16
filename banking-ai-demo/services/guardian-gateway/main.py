@@ -338,6 +338,7 @@ def _months_compare_visual(report: MonthlyReport) -> tuple[ChatTable | None, Cha
             trend_pct=round(m.delta_vs_prev_pct) if m.delta_vs_prev_pct is not None else None,
         ) for m in months],
         total_label=f"Tổng {len(months)} tháng", total_amount=sum(m.expense for m in months),
+        row_header="Tháng",
     )
     chart = ChatChart(type="bar", title="Chi tiêu theo tháng",
                       data=[ChatChartPoint(label=f"T{m.month}", value=m.expense) for m in months])
