@@ -259,8 +259,12 @@ class CaseCustomerProfile(Contract):
     customer_since: str
     segment: str
     avg_transfer_vnd: int
-    alerts90d_count: int
-    alerts90d_top_score: int
+    # KHÔNG đặt tên kiểu alerts90d_count: to_camel coi ranh giới chữ số là ranh
+    # giới từ nên sinh ra alerts90DCount (chữ D hoa), lệch khỏi hợp đồng TS mà
+    # không có gì báo lỗi — FE chỉ nhận undefined.
+    recent_alerts_window_days: int
+    recent_alerts_count: int
+    recent_alerts_top_score: int
 
 
 class CaseModelInfo(Contract):

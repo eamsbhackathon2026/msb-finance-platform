@@ -445,8 +445,9 @@ CASE_DETAIL = CaseDetail(
         customer_since="2019",
         segment="Lương",
         avg_transfer_vnd=9_400_000,
-        alerts90d_count=1,
-        alerts90d_top_score=58,
+        recent_alerts_window_days=90,
+        recent_alerts_count=1,
+        recent_alerts_top_score=58,
     ),
     model=CaseModelInfo(
         version="v2.3",

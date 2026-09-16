@@ -430,10 +430,49 @@ def test_phien_lam_viec_ops():
 def test_chi_tiet_case():
     body = client.get("/api/ops/alerts/ALT-4092/detail").json()
     assert set(body) == {"transaction", "customerProfile", "model", "noteChips"}
+    # So khớp CẢ key bên trong, không chỉ key cấp ngoài. Bản trước chỉ kiểm tra
+    # cấp ngoài nên để lọt alerts90DCount: alias_generator sinh chữ D hoa ở ranh
+    # giới chữ số, response vẫn 200 và FE chỉ nhận undefined.
     assert set(body["transaction"]) == {"channel", "content", "holdStatus", "slaMinutes"}
+    assert set(body["customerProfile"]) == {
+        "customerSince", "segment", "avgTransferVnd",
+        "recentAlertsWindowDays", "recentAlertsCount", "recentAlertsTopScore",
+    }
+    assert set(body["model"]) == {
+        "version", "method", "scoringMs", "confidencePct",
+        "interveneThreshold", "softWarnMin", "softWarnMax",
+    }
+    assert set(body["noteChips"][0]) == {"label", "primary"}
     assert body["model"]["confidencePct"] == 92
     assert body["model"]["interveneThreshold"] == 75
     assert len(body["noteChips"]) == 3
+
+
+def test_khong_field_nao_bi_alias_sinh_chu_hoa_giua_ten():
+    """Chặn cả lớp lỗi vừa gặp, không chỉ một trường.
+
+    alias_generator=to_camel coi ranh giới chữ số là ranh giới từ, nên một tên
+    như alerts90d_count thành alerts90DCount. Không có gì báo lỗi: response vẫn
+    200 và FE nhận undefined. Quét mọi response để chặn từ gốc.
+    """
+    import re
+
+    def quet(node, duong_dan=""):
+        if isinstance(node, dict):
+            for k, v in node.items():
+                # Hợp lệ: camelCase thường. Sai: có chữ hoa ngay sau chữ số.
+                assert not re.search(r"\d[A-Z]", k), f"{duong_dan}.{k} bị alias sinh chữ hoa sau chữ số"
+                quet(v, f"{duong_dan}.{k}")
+        elif isinstance(node, list):
+            for item in node:
+                quet(item, duong_dan)
+
+    for path in ["/api/home", "/api/session/customer", "/api/copilot/overview",
+                 "/api/copilot/intro", "/api/transfer/pending", "/api/risk/explain",
+                 "/api/safety-center", "/api/ops/session", "/api/ops/metrics",
+                 "/api/ops/dashboard", "/api/ops/alerts", "/api/ops/alerts/ALT-4092",
+                 "/api/ops/alerts/ALT-4092/detail", "/api/ops/alerts/ALT-4092/timeline"]:
+        quet(client.get(path).json(), path)
 
 
 def test_chi_tiet_case_khong_ton_tai_tra_404():
