@@ -53,6 +53,8 @@ from models import (
     Customer,
     DecisionRequest,
     HomeContent,
+    LoginRequest,
+    LoginResponse,
     OkResponse,
     OpsDashboard,
     OpsMetrics,
@@ -420,6 +422,36 @@ async def home_content() -> HomeContent:
     return mappers.map_home(cust, ins, datetime.now(timezone(timedelta(hours=7))))
 
 
+@app.post("/api/auth/login", response_model=LoginResponse, tags=["session"],
+          response_model_exclude_none=True,
+          summary="Đăng nhập khách hàng — xác thực thật qua identity-service")
+async def auth_login(payload: LoginRequest) -> LoginResponse:
+    """Xác thực thật tên đăng nhập + mật khẩu.
+
+    Trước đây FE chỉ gọi `login()` phía client rồi chuyển màn — không có xác
+    thực nào. Nay gọi identity-service so khớp bcrypt với bảng app_user; đăng
+    nhập của kịch bản demo là kh100008 / 123456.
+
+    Ba nhánh:
+    - identity-service không gọi được → cho qua với hồ sơ demo (source
+      "degraded"), để buổi trình bày không bị chặn bởi một service đang lỗi.
+      Đây là cùng triết lý xuống cấp thấy được của cả gateway.
+    - đúng mật khẩu, tài khoản ACTIVE → authenticated=true kèm hồ sơ đã che PII.
+    - sai mật khẩu / tài khoản khoá → authenticated=false kèm lý do; FE hiện
+      thông báo và không cho vào.
+    """
+    result = await domain.auth_verify(payload.username, payload.password)
+
+    if result is None:
+        domain.mark_degraded()
+        return LoginResponse(authenticated=True, source="degraded", user=catalog.DEMO_LOGIN_USER)
+
+    if result.get("authenticated"):
+        return LoginResponse(authenticated=True, source="domain", user=result.get("user"))
+
+    return LoginResponse(authenticated=False, source="domain", reason=result.get("reason", "invalid_credentials"))
+
+
 @app.get("/api/session/customer", response_model=Customer, tags=["session"],
          summary="Khách hàng của phiên hiện tại")
 async def session_customer() -> Customer:
@@ -645,6 +677,7 @@ async def info() -> dict:
         "agent_service_configured": domain.agent_configured(),
         "endpoints": [
             "GET /api/home",
+            "POST /api/auth/login",
             "GET /api/session/customer",
             "GET /api/copilot/overview",
             "GET /api/copilot/intro",

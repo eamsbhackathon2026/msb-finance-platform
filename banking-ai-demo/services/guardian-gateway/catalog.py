@@ -42,6 +42,7 @@ from models import (
     CategoryTotal,
     CopilotIntro,
     HomeContent,
+    LoginUser,
     Operator,
     OpsSession,
     SimilarScenario,
@@ -301,6 +302,20 @@ CUSTOMER = Customer(
     name="Nguyễn Minh Anh",
     masked_account="**** 4821",
     balance=47_820_000,
+)
+
+# Hồ sơ đăng nhập dự phòng khi identity-service không gọi được. Khớp với tài
+# khoản khách hàng của kịch bản demo (kh100008 → customer_id 100008) để màn hình
+# phía sau vẫn nhất quán. Chỉ dùng ở nhánh degraded của POST /api/auth/login.
+DEMO_LOGIN_USER = LoginUser(
+    user_id=13,
+    username="kh100008",
+    role="CUSTOMER",
+    customer_id=100008,
+    full_name_masked=None,
+    email_masked="ng***@example.com",
+    phone_masked="09** *** 303",
+    user_status="ACTIVE",
 )
 
 

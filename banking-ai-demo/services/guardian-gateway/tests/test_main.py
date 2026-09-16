@@ -240,13 +240,14 @@ def test_info_phan_anh_dung_cau_hinh_domain():
     body = client.get("/info").json()
     # conftest tắt DOMAIN_ENABLED nên /info phải báo đúng như vậy.
     assert body["integrated_with_domain_services"] is False
-    assert len(body["endpoints"]) == 20
+    assert len(body["endpoints"]) == 21
 
 
 def test_openapi_phuc_vu_dung_cac_endpoint_fe_goi():
     paths = client.get("/openapi.json").json()["paths"]
     assert {p for p in paths if p.startswith("/api/")} == {
         "/api/home",
+        "/api/auth/login",
         "/api/session/customer",
         "/api/copilot/overview",
         "/api/copilot/intro",
@@ -484,3 +485,83 @@ def test_chi_tiet_case_khong_ton_tai_tra_404():
 def test_trung_tam_an_toan_co_nhan_cap_nhat():
     body = client.get("/api/safety-center").json()
     assert body["updatedLabel"] and body["shieldEnabled"] is True
+
+
+# ---- POST /api/auth/login ----------------------------------------------------
+
+LOGIN_USER_KEYS = {"userId", "username", "role", "customerId",
+                   "emailMasked", "phoneMasked", "userStatus"}
+
+
+def test_login_che_do_stub_cho_qua_bang_ho_so_demo():
+    # conftest tắt DOMAIN_ENABLED nên auth_verify trả None mà không gọi service
+    # nào: đăng nhập rơi về hồ sơ demo. Body đánh dấu source="degraded" (đăng
+    # nhập này không được xác thực thật), còn header là "stub" vì gateway không
+    # chạm domain lần nào — hai trục khác nhau, cả hai đều đúng.
+    r = client.post("/api/auth/login", json={"username": "kh100008", "password": "bất kỳ"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["authenticated"] is True
+    assert body["source"] == "degraded"
+    assert body["user"]["username"] == "kh100008"
+    assert body["user"]["customerId"] == 100008
+    assert r.headers["X-Guardian-Data-Source"] == "stub"
+
+
+def test_login_identity_chet_khi_domain_bat_thi_header_degraded(monkeypatch):
+    # Cảnh thật khi chạy production: DOMAIN_ENABLED=true nhưng identity-service
+    # không gọi được. _post đánh dấu touched+degraded, header phải là "degraded"
+    # để nhìn từ tab Network biết đăng nhập đã rơi về bản dự phòng.
+    monkeypatch.setattr(main.domain, "DOMAIN_ENABLED", True)
+    monkeypatch.setattr(main.domain, "IDENTITY_URL", "http://127.0.0.1:1")  # cổng cụt → từ chối ngay
+    r = client.post("/api/auth/login", json={"username": "kh100008", "password": "123456"})
+    assert r.status_code == 200
+    assert r.json()["authenticated"] is True
+    assert r.json()["source"] == "degraded"
+    assert r.headers["X-Guardian-Data-Source"] == "degraded"
+
+
+def test_login_dung_mat_khau_tra_ho_so_da_che_pii(monkeypatch):
+    async def fake_verify(username, password):
+        return {"authenticated": True, "user": {
+            "user_id": 13, "username": "kh100008", "role": "CUSTOMER",
+            "customer_id": 100008, "full_name_masked": None,
+            "email_masked": "ng***@example.com", "phone_masked": "09** *** 303",
+            "user_status": "ACTIVE",
+        }}
+    monkeypatch.setattr(main.domain, "auth_verify", fake_verify)
+    r = client.post("/api/auth/login", json={"username": "kh100008", "password": "123456"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["authenticated"] is True
+    assert body["source"] == "domain"
+    assert set(body["user"]) == LOGIN_USER_KEYS  # fullNameMasked là None nên bị loại
+    # Không được lộ password_hash dù identity-service lỡ trả về.
+    assert "passwordHash" not in body["user"]
+
+
+def test_login_sai_mat_khau_tra_ly_do_khong_cho_vao(monkeypatch):
+    async def fake_verify(username, password):
+        return {"authenticated": False, "reason": "invalid_credentials"}
+    monkeypatch.setattr(main.domain, "auth_verify", fake_verify)
+    r = client.post("/api/auth/login", json={"username": "kh100008", "password": "sai"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["authenticated"] is False
+    assert body["reason"] == "invalid_credentials"
+    assert "user" not in body  # response_model_exclude_none bỏ user=None
+
+
+def test_login_password_hash_khong_bao_gio_ra_response(monkeypatch):
+    # Kể cả identity-service trả thừa password_hash, response_model của gateway
+    # chỉ lấy đúng các field khai báo trong LoginUser — hash không lọt ra.
+    async def fake_verify(username, password):
+        return {"authenticated": True, "user": {
+            "user_id": 13, "username": "kh100008", "role": "CUSTOMER",
+            "customer_id": 100008, "user_status": "ACTIVE",
+            "password_hash": "$2a$10$hacke",
+        }}
+    monkeypatch.setattr(main.domain, "auth_verify", fake_verify)
+    body = client.post("/api/auth/login", json={"username": "x", "password": "y"}).json()
+    assert "passwordHash" not in body["user"]
+    assert "password_hash" not in body["user"]

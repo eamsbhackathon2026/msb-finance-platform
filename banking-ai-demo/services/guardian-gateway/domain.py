@@ -27,6 +27,7 @@ TRANSACTION_URL = os.getenv("TRANSACTION_SERVICE_URL", "http://transaction-servi
 RISK_SCORING_URL = os.getenv("RISK_SCORING_SERVICE_URL", "http://risk-scoring-service")
 SCAM_KNOWLEDGE_URL = os.getenv("SCAM_KNOWLEDGE_SERVICE_URL", "http://scam-knowledge-service")
 ACTION_FEEDBACK_URL = os.getenv("ACTION_FEEDBACK_SERVICE_URL", "http://action-feedback-service")
+IDENTITY_URL = os.getenv("IDENTITY_SERVICE_URL", "http://identity-service")
 
 # agent-service nằm ở namespace khác nên phải dùng tên đầy đủ trong cluster.
 AGENT_SERVICE_URL = os.getenv("AGENT_SERVICE_URL", "")
@@ -214,6 +215,23 @@ async def notifications(customer_id: int) -> dict | None:
 
 async def record_action(payload: dict) -> dict | None:
     return await _post(ACTION_FEEDBACK_URL, "/actions", payload)
+
+
+# ---- identity-service --------------------------------------------------------
+
+async def auth_verify(username: str, password: str) -> dict | None:
+    """Xác thực tên đăng nhập + mật khẩu qua identity-service.
+
+    identity-service là nơi DUY NHẤT đọc password_hash; gateway chỉ chuyển tiếp
+    và không bao giờ thấy mật khẩu đã băm. Trả None khi service không gọi được,
+    để phần gọi giữ luồng demo chạy tiếp thay vì chặn người trình bày.
+
+    Chỉ /auth/verify (chỉ đọc) được gọi ở đây. Việc ghi nhận số lần đăng nhập
+    sai và khoá tài khoản nằm ở /users/{id}/login-attempt, CỐ TÌNH không gọi từ
+    gateway: một người trình bày gõ nhầm mật khẩu vài lần không nên làm khoá tài
+    khoản demo ngay giữa buổi.
+    """
+    return await _post(IDENTITY_URL, "/auth/verify", {"username": username, "password": password})
 
 
 # ---- agent-service (chỉ gọi, KHÔNG sửa) --------------------------------------

@@ -110,6 +110,37 @@ class OkResponse(Contract):
     ok: bool
 
 
+# ---- Đăng nhập ----------------------------------------------------------------
+
+class LoginRequest(Contract):
+    username: str
+    password: str
+
+
+class LoginUser(Contract):
+    """Hồ sơ người dùng trả về sau khi đăng nhập — PII đã được che ở tầng
+    identity-service (email/điện thoại dạng ng***@…, 09** *** 303)."""
+    user_id: int
+    username: str
+    role: str
+    customer_id: int | None = None
+    full_name_masked: str | None = None
+    email_masked: str | None = None
+    phone_masked: str | None = None
+    user_status: str
+
+
+class LoginResponse(Contract):
+    authenticated: bool
+    # "domain" khi xác thực thật qua identity-service, "degraded" khi service
+    # không gọi được và gateway cho qua để giữ luồng demo. FE đọc để biết đăng
+    # nhập này có thật hay chỉ là bản dự phòng.
+    source: Literal["domain", "degraded"]
+    user: LoginUser | None = None
+    # Lý do khi authenticated=false: invalid_credentials | disabled | locked
+    reason: str | None = None
+
+
 # ---- Màn Home / Login ---------------------------------------------------------
 
 class Customer(Contract):
