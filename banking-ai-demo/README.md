@@ -1,6 +1,6 @@
 # MSB AI Financial Guardian — banking-ai-demo
 
-Năm microservice FastAPI cung cấp API cho agent, phục vụ hai luồng nghiệp vụ:
+Sáu microservice FastAPI cung cấp API cho agent, phục vụ hai luồng nghiệp vụ:
 
 - **Journey A — Quản lý tài chính cá nhân.** Đọc toàn cảnh tài chính, phân tích chi
   tiêu theo tháng, dự báo dòng tiền, gợi ý sản phẩm tích lũy.
@@ -30,7 +30,7 @@ prompt LLM.
 **Mỗi service chỉ chạm bảng của chính nó.** Dữ liệu thuộc service khác lấy qua HTTP,
 không truy vấn chéo database.
 
-## Năm service
+## Sáu service
 
 | Service | Bảng sở hữu | Vai trò |
 |---|---|---|
@@ -39,6 +39,7 @@ không truy vấn chéo database.
 | `risk-scoring-service` | `risk_decision`, view `ops_summary`, `ops_decision_log` | Engine 6 yếu tố và vòng đời quyết định |
 | `scam-knowledge-service` | `scam_scenario`, `fraud_case` | Playbook lừa đảo và bộ kiểm thử engine |
 | `action-feedback-service` | `guardian_case`, `feedback`, `notification`, `llm_trace` | Case, phản hồi closed-loop, thông báo, nhật ký LLM |
+| `identity-service` | `app_role`, `app_user` | Ai được vào hệ thống, vai trò nào, quyền gì |
 
 Mỗi service đều có:
 
@@ -340,6 +341,54 @@ Credentials đặt trong GitHub Secrets:
 base64 -i ~/.kube/vks-finance-demo.yaml | pbcopy      # macOS
 gh secret set KUBE_CONFIG < <(base64 -w0 ~/.kube/vks-finance-demo.yaml)
 ```
+
+## identity-service — danh tính và phân quyền
+
+Sở hữu `app_role` và `app_user`. Hai bảng này được tạo trên database sau 18 bảng
+nghiệp vụ, nên phần khai báo trong `msb_guardian_schema.sql` chép lại đúng cấu
+trúc đang có chứ không phải bản thiết kế ban đầu.
+
+Dữ liệu hiện tại: 55 tài khoản — 5 nội bộ (`admin`, `ops.analyst1`,
+`ops.analyst2`, `ops.manager`, `auditor`) và 50 tài khoản khách hàng gắn với
+`customer_id`. Mật khẩu lưu dạng bcrypt.
+
+### Ba hàng rào dữ liệu
+
+**`password_hash` không bao giờ rời khỏi service này.** Không endpoint nào trả
+ra nó, kể cả đã che. Nó chỉ được đọc trong bộ nhớ khi so khớp ở
+`POST /auth/verify`. Hàm che dữ liệu dựng dict mới theo danh sách trắng thay vì
+xoá khoá khỏi dict cũ, nên thêm cột vào bảng thì cột đó **không** tự lọt ra
+response — có test riêng cho điều này.
+
+**Mọi PII đều bị che** — họ tên, email, số điện thoại. Tên trường ghi rõ hậu tố
+`_masked` để bên gọi không nhầm là giá trị thật.
+
+**Chỉ chạm hai bảng của chính mình.** Thông tin khách hàng lấy qua HTTP tới
+`customer-profile-service`.
+
+### `app_role` đang trống — và service nói rõ điều đó
+
+`app_user.role` đã có `ADMIN` và `CUSTOMER`, nhưng `app_role` chưa có dòng nào.
+`GET /users/{id}/permissions` vì vậy trả cờ `role_defined: false` kèm ghi chú,
+**không** trả mảng rỗng. Hai thứ này khác hẳn nhau: "chưa khai báo" mà bị hiểu
+thành "không có quyền nào" sẽ dẫn tới chặn nhầm người dùng hợp lệ.
+
+`GET /roles` cũng liệt kê `undeclared_roles_in_use` — các vai trò đang được dùng
+mà chưa khai báo — thay vì để người đọc tự đối chiếu hai danh sách.
+
+Khai báo vai trò bằng `PUT /roles/{role_code}`, idempotent nên gọi lại không tạo
+bản ghi thứ hai.
+
+### Khoá tài khoản
+
+Sai mật khẩu liên tiếp `MAX_FAILED_LOGIN` lần (mặc định 5) thì trạng thái chuyển
+`LOCKED`. Phân biệt với `DISABLED`: `DISABLED` là quyết định của quản trị viên,
+`LOCKED` là hệ quả tự động. Mở lại bằng `PATCH /users/{id}/status` với `ACTIVE`,
+và thao tác đó đặt lại bộ đếm — không đặt lại thì lần sai tiếp theo khoá ngay.
+
+`POST /auth/verify` trả **cùng một câu trả lời** cho sai mật khẩu và không có tài
+khoản. Khác biệt nhỏ nhất giữa hai trường hợp cũng đủ để dò ra danh sách người
+dùng nào tồn tại.
 
 ## guardian-gateway — backend cho web app
 

@@ -1,0 +1,119 @@
+name: build-identity-service
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'banking-ai-demo/services/identity-service/**'
+      - 'banking-ai-demo/k8s/identity.yaml'
+      - 'banking-ai-demo/services/_common/**'
+      - '.github/workflows/identity-service.yml'
+  workflow_dispatch: {}
+
+env:
+  # Host registry, project, namespace để công khai; credentials (VCR_*, KUBE_CONFIG) lấy từ GitHub Secrets — KHÔNG hardcode.
+  SERVICE: identity-service
+  REGISTRY: vcr.vngcloud.vn
+  IMAGE_REPO: vcr.vngcloud.vn/114544-ea-hackathon/identity-service
+  NAMESPACE: finance-demo
+  MANIFEST: banking-ai-demo/k8s/identity.yaml
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Kiểm tra common.py chưa bị lệch khỏi bản gốc
+        # Docker build context là thư mục service nên mỗi service giữ một bản copy
+        # của common.py. Nếu bản copy lệch khỏi services/_common/common.py thì
+        # image build ra sẽ chạy code cũ mà không ai biết.
+        run: |
+          if ! diff -q banking-ai-demo/services/_common/common.py \
+                       "banking-ai-demo/services/${SERVICE}/common.py"; then
+            echo "::error::common.py đã lệch khỏi bản gốc. Chạy 'make sync-common' rồi commit lại."
+            exit 1
+          fi
+
+      - name: Cài dependencies
+        working-directory: banking-ai-demo/services/${{ env.SERVICE }}
+        run: pip install -r requirements.txt
+
+      - name: Chạy test
+        working-directory: banking-ai-demo/services/${{ env.SERVICE }}
+        run: python -m pytest -q
+
+  build-and-push:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to VNG Container Registry (vCR)
+        uses: docker/login-action@v3
+        with:
+          registry: vcr.vngcloud.vn
+          username: ${{ secrets.VCR_USERNAME }}
+          password: ${{ secrets.VCR_PASSWORD }}
+
+      - name: Build and push image (tag = commit SHA)
+        uses: docker/build-push-action@v6
+        with:
+          context: banking-ai-demo/services/identity-service
+          push: true
+          tags: |
+            ${{ env.IMAGE_REPO }}:${{ github.sha }}
+            ${{ env.IMAGE_REPO }}:latest
+
+  deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v4
+
+      - name: Write kubeconfig from secret (base64)
+        run: |
+          mkdir -p "$HOME/.kube"
+          echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > "$HOME/.kube/config"
+          chmod 600 "$HOME/.kube/config"
+
+      - name: Ensure imagePullSecret vcr-cred
+        run: |
+          kubectl -n "${{ env.NAMESPACE }}" create secret docker-registry vcr-cred \
+            --docker-server="${{ env.REGISTRY }}" \
+            --docker-username='${{ secrets.VCR_USERNAME }}' \
+            --docker-password='${{ secrets.VCR_PASSWORD }}' \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Đảm bảo ConfigMap endpoint tồn tại
+        run: |
+          kubectl -n "${{ env.NAMESPACE }}" apply -f banking-ai-demo/k8s/config.yaml
+
+      - name: Kiểm tra secret database đã được tạo chưa
+        # Secret chứa credential nên phải tạo thủ công một lần bằng
+        # `make k8s-db-secret`; CI chỉ kiểm tra chứ không tự tạo.
+        run: |
+          if ! kubectl -n "${{ env.NAMESPACE }}" get secret guardian-db >/dev/null 2>&1; then
+            echo "::error::Chưa có secret 'guardian-db'. Chạy: make k8s-db-secret DATABASE_URL='...'"
+            exit 1
+          fi
+
+      - name: Deploy image (commit SHA) to VKS
+        run: |
+          sed "s#:latest#:${{ github.sha }}#" "${{ env.MANIFEST }}" \
+            | kubectl -n "${{ env.NAMESPACE }}" apply -f -
+          kubectl -n "${{ env.NAMESPACE }}" rollout status deployment/${{ env.SERVICE }} --timeout=120s

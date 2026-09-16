@@ -12,6 +12,7 @@ data:
   RISK_SCORING_SERVICE_URL: "http://risk-scoring-service"
   SCAM_KNOWLEDGE_SERVICE_URL: "http://scam-knowledge-service"
   ACTION_FEEDBACK_SERVICE_URL: "http://action-feedback-service"
+  IDENTITY_SERVICE_URL: "http://identity-service"
   PEER_TIMEOUT_SECONDS: "5"
   DB_POOL_MIN: "1"
   DB_POOL_MAX: "5"

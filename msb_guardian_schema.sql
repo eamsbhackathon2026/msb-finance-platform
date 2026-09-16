@@ -424,3 +424,44 @@ LEFT JOIN scam_scenario s ON s.scenario_id = d.scenario_id
 ORDER BY d.created_at DESC;
 
 COMMIT;
+
+-- ===========================================================================
+-- Danh tính và phân quyền của người dùng ứng dụng (identity-service sở hữu)
+--
+-- Hai bảng này được tạo trực tiếp trên database sau khi 18 bảng nghiệp vụ đã
+-- chạy; phần khai báo dưới đây chép lại đúng cấu trúc đang có để file schema
+-- vẫn là mô tả đầy đủ của database.
+-- ===========================================================================
+
+CREATE TABLE IF NOT EXISTS app_role (
+    role_code    VARCHAR      PRIMARY KEY,
+    role_name    VARCHAR      NOT NULL,
+    role_scope   VARCHAR      NOT NULL,
+    -- Danh sách quyền dạng chuỗi, ví dụ ["ops.read","ops.decide"].
+    permissions  JSONB        NOT NULL DEFAULT '[]'::jsonb,
+    role_status  VARCHAR      NOT NULL DEFAULT 'ACTIVE',
+    created_at   TIMESTAMPTZ  NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS app_user (
+    user_id            BIGSERIAL    PRIMARY KEY,
+    username           VARCHAR      NOT NULL,
+    -- bcrypt, 60 ký tự. KHÔNG endpoint nào được trả cột này ra ngoài.
+    password_hash      VARCHAR      NOT NULL,
+    role               VARCHAR      NOT NULL,
+    -- NULL với tài khoản nội bộ (ADMIN); có giá trị với tài khoản khách hàng.
+    customer_id        INTEGER      REFERENCES customer(customer_id),
+    full_name          VARCHAR,
+    email              VARCHAR,
+    phone_no           VARCHAR,
+    -- ACTIVE | DISABLED (quản trị viên tắt) | LOCKED (tự khoá do sai mật khẩu)
+    user_status        VARCHAR      NOT NULL DEFAULT 'ACTIVE',
+    failed_login_count INTEGER      NOT NULL DEFAULT 0,
+    last_login_at      TIMESTAMPTZ,
+    created_at         TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    updated_at         TIMESTAMPTZ  NOT NULL DEFAULT now()
+);
+
+-- Database hiện chưa có ràng buộc duy nhất trên username. Tra cứu theo tên đăng
+-- nhập vì vậy lấy bản ghi đầu tiên; thêm ràng buộc này khi dữ liệu đã sạch:
+--   CREATE UNIQUE INDEX app_user_username_key ON app_user (username);

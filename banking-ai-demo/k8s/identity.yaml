@@ -1,0 +1,80 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: identity-service
+  namespace: finance-demo
+  labels:
+    app: identity-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: identity-service
+  template:
+    metadata:
+      labels:
+        app: identity-service
+    spec:
+      imagePullSecrets:
+        - name: vcr-cred
+      containers:
+        - name: identity-service
+          # CI thay :latest bằng commit SHA (xem README).
+          image: vcr.vngcloud.vn/114544-ea-hackathon/identity-service:latest
+          imagePullPolicy: IfNotPresent
+          env:
+            # Chuỗi kết nối nằm trong Secret, không bao giờ nằm trong manifest.
+            - name: MAX_FAILED_LOGIN
+              value: "5"
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: guardian-db
+                  key: DATABASE_URL
+          envFrom:
+            # Địa chỉ các service khác + tham số pool kết nối.
+            - configMapRef:
+                name: guardian-endpoints
+          # Số lần sai mật khẩu liên tiếp trước khi khoá tài khoản.
+          ports:
+            - containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            # /health cố tình không chạm database: nếu probe này phụ thuộc DB thì
+            # một sự cố database sẽ kéo theo việc khởi động lại toàn bộ pod,
+            # biến một sự cố thành hai.
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: identity-service
+  namespace: finance-demo
+  labels:
+    app: identity-service
+spec:
+  type: ClusterIP
+  selector:
+    app: identity-service
+  ports:
+    - port: 80
+      targetPort: 8080
+      protocol: TCP

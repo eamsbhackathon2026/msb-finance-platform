@@ -1,7 +1,7 @@
 # Makefile cho banking-ai-demo
 # Yêu cầu: python3.12+, docker, kubectl, psql (cho các target db-*)
 
-SERVICES := customer-profile-service transaction-service risk-scoring-service scam-knowledge-service action-feedback-service
+SERVICES := customer-profile-service transaction-service risk-scoring-service scam-knowledge-service action-feedback-service identity-service
 
 REGISTRY ?= vcr.vngcloud.vn/114544-ea-hackathon
 TAG ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo latest)
