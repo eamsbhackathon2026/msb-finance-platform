@@ -175,3 +175,86 @@ def test_lich_su_an_toan_rut_so_tien_tu_narrative():
     assert h[0].amount == 95_000_000
     assert h[0].date == "2026-09-16"
     assert h[0].status == "processing"
+
+
+# ---- Thống kê theo quý -------------------------------------------------------
+
+# Chép từ GET /transactions/{id}/quarterly-summary
+QUARTERLY = {
+    "customer_id": 100008,
+    "quarters": 2,
+    "include_transfers": False,
+    "excluded_categories": ["TRANSFER_P2P", "TRANSFER"],
+    "summary": [
+        {
+            "period": "2026Q2", "year": 2026, "quarter": 2, "label": "Quý 2/2026",
+            "income": 7600000, "expense": 4000000, "net": 3600000, "count": 13,
+            "excluded_transfer_amount": 0,
+            "by_category": [
+                {"category": "FAMILY_SUPPORT", "amount": 3000000, "pct": 75, "rank": 1, "delta_vs_prev_pct": None},
+                {"category": "FOOD", "amount": 1000000, "pct": 25, "rank": 2, "delta_vs_prev_pct": None},
+            ],
+        },
+        {
+            "period": "2026Q3", "year": 2026, "quarter": 3, "label": "Quý 3/2026",
+            "income": 7600000, "expense": 5000000, "net": 2600000, "count": 18,
+            "excluded_transfer_amount": 620000000,
+            "by_category": [
+                {"category": "FAMILY_SUPPORT", "amount": 3500000, "pct": 70, "rank": 1, "delta_vs_prev_pct": 16.7},
+                {"category": "HEALTH", "amount": 1500000, "pct": 30, "rank": 2, "delta_vs_prev_pct": None},
+            ],
+        },
+    ],
+    "category_totals": [
+        {"category": "FAMILY_SUPPORT", "amount": 6500000, "pct": 72},
+        {"category": "FOOD", "amount": 1000000, "pct": 11},
+        {"category": "HEALTH", "amount": 1500000, "pct": 17},
+    ],
+}
+
+
+def test_quy_giu_nguyen_nhan_va_so_lieu_cua_domain():
+    r = mappers.map_quarterly(QUARTERLY)
+    assert [q.period for q in r.quarters] == ["2026Q2", "2026Q3"]
+    assert r.quarters[1].label == "Quý 3/2026"
+    assert r.quarters[1].expense == 5_000_000
+    assert r.quarters[1].net == 2_600_000
+
+
+def test_ma_nhom_duoc_gan_nhan_tieng_viet():
+    r = mappers.map_quarterly(QUARTERLY)
+    nhan = {c.category: c.label_vi for c in r.quarters[1].by_category}
+    assert nhan["FAMILY_SUPPORT"] == "Hỗ trợ gia đình"
+    assert nhan["HEALTH"] == "Y tế"
+
+
+def test_ma_nhom_la_thay_van_hien_duoc():
+    """Domain thêm nhóm mới thì màn hình vẫn đọc được, không hiện rỗng."""
+    payload = {**QUARTERLY, "summary": [{
+        **QUARTERLY["summary"][0],
+        "by_category": [{"category": "PET_CARE", "amount": 100, "pct": 100, "rank": 1, "delta_vs_prev_pct": None}],
+    }]}
+    assert mappers.map_quarterly(payload).quarters[0].by_category[0].label_vi == "Pet care"
+
+
+def test_chua_co_moc_so_sanh_thi_giu_null():
+    """None và 0 khác nhau: chưa có mốc, chứ không phải không đổi."""
+    r = mappers.map_quarterly(QUARTERLY)
+    assert r.quarters[0].by_category[0].delta_vs_prev_pct is None
+    assert r.quarters[1].by_category[0].delta_vs_prev_pct == 16.7
+
+
+def test_gateway_khong_tinh_lai_ty_trong():
+    """pct lấy nguyên của domain.
+
+    Hai chỗ cùng tính một con số là hai chỗ có thể lệch nhau; số liệu trên màn
+    hình phải khớp số liệu agent đọc được từ cùng endpoint.
+    """
+    r = mappers.map_quarterly(QUARTERLY)
+    assert [c.pct for c in r.quarters[1].by_category] == [70, 30]
+    assert [c.pct for c in r.category_totals] == [72, 11, 17]
+
+
+def test_khong_co_quy_nao_thi_tra_none():
+    # Để phần gọi biết mà dùng dữ liệu tạm, thay vì hiện màn hình trống.
+    assert mappers.map_quarterly({"summary": [], "category_totals": []}) is None

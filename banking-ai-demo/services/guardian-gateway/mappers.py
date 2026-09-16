@@ -15,6 +15,10 @@ from datetime import datetime
 
 from models import (
     Beneficiary,
+    CategoryTotal,
+    QuarterCategory,
+    QuarterSummary,
+    QuarterlyReport,
     SafetyHistoryItem,
     TimelineEvent,
     BudgetSummary,
@@ -410,3 +414,48 @@ def map_safety_history(cases: list[dict]) -> list[SafetyHistoryItem]:
             status=_HISTORY_STATUS.get(c.get("status", ""), "processing"),
         ))
     return out
+
+
+def map_quarterly(payload: dict) -> QuarterlyReport | None:
+    """Thống kê theo quý từ transaction-service.
+
+    Việc duy nhất phải làm ở đây là gắn nhãn tiếng Việt cho mã nhóm: domain trả
+    FOOD, FAMILY_SUPPORT còn màn hình cần "Ăn uống", "Hỗ trợ gia đình". Phần
+    tính toán đã nằm ở domain, gateway không tính lại — hai chỗ cùng tính một
+    con số là hai chỗ có thể lệch nhau.
+    """
+    rows = payload.get("summary") or []
+    if not rows:
+        return None
+    quarters = [
+        QuarterSummary(
+            period=q["period"],
+            label=q["label"],
+            income=int(q.get("income") or 0),
+            expense=int(q.get("expense") or 0),
+            net=int(q.get("net") or 0),
+            count=int(q.get("count") or 0),
+            by_category=[
+                QuarterCategory(
+                    category=c["category"],
+                    label_vi=_vi_category(c["category"]),
+                    amount=int(c.get("amount") or 0),
+                    pct=int(c.get("pct") or 0),
+                    rank=int(c.get("rank") or 0),
+                    delta_vs_prev_pct=c.get("delta_vs_prev_pct"),
+                )
+                for c in (q.get("by_category") or [])
+            ],
+        )
+        for q in rows
+    ]
+    totals = [
+        CategoryTotal(
+            category=t["category"],
+            label_vi=_vi_category(t["category"]),
+            amount=int(t.get("amount") or 0),
+            pct=int(t.get("pct") or 0),
+        )
+        for t in (payload.get("category_totals") or [])
+    ]
+    return QuarterlyReport(quarters=quarters, category_totals=totals)

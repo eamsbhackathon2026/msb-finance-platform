@@ -236,10 +236,11 @@ def test_moi_response_deu_co_header_nguon_du_lieu():
         assert r.headers["X-Guardian-Service"] == "guardian-gateway"
 
 
-def test_info_noi_ro_chua_noi_domain():
+def test_info_phan_anh_dung_cau_hinh_domain():
     body = client.get("/info").json()
+    # conftest tắt DOMAIN_ENABLED nên /info phải báo đúng như vậy.
     assert body["integrated_with_domain_services"] is False
-    assert len(body["endpoints"]) == 19
+    assert len(body["endpoints"]) == 20
 
 
 def test_openapi_phuc_vu_dung_cac_endpoint_fe_goi():
@@ -249,6 +250,7 @@ def test_openapi_phuc_vu_dung_cac_endpoint_fe_goi():
         "/api/session/customer",
         "/api/copilot/overview",
         "/api/copilot/intro",
+        "/api/copilot/quarters",
         "/api/copilot/chat",
         "/api/transfer/pending",
         "/api/transfer/action",

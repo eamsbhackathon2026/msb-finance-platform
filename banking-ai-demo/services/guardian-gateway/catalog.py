@@ -39,12 +39,16 @@ from models import (
     CaseModelInfo,
     CaseNoteChip,
     CaseTransaction,
+    CategoryTotal,
     CopilotIntro,
     HomeContent,
     Operator,
     OpsSession,
     SimilarScenario,
     SpendingCategory,
+    QuarterCategory,
+    QuarterSummary,
+    QuarterlyReport,
     SystemStatusRow,
     TimelineEvent,
 )
@@ -492,3 +496,59 @@ CUSTOMER_ACTIONS = {
 
 # Case gắn với lệnh chuyển tiền trong luồng demo của khách hàng.
 CUSTOMER_CASE_ID = "ALT-4092"
+
+
+# ============ THỐNG KÊ THEO QUÝ (đường lui khi transaction-service hỏng) ============
+
+def _quarter(period: str, label: str, he_so: float, delta: float | None) -> QuarterSummary:
+    """Dựng một quý từ CATEGORIES với hệ số nhân, để ba quý khác nhau mà vẫn
+    giữ đúng tỷ trọng giữa các nhóm."""
+    amounts = [(c, round(c.amount * he_so * 3)) for c in CATEGORIES]
+    tong = sum(a for _, a in amounts) or 1
+    return QuarterSummary(
+        period=period,
+        label=label,
+        income=round(tong * 1.4),
+        expense=tong,
+        net=round(tong * 0.4),
+        count=len(CATEGORIES) * 12,
+        by_category=[
+            QuarterCategory(
+                category=c.key.upper().replace("-", "_"),
+                label_vi=c.label_vi,
+                amount=a,
+                pct=round(a * 100 / tong),
+                rank=i + 1,
+                delta_vs_prev_pct=delta,
+            )
+            for i, (c, a) in enumerate(amounts)
+        ],
+    )
+
+
+_QUARTERS = [
+    _quarter("2026Q1", "Quý 1/2026", 0.9, None),
+    _quarter("2026Q2", "Quý 2/2026", 1.0, 11.1),
+    _quarter("2026Q3", "Quý 3/2026", 1.2, 20.0),
+]
+
+_TONG = sum(c.amount for q in _QUARTERS for c in q.by_category) or 1
+
+QUARTERLY_REPORT = QuarterlyReport(
+    quarters=_QUARTERS,
+    category_totals=[
+        CategoryTotal(
+            category=c.key.upper().replace("-", "_"),
+            label_vi=c.label_vi,
+            amount=sum(
+                x.amount for q in _QUARTERS for x in q.by_category
+                if x.label_vi == c.label_vi
+            ),
+            pct=round(sum(
+                x.amount for q in _QUARTERS for x in q.by_category
+                if x.label_vi == c.label_vi
+            ) * 100 / _TONG),
+        )
+        for c in CATEGORIES
+    ],
+)

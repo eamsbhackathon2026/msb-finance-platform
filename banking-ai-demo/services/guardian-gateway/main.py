@@ -59,6 +59,7 @@ from models import (
     OpsSession,
     PendingTransfer,
     ProtectionToggleRequest,
+    QuarterlyReport,
     RiskAssessment,
     RiskExplain,
     SafetyCenter,
@@ -595,6 +596,25 @@ async def ops_alert_timeline(alert_id: str) -> list[CaseTimelineStep]:
 
 # ---- Gợi ý câu hỏi cho chat --------------------------------------------------
 
+@app.get("/api/copilot/quarters", response_model=QuarterlyReport, tags=["copilot"],
+         response_model_exclude_none=False,
+         summary="Thu chi theo quý, phân rã theo nhóm chi tiêu")
+async def copilot_quarters(quarters: int = 8) -> QuarterlyReport:
+    """Dữ liệu cho màn quản lý tài chính cá nhân và cho agent.
+
+    Cùng một endpoint phục vụ hai bên: web app vẽ biểu đồ, còn agent gọi nó như
+    một tool khi khách hỏi về xu hướng chi tiêu. Một nguồn số liệu duy nhất nên
+    hai bên không bao giờ nói hai con số khác nhau.
+    """
+    payload = await domain.quarterly_summary(domain.DEMO_CUSTOMER_ID, quarters)
+    mapped = mappers.map_quarterly(payload) if payload else None
+    if mapped is None:
+        if payload is not None:
+            domain.mark_degraded()
+        return catalog.QUARTERLY_REPORT
+    return mapped
+
+
 @app.get("/api/copilot/intro", response_model=CopilotIntro, tags=["copilot"],
          summary="Lời chào, câu hỏi gợi ý và nhãn tháng của màn Copilot")
 async def copilot_intro() -> CopilotIntro:
@@ -628,6 +648,7 @@ async def info() -> dict:
             "GET /api/session/customer",
             "GET /api/copilot/overview",
             "GET /api/copilot/intro",
+            "GET /api/copilot/quarters",
             "POST /api/copilot/chat",
             "GET /api/transfer/pending",
             "POST /api/risk/assess",

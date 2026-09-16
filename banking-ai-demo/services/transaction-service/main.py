@@ -300,6 +300,129 @@ def monthly_summary(
     return {"customer_id": customer_id, "months": len(summary), "summary": summary}
 
 
+# Chuyển khoản đi KHÔNG phải chi tiêu: nó là tiền chuyển chỗ, không phải tiền
+# tiêu mất. Gộp chung thì một lệnh chuyển lớn nuốt trọn biểu đồ và các nhóm chi
+# tiêu thật bị ép về gần 0%.
+TRANSFER_CATEGORIES = ("TRANSFER_P2P", "TRANSFER")
+
+
+def _quarter_of(transaction_date: str) -> tuple[int, int]:
+    """(năm, quý) từ chuỗi YYYYMMDD."""
+    year, month = int(transaction_date[:4]), int(transaction_date[4:6])
+    return year, (month - 1) // 3 + 1
+
+
+@app.get("/transactions/{customer_id}/quarterly-summary", tags=["transaction"])
+def quarterly_summary(
+    customer_id: int,
+    quarters: int = Query(8, ge=1, le=20, description="Số quý gần nhất cần lấy"),
+    include_transfers: bool = Query(
+        False, description="Tính cả chuyển khoản đi vào phần chi tiêu"
+    ),
+):
+    """Thu/chi/net theo QUÝ kèm phân rã theo nhóm chi tiêu.
+
+    Khác monthly-summary ở chỗ quý gom đủ dữ liệu để so sánh có nghĩa: một tháng
+    lẻ có thể chỉ có vài giao dịch, còn xu hướng theo quý thì đọc được.
+
+    Mỗi nhóm kèm `delta_vs_prev_pct` — thay đổi so với chính nhóm đó ở quý liền
+    trước. Đây là con số trả lời thẳng câu hỏi "quý này tôi tiêu khác gì quý
+    trước", thay vì bắt bên gọi tự trừ hai danh sách.
+    """
+    _require_transactions(customer_id)
+    # Lấy dư một quý rồi cắt: quý cũ nhất trong cửa sổ thường bị cắt giữa chừng
+    # nên delta của nó vô nghĩa, nhưng vẫn cần nó làm mốc so sánh cho quý kế.
+    start = (now_vn() - timedelta(days=92 * (quarters + 1))).strftime("%Y%m%d")
+    rows = query(
+        """
+        SELECT * FROM transaction_history
+        WHERE customer_id = %s AND transaction_date >= %s AND status = 'POSTED'
+        ORDER BY transaction_date
+        """,
+        (customer_id, start),
+    )
+
+    excluded = () if include_transfers else TRANSFER_CATEGORIES
+    buckets: dict[str, dict] = defaultdict(
+        lambda: {"income": 0.0, "expense": 0.0, "count": 0,
+                 "by_category": defaultdict(float), "excluded_amount": 0.0}
+    )
+    for r in rows:
+        date = r.get("transaction_date") or ""
+        if len(date) < 6:
+            continue
+        year, quarter = _quarter_of(date)
+        b = buckets[f"{year}Q{quarter}"]
+        amount = float(num(r.get("amount")))
+        b["count"] += 1
+        if r.get("direction") == "IN":
+            b["income"] += amount
+            continue
+        category = r.get("category") or "OTHER"
+        if category in excluded:
+            # Vẫn cộng vào một sổ riêng để bên gọi biết đã bỏ qua bao nhiêu,
+            # thay vì im lặng làm số liệu không khớp sao kê.
+            b["excluded_amount"] += amount
+            continue
+        b["expense"] += amount
+        b["by_category"][category] += amount
+
+    periods = sorted(buckets)
+    summary = []
+    for i, period in enumerate(periods):
+        b = buckets[period]
+        total = b["expense"] or 1
+        truoc = buckets[periods[i - 1]]["by_category"] if i > 0 else {}
+        by_cat = sorted(b["by_category"].items(), key=lambda kv: kv[1], reverse=True)
+        year, quarter = int(period[:4]), int(period[-1])
+        summary.append({
+            "period": period,
+            "year": year,
+            "quarter": quarter,
+            "label": f"Quý {quarter}/{year}",
+            "income": round(b["income"]),
+            "expense": round(b["expense"]),
+            "net": round(b["income"] - b["expense"]),
+            "count": b["count"],
+            "excluded_transfer_amount": round(b["excluded_amount"]),
+            "by_category": [
+                {
+                    "category": c,
+                    "amount": round(v),
+                    "pct": round(v * 100 / total),
+                    "rank": j + 1,
+                    # None ở quý đầu tiên và ở nhóm chưa từng xuất hiện: chưa có
+                    # mốc để so thì nói là chưa có, không trả 0 như thể không đổi.
+                    "delta_vs_prev_pct": (
+                        round((v - truoc[c]) * 100 / truoc[c], 1)
+                        if truoc.get(c) else None
+                    ),
+                }
+                for j, (c, v) in enumerate(by_cat)
+            ],
+        })
+
+    # Cắt bỏ quý dư đã lấy thêm để làm mốc so sánh.
+    summary = summary[-quarters:]
+    totals: dict[str, float] = defaultdict(float)
+    for q in summary:
+        for c in q["by_category"]:
+            totals[c["category"]] += c["amount"]
+    grand = sum(totals.values()) or 1
+
+    return {
+        "customer_id": customer_id,
+        "quarters": len(summary),
+        "include_transfers": include_transfers,
+        "excluded_categories": list(excluded),
+        "summary": summary,
+        "category_totals": [
+            {"category": c, "amount": round(v), "pct": round(v * 100 / grand)}
+            for c, v in sorted(totals.items(), key=lambda kv: kv[1], reverse=True)
+        ],
+    }
+
+
 @app.get("/transactions/{customer_id}/cashflow-forecast", tags=["transaction"])
 def cashflow_forecast(customer_id: int, horizon: int = Query(3, ge=1, le=12)):
     """Dự báo net theo trung bình có trọng số: 3 tháng gần nhất nặng hơn các tháng cũ.
@@ -759,6 +882,15 @@ AGENT_TOOLS = [
         "GET", "/transactions/{customer_id}/monthly-summary",
         params={"customer_id": "int", "months": "int, mặc định 6"},
         returns="Mảng tổng hợp theo tháng.",
+    ),
+    tool(
+        "get_quarterly_summary",
+        "Thu/chi/net theo QUÝ kèm phân rã theo nhóm chi tiêu và mức thay đổi so với quý trước. "
+        "Dùng khi khách hỏi về xu hướng chi tiêu dài hơn một tháng.",
+        "GET", "/transactions/{customer_id}/quarterly-summary",
+        params={"customer_id": "int", "quarters": "int, mặc định 8",
+                "include_transfers": "bool, mặc định false"},
+        returns="summary[] theo quý với by_category[] kèm delta_vs_prev_pct, và category_totals[].",
     ),
     tool(
         "get_cashflow_forecast",

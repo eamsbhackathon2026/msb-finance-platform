@@ -325,3 +325,37 @@ class TransferActionResponse(Contract):
 
 class ProtectionToggleRequest(Contract):
     enabled: bool
+
+
+# ---- Thống kê theo quý --------------------------------------------------------
+
+class QuarterCategory(Contract):
+    category: str
+    label_vi: str
+    amount: int
+    pct: int
+    rank: int
+    # None khi chưa có quý trước để so — khác hẳn 0 nghĩa là không đổi.
+    delta_vs_prev_pct: float | None = None
+
+
+class QuarterSummary(Contract):
+    period: str
+    label: str
+    income: int
+    expense: int
+    net: int
+    count: int
+    by_category: list[QuarterCategory]
+
+
+class CategoryTotal(Contract):
+    category: str
+    label_vi: str
+    amount: int
+    pct: int
+
+
+class QuarterlyReport(Contract):
+    quarters: list[QuarterSummary]
+    category_totals: list[CategoryTotal]

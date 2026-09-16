@@ -135,3 +135,127 @@ def test_openapi_hop_le():
     assert spec["info"]["title"] == "transaction-service"
     assert {"transaction", "insight", "product", "baseline"} <= {
         t["name"] for t in spec["tags"]}
+
+
+# ---------------------------------------------------------------------------
+# Tổng hợp theo quý
+# ---------------------------------------------------------------------------
+def quarterly(monkeypatch, rows, **params):
+    monkeypatch.setattr(main, "query", lambda *a, **k: rows)
+    monkeypatch.setattr(main, "query_one", lambda *a, **k: {"x": 1})
+    r = client.get("/transactions/100001/quarterly-summary", params=params)
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+def test_gom_dung_thang_vao_quy(monkeypatch):
+    # Ranh giới quý: tháng 3 thuộc Q1, tháng 4 thuộc Q2, tháng 12 thuộc Q4.
+    rows = [
+        tx(1_000_000, date="20260331"), tx(2_000_000, date="20260401"),
+        tx(3_000_000, date="20261231"),
+    ]
+    d = quarterly(monkeypatch, rows, quarters=20)
+    ky = {q["period"]: q["expense"] for q in d["summary"]}
+    assert ky["2026Q1"] == 1_000_000
+    assert ky["2026Q2"] == 2_000_000
+    assert ky["2026Q4"] == 3_000_000
+
+
+def test_nhan_quy_doc_duoc(monkeypatch):
+    d = quarterly(monkeypatch, [tx(1_000_000, date="20260715")])
+    q = d["summary"][-1]
+    assert q["period"] == "2026Q3" and q["label"] == "Quý 3/2026"
+    assert q["year"] == 2026 and q["quarter"] == 3
+
+
+def test_chuyen_khoan_khong_tinh_la_chi_tieu(monkeypatch):
+    """Chuyển khoản là tiền đổi chỗ, không phải tiền tiêu mất.
+
+    Gộp chung thì một lệnh chuyển lớn nuốt trọn biểu đồ nhóm chi tiêu.
+    """
+    rows = [tx(1_000_000, date="20260715", cat="FOOD"),
+            tx(500_000_000, date="20260715", cat="TRANSFER_P2P")]
+    d = quarterly(monkeypatch, rows)
+    q = d["summary"][-1]
+    assert q["expense"] == 1_000_000
+    # Nhưng vẫn cho biết đã bỏ qua bao nhiêu, để số liệu đối chiếu được sao kê.
+    assert q["excluded_transfer_amount"] == 500_000_000
+    assert [c["category"] for c in q["by_category"]] == ["FOOD"]
+
+
+def test_co_the_yeu_cau_tinh_ca_chuyen_khoan(monkeypatch):
+    rows = [tx(1_000_000, date="20260715", cat="FOOD"),
+            tx(500_000_000, date="20260715", cat="TRANSFER_P2P")]
+    d = quarterly(monkeypatch, rows, include_transfers="true")
+    assert d["summary"][-1]["expense"] == 501_000_000
+    assert d["excluded_categories"] == []
+
+
+def test_ty_trong_nhom_cong_lai_bang_100(monkeypatch):
+    rows = [tx(6_000_000, date="20260715", cat="FOOD"),
+            tx(3_000_000, date="20260716", cat="BILLS"),
+            tx(1_000_000, date="20260717", cat="HEALTH")]
+    q = quarterly(monkeypatch, rows)["summary"][-1]
+    assert [c["pct"] for c in q["by_category"]] == [60, 30, 10]
+    assert [c["rank"] for c in q["by_category"]] == [1, 2, 3]
+
+
+def test_thay_doi_so_voi_quy_truoc(monkeypatch):
+    rows = [tx(2_000_000, date="20260415", cat="FOOD"),
+            tx(3_000_000, date="20260715", cat="FOOD")]
+    d = quarterly(monkeypatch, rows)
+    q3 = [q for q in d["summary"] if q["period"] == "2026Q3"][0]
+    assert q3["by_category"][0]["delta_vs_prev_pct"] == 50.0
+
+
+def test_quy_dau_tien_khong_co_moc_so_sanh(monkeypatch):
+    """Chưa có mốc thì trả null, không trả 0 như thể không đổi."""
+    d = quarterly(monkeypatch, [tx(2_000_000, date="20260415", cat="FOOD")])
+    assert d["summary"][0]["by_category"][0]["delta_vs_prev_pct"] is None
+
+
+def test_nhom_moi_xuat_hien_cung_khong_co_moc(monkeypatch):
+    rows = [tx(2_000_000, date="20260415", cat="FOOD"),
+            tx(1_000_000, date="20260715", cat="HEALTH")]
+    d = quarterly(monkeypatch, rows)
+    q3 = [q for q in d["summary"] if q["period"] == "2026Q3"][0]
+    assert q3["by_category"][0]["category"] == "HEALTH"
+    assert q3["by_category"][0]["delta_vs_prev_pct"] is None
+
+
+def test_tien_vao_khong_bi_tinh_thanh_chi_tieu(monkeypatch):
+    rows = [tx(20_000_000, direction="IN", date="20260715", cat="OTHER"),
+            tx(1_000_000, date="20260715", cat="FOOD")]
+    q = quarterly(monkeypatch, rows)["summary"][-1]
+    assert q["income"] == 20_000_000
+    assert q["expense"] == 1_000_000
+    assert q["net"] == 19_000_000
+    assert [c["category"] for c in q["by_category"]] == ["FOOD"]
+
+
+def test_tong_ca_ky_theo_nhom(monkeypatch):
+    rows = [tx(2_000_000, date="20260415", cat="FOOD"),
+            tx(3_000_000, date="20260715", cat="FOOD"),
+            tx(1_000_000, date="20260716", cat="BILLS")]
+    d = quarterly(monkeypatch, rows)
+    tong = {c["category"]: c["amount"] for c in d["category_totals"]}
+    assert tong["FOOD"] == 5_000_000 and tong["BILLS"] == 1_000_000
+    assert d["category_totals"][0]["category"] == "FOOD"
+
+
+def test_gioi_han_so_quy_tra_ve(monkeypatch):
+    rows = [tx(1_000_000, date=f"2026{m:02d}15") for m in (1, 4, 7)]
+    d = quarterly(monkeypatch, rows, quarters=2)
+    assert d["quarters"] == 2
+    assert [q["period"] for q in d["summary"]] == ["2026Q2", "2026Q3"]
+
+
+def test_ngay_hong_dinh_dang_bi_bo_qua_khong_lam_vo(monkeypatch):
+    rows = [tx(1_000_000, date="20260715"), tx(9_000_000, date="")]
+    q = quarterly(monkeypatch, rows)["summary"][-1]
+    assert q["expense"] == 1_000_000
+
+
+def test_quarterly_co_trong_manifest_agent():
+    tools = client.get("/agent/tools").json()["tools"]
+    assert any(t["name"] == "get_quarterly_summary" for t in tools)

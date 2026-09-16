@@ -140,6 +140,11 @@ async def monthly_summary(customer_id: int) -> dict | None:
     return await _get(TRANSACTION_URL, f"/transactions/{customer_id}/monthly-summary")
 
 
+async def quarterly_summary(customer_id: int, quarters: int = 8) -> dict | None:
+    return await _get(TRANSACTION_URL, f"/transactions/{customer_id}/quarterly-summary",
+                      {"quarters": quarters})
+
+
 async def insights(customer_id: int) -> dict | None:
     return await _get(TRANSACTION_URL, f"/customers/{customer_id}/insights")
 
