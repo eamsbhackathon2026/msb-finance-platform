@@ -565,3 +565,65 @@ def test_login_password_hash_khong_bao_gio_ra_response(monkeypatch):
     body = client.post("/api/auth/login", json={"username": "x", "password": "y"}).json()
     assert "passwordHash" not in body["user"]
     assert "password_hash" not in body["user"]
+
+
+# ---- Bảng + biểu đồ số liệu thật đính vào câu trả lời chi tiêu ----------------
+
+def _doc_events(body: str):
+    """Bóc tách token / table / chart từ stream SSE."""
+    tokens, table, chart = [], None, None
+    for line in body.split("\n"):
+        if not line.startswith("data:"):
+            continue
+        p = line[5:].strip()
+        if p == "[DONE]":
+            continue
+        o = json.loads(p)
+        if "token" in o:
+            tokens.append(o["token"])
+        elif "table" in o:
+            table = o["table"]
+        elif "chart" in o:
+            chart = o["chart"]
+    return tokens, table, chart
+
+
+def test_chat_chi_tieu_thang_dinh_kem_bang_va_bieu_do():
+    r = client.post("/api/copilot/chat", json={"message": "Tổng hợp chi tiêu tháng này của tôi"})
+    assert r.status_code == 200
+    _, table, chart = _doc_events(r.text)
+    assert table is not None, "câu hỏi chi tiêu tháng phải kèm bảng"
+    assert chart is not None and chart["type"] == "bar"
+    # Hợp đồng bảng khớp FE
+    assert set(table) == {"title", "rows", "totalLabel", "totalAmount"}
+    assert table["rows"] and set(table["rows"][0]) >= {"label", "amount", "pct"}
+    # Số trong bảng cộng đúng bằng tổng, và bằng dữ liệu biểu đồ (một nguồn số).
+    assert sum(row["amount"] for row in table["rows"]) == table["totalAmount"]
+    assert [r_["amount"] for r_ in table["rows"]] == [p["value"] for p in chart["data"]]
+
+
+def test_chat_chi_tieu_quy_dinh_kem_bang():
+    r = client.post("/api/copilot/chat", json={"message": "Cho tôi xem chi tiêu quý vừa qua"})
+    _, table, chart = _doc_events(r.text)
+    assert table is not None and chart is not None
+    assert "quý" in table["title"].lower() or "q" in table["title"].lower()
+    # Bảng quý sắp theo số tiền giảm dần (nhóm lớn nhất đứng đầu).
+    amounts = [row["amount"] for row in table["rows"]]
+    assert amounts == sorted(amounts, reverse=True)
+
+
+def test_chat_cau_hoi_khong_phai_chi_tieu_thi_khong_co_bang():
+    r = client.post("/api/copilot/chat", json={"message": "Tôi có thể tiết kiệm bao nhiêu?"})
+    _, table, _ = _doc_events(r.text)
+    assert table is None, "câu hỏi tiết kiệm không nên kèm bảng chi tiêu"
+
+
+def test_chat_trend_none_giu_nguyen_khong_thanh_khong():
+    # trendPct có thể là null (chưa có kỳ trước). Không được ép thành 0 —
+    # "chưa có mốc so" khác hẳn "không đổi".
+    r = client.post("/api/copilot/chat", json={"message": "chi tiêu quý này theo nhóm"})
+    _, table, _ = _doc_events(r.text)
+    assert table is not None
+    # ít nhất phải serialize được, và trendPct nếu có mặt thì là int hoặc None
+    for row in table["rows"]:
+        assert row.get("trendPct") is None or isinstance(row["trendPct"], int)

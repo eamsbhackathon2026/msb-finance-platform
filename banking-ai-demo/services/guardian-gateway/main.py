@@ -47,7 +47,11 @@ from models import (
     AssessRequest,
     CaseDetail,
     CaseTimelineStep,
+    ChatChart,
+    ChatChartPoint,
     ChatRequest,
+    ChatTable,
+    ChatTableRow,
     CopilotIntro,
     CopilotOverview,
     Customer,
@@ -272,6 +276,62 @@ async def copilot_overview() -> CopilotOverview:
     return mapped
 
 
+# Nhận diện câu hỏi về chi tiêu để đính bảng + biểu đồ số liệu thật. "quý" đặc
+# thù hơn nên xét trước "tháng"; phải có cả ý ĐỊNH hỏi chi tiêu lẫn MỐC thời gian
+# thì mới đính, tránh gắn bảng vào câu hỏi không liên quan.
+_SPEND_RE = re.compile(r"chi tiêu|tiêu|chi |tổng hợp|thống kê|nhóm|phân bổ|báo cáo|xem|show", re.IGNORECASE)
+_QUARTER_RE = re.compile(r"quý|quarter", re.IGNORECASE)
+_MONTH_RE = re.compile(r"tháng", re.IGNORECASE)
+
+
+def _quarter_visual(report: QuarterlyReport) -> tuple[ChatTable | None, ChatChart | None]:
+    if not report.quarters:
+        return None, None
+    q = report.quarters[-1]  # quý gần nhất
+    cats = sorted(q.by_category, key=lambda c: c.amount, reverse=True)
+    if not cats:
+        return None, None
+    table = ChatTable(
+        title=f"Chi tiêu {q.label} theo nhóm",
+        rows=[ChatTableRow(label=c.label_vi, amount=c.amount, pct=c.pct,
+                           trend_pct=c.delta_vs_prev_pct) for c in cats],
+        total_label="Tổng chi", total_amount=q.expense,
+    )
+    chart = ChatChart(type="bar", title=f"Chi tiêu {q.label}",
+                      data=[ChatChartPoint(label=c.label_vi, value=c.amount) for c in cats])
+    return table, chart
+
+
+def _overview_visual(overview: CopilotOverview) -> tuple[ChatTable | None, ChatChart | None]:
+    cats = sorted(overview.categories, key=lambda c: c.amount, reverse=True)
+    if not cats:
+        return None, None
+    table = ChatTable(
+        title=f"Chi tiêu {overview.budget.month_label} theo nhóm",
+        rows=[ChatTableRow(label=c.label_vi, amount=c.amount, pct=c.pct,
+                           trend_pct=c.trend_pct) for c in cats],
+        total_label="Đã chi", total_amount=overview.budget.spent_vnd,
+    )
+    chart = ChatChart(type="bar", title=f"Chi tiêu {overview.budget.month_label}",
+                      data=[ChatChartPoint(label=c.label_vi, value=c.amount) for c in cats])
+    return table, chart
+
+
+async def _spending_visual(question: str) -> tuple[ChatTable | None, ChatChart | None]:
+    """Bảng + biểu đồ số liệu thật cho câu hỏi chi tiêu, hoặc (None, None).
+
+    Dùng lại đúng hai endpoint copilot_quarters/copilot_overview nên số ở bảng
+    khớp từng đồng với màn hình và với điều agent nói — một nguồn số duy nhất.
+    """
+    if not _SPEND_RE.search(question):
+        return None, None
+    if _QUARTER_RE.search(question):
+        return _quarter_visual(await copilot_quarters(quarters=8))
+    if _MONTH_RE.search(question):
+        return _overview_visual(await copilot_overview())
+    return None, None
+
+
 @app.post("/api/copilot/chat", tags=["copilot"],
           summary="Chat với Copilot (Server-Sent Events)")
 async def copilot_chat(payload: ChatRequest) -> StreamingResponse:
@@ -294,6 +354,13 @@ async def copilot_chat(payload: ChatRequest) -> StreamingResponse:
                 reply, chart = text, attached
                 break
 
+    # Đính bảng + biểu đồ số liệu THẬT cho câu hỏi chi tiêu. Chart số thật ghi đè
+    # chart kịch bản tĩnh nếu có. Phải lấy TRƯỚC khi trả StreamingResponse để
+    # middleware kịp đóng dấu X-Guardian-Data-Source theo các lời gọi domain này.
+    table, data_chart = await _spending_visual(payload.message)
+    if data_chart is not None:
+        chart = data_chart
+
     async def stream() -> AsyncIterator[bytes]:
         # Tách giữ nguyên khoảng trắng, giống replayAsStream bên FE, để ghép lại
         # không mất dấu cách.
@@ -301,6 +368,11 @@ async def copilot_chat(payload: ChatRequest) -> StreamingResponse:
             chunk = json.dumps({"token": token}, ensure_ascii=False)
             yield f"data: {chunk}\n\n".encode()
             await asyncio.sleep(CHAT_TOKEN_DELAY_MS / 1000)
+        if table is not None:
+            # Sự kiện bảng phát sau khi hết token, trước biểu đồ. FE bỏ qua object
+            # không có "token" nếu chưa hỗ trợ, nên không làm hỏng client cũ.
+            payload_table = json.dumps({"table": table.model_dump(by_alias=True)}, ensure_ascii=False)
+            yield f"data: {payload_table}\n\n".encode()
         if chart is not None:
             # Sự kiện riêng sau khi hết token. FE bỏ qua object không có "token"
             # nếu chưa hỗ trợ, nên thêm dòng này không làm hỏng client cũ.

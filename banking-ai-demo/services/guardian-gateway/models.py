@@ -261,6 +261,27 @@ class ChatChart(Contract):
     data: list[ChatChartPoint]
 
 
+class ChatTableRow(Contract):
+    label: str
+    amount: int
+    pct: int
+    # None khi chưa có kỳ trước để so — FE hiện "—", khác hẳn 0 (không đổi).
+    trend_pct: int | None = None
+
+
+class ChatTable(Contract):
+    """Bảng số liệu đính kèm câu trả lời chat.
+
+    Số ở đây do gateway dựng từ dữ liệu domain (không phải LLM sinh), nên bảng
+    hiển thị luôn khớp database — cùng lý do tồn tại của header
+    X-Guardian-Data-Source: phần nhìn thì không phân biệt được thật/bịa.
+    """
+    title: str
+    rows: list[ChatTableRow]
+    total_label: str
+    total_amount: int
+
+
 # ---- Màn Home / Copilot -------------------------------------------------------
 
 class HomeContent(Contract):
