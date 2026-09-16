@@ -34,8 +34,18 @@ from models import (
     SafetyHistoryItem,
     ScamAlert,
     ScenarioCount,
+    CaseCustomerProfile,
+    CaseDetail,
+    CaseModelInfo,
+    CaseNoteChip,
+    CaseTransaction,
+    CopilotIntro,
+    HomeContent,
+    Operator,
+    OpsSession,
     SimilarScenario,
     SpendingCategory,
+    SystemStatusRow,
     TimelineEvent,
 )
 
@@ -335,6 +345,8 @@ RISK_EXPLAIN = RiskExplain(
 SAFETY_CENTER = SafetyCenter(
     safety_score=92,
     score_label="Rất an toàn",
+    updated_label="Cập nhật 15/09/2026",
+    shield_enabled=True,
     blocked_count=3,
     warned_count=7,
     reported_count=2,
@@ -402,3 +414,80 @@ CHAT_SUGGESTIONS = [
     "Tôi có thể tiết kiệm bao nhiêu?",
     "Dự báo số dư cuối tháng",
 ]
+
+
+# ============ NỘI DUNG MÀN HOME / COPILOT ============
+
+HOME_CONTENT = HomeContent(
+    greeting="Chào buổi sáng",
+    customer_name=CUSTOMER.name,
+    product_tier="M-FIRST GOLD",
+    assistant_hint="Chi tiêu Ăn uống tháng này tăng 34%. Xem ngay?",
+)
+
+COPILOT_INTRO = CopilotIntro(
+    greeting="Chào Minh Anh 👋 Tôi có thể trả lời về chi tiêu, dòng tiền và tiết kiệm của bạn.",
+    suggestions=CHAT_SUGGESTIONS,
+    month_label=COPILOT_OVERVIEW.budget.month_label,
+)
+
+
+# ============ CHI TIẾT CASE ============
+
+CASE_DETAIL = CaseDetail(
+    transaction=CaseTransaction(
+        channel="Mobile · iPhone 15 (quen)",
+        content="Nop tien xac minh",
+        hold_status="Tạm giữ bởi Scam Shield",
+        sla_minutes=42,
+    ),
+    customer_profile=CaseCustomerProfile(
+        customer_since="2019",
+        segment="Lương",
+        avg_transfer_vnd=9_400_000,
+        alerts90d_count=1,
+        alerts90d_top_score=58,
+    ),
+    model=CaseModelInfo(
+        version="v2.3",
+        method="rule + anomaly",
+        scoring_ms=212,
+        confidence_pct=92,
+        intervene_threshold=75,
+        soft_warn_min=40,
+        soft_warn_max=74,
+    ),
+    note_chips=[
+        CaseNoteChip(label="Đã liên hệ KH", primary=True),
+        CaseNoteChip(label="Khoá 24h", primary=False),
+        CaseNoteChip(label="Thêm TK vào blacklist", primary=False),
+    ],
+)
+
+
+# ============ PHIÊN LÀM VIỆC CỦA CHUYÊN VIÊN OPS ============
+
+OPS_SESSION = OpsSession(
+    operator=Operator(name="Trần Quốc Bảo", role="Fraud Ops", shift="Ca sáng", initials="QB"),
+    system_status=[
+        SystemStatusRow(label="API Gateway", value="OK", tone="ok"),
+        SystemStatusRow(label="Risk Engine", value="OK", tone="ok"),
+        SystemStatusRow(label="LLM GreenNode", value="Chậm", tone="warn"),
+    ],
+    now_label="Thứ Ba, 15/09/2026 · 09:41",
+)
+
+
+# ============ HÀNH ĐỘNG CỦA KHÁCH TRONG LUỒNG SCAM SHIELD ============
+
+# Khách bấm gì thì case chuyển sang trạng thái nào, và ghi thêm gì vào dòng
+# thời gian. Huỷ hoặc báo cáo là khách đã xác nhận có vấn đề nên case thành
+# "confirmed"; vẫn chuyển thì chuyên viên phải xem lại nên thành "investigating".
+CUSTOMER_ACTIONS = {
+    "cancelled": ("confirmed", "Khách hàng huỷ giao dịch sau cảnh báo", "Đã huỷ giao dịch. Tiền vẫn nằm trong tài khoản của bạn."),
+    "reported":  ("confirmed", "Khách hàng báo cáo lừa đảo", "Đã ghi nhận báo cáo và chia sẻ ẩn danh tới hệ thống cảnh báo cộng đồng."),
+    "proceeded": ("investigating", "Khách hàng vẫn tiếp tục chuyển tiền", "Giao dịch được tiếp tục và chuyển cho chuyên viên theo dõi."),
+}
+
+# Case gắn với lệnh chuyển tiền trong luồng demo của khách hàng.
+CUSTOMER_CASE_ID = "ALT-4092"

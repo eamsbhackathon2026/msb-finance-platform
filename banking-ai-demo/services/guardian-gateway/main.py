@@ -34,6 +34,7 @@ import asyncio
 import json
 import os
 import re
+from datetime import datetime, timedelta, timezone
 from typing import AsyncIterator
 
 from fastapi import FastAPI, HTTPException, Request
@@ -42,22 +43,34 @@ from fastapi.responses import JSONResponse, StreamingResponse
 import catalog
 from models import (
     AssessRequest,
+    CaseDetail,
     CaseTimelineStep,
     ChatRequest,
+    CopilotIntro,
     CopilotOverview,
     Customer,
     DecisionRequest,
+    HomeContent,
     OkResponse,
     OpsDashboard,
     OpsMetrics,
+    OpsSession,
     PendingTransfer,
+    ProtectionToggleRequest,
     RiskAssessment,
     RiskExplain,
     SafetyCenter,
     ScamAlert,
+    TransferActionRequest,
+    TransferActionResponse,
 )
 
 SERVICE_NAME = "guardian-gateway"
+
+
+def _now_hms() -> str:
+    """Giờ Việt Nam dạng HH:MM:SS, khớp định dạng các mốc có sẵn trong timeline."""
+    return datetime.now(timezone(timedelta(hours=7))).strftime("%H:%M:%S")
 
 # Nguồn dữ liệu hiện tại. Đổi thành "domain" khi đã nối 5 service thật — giá trị
 # này đi ra header nên biết ngay đang chạy bằng gì mà không cần đọc code.
@@ -109,6 +122,15 @@ async def stamp_data_source(request: Request, call_next):
 # Mất khi pod khởi động lại — chấp nhận được vì đây là bản tạm; khi nối
 # action-feedback-service thì chỗ này thành lời gọi PATCH /cases/{id}.
 _decisions: dict[str, str] = {}
+
+# Lớp bảo vệ khách bật/tắt trong Trung tâm an toàn. Ghi đè giá trị mặc định
+# trong catalog; cùng vòng đời với _decisions nên cũng mất khi pod khởi động lại.
+_protections: dict[str, bool] = {}
+
+# Các bước do hành động của khách sinh ra, chèn vào dòng thời gian của case.
+# Đây là mắt xích khép vòng: khách bấm huỷ ở màn Scam Shield thì chuyên viên
+# vận hành nhìn thấy ngay trong case, thay vì chỉ đổi màn hình phía khách.
+_customer_steps: list[CaseTimelineStep] = []
 
 
 def _alert_by_id(alert_id: str) -> ScamAlert:
@@ -221,6 +243,12 @@ async def ops_decision(alert_id: str, payload: DecisionRequest) -> OkResponse:
 
 # ---- Màn Home / Login --------------------------------------------------------
 
+@app.get("/api/home", response_model=HomeContent, tags=["session"],
+         summary="Nội dung động của màn Home và màn đăng nhập")
+async def home_content() -> HomeContent:
+    return catalog.HOME_CONTENT
+
+
 @app.get("/api/session/customer", response_model=Customer, tags=["session"],
          summary="Khách hàng của phiên hiện tại")
 async def session_customer() -> Customer:
@@ -247,10 +275,54 @@ async def risk_explain() -> RiskExplain:
 @app.get("/api/safety-center", response_model=SafetyCenter, tags=["risk"],
          summary="Trung tâm an toàn")
 async def safety_center() -> SafetyCenter:
-    return catalog.SAFETY_CENTER
+    if not _protections:
+        return catalog.SAFETY_CENTER
+    # Trả về trạng thái khách đã bật/tắt, không phải giá trị mặc định.
+    layers = [p.model_copy(update={"enabled": _protections.get(p.key, p.enabled)})
+              for p in catalog.SAFETY_CENTER.protections]
+    return catalog.SAFETY_CENTER.model_copy(update={"protections": layers})
+
+
+@app.patch("/api/safety-center/protections/{key}", response_model=OkResponse, tags=["risk"],
+           summary="Bật/tắt một lớp bảo vệ")
+async def toggle_protection(key: str, payload: ProtectionToggleRequest) -> OkResponse:
+    if all(p.key != key for p in catalog.SAFETY_CENTER.protections):
+        raise HTTPException(status_code=404, detail=f"Không có lớp bảo vệ '{key}'")
+    _protections[key] = payload.enabled
+    return OkResponse(ok=True)
+
+
+@app.post("/api/transfer/action", response_model=TransferActionResponse, tags=["risk"],
+          summary="Ghi hành động của khách sau cảnh báo Scam Shield")
+async def transfer_action(payload: TransferActionRequest) -> TransferActionResponse:
+    """Khép vòng luồng Scam Shield.
+
+    Trước đây ba nút Huỷ / Vẫn chuyển / Báo cáo chỉ đổi state trong trình duyệt,
+    backend không hề biết. Nay mỗi hành động cập nhật trạng thái case và thêm
+    một bước vào dòng thời gian, nên chuyên viên vận hành nhìn thấy ngay.
+    """
+    status, step_label, message = catalog.CUSTOMER_ACTIONS[payload.action]
+    _decisions[catalog.CUSTOMER_CASE_ID] = status
+    _customer_steps.append(
+        CaseTimelineStep(id=f"ct-cust-{len(_customer_steps) + 1}", time=_now_hms(), label=step_label, done=True)
+    )
+    return TransferActionResponse(ok=True, case_status=status, message=message)
 
 
 # ---- Màn Ops -----------------------------------------------------------------
+
+@app.get("/api/ops/session", response_model=OpsSession, tags=["ops"],
+         summary="Chuyên viên đang trực và tình trạng hệ thống")
+async def ops_session() -> OpsSession:
+    return catalog.OPS_SESSION
+
+
+@app.get("/api/ops/alerts/{alert_id}/detail", response_model=CaseDetail, tags=["ops"],
+         summary="Chi tiết giao dịch, hồ sơ khách và thông tin mô hình của case")
+async def ops_alert_detail(alert_id: str) -> CaseDetail:
+    _alert_by_id(alert_id)  # 404 nếu id không tồn tại
+    return catalog.CASE_DETAIL
+
 
 @app.get("/api/ops/dashboard", response_model=OpsDashboard, tags=["ops"],
          summary="Phần bổ trợ của Ops Dashboard (delta, biểu đồ, đầu vào mô hình)")
@@ -262,15 +334,19 @@ async def ops_dashboard() -> OpsDashboard:
          summary="Dòng thời gian xử lý của một case")
 async def ops_alert_timeline(alert_id: str) -> list[CaseTimelineStep]:
     _alert_by_id(alert_id)  # 404 nếu id không tồn tại
-    return catalog.CASE_TIMELINE
+    if alert_id != catalog.CUSTOMER_CASE_ID or not _customer_steps:
+        return catalog.CASE_TIMELINE
+    # Chèn bước của khách TRƯỚC bước cuối ("chờ quyết định xử lý"), vì bước đó
+    # luôn là mốc chưa hoàn thành và phải nằm ở cuối danh sách.
+    return [*catalog.CASE_TIMELINE[:-1], *_customer_steps, catalog.CASE_TIMELINE[-1]]
 
 
 # ---- Gợi ý câu hỏi cho chat --------------------------------------------------
 
-@app.get("/api/copilot/suggestions", response_model=list[str], tags=["copilot"],
-         summary="Câu hỏi gợi ý hiển thị dưới ô chat")
-async def copilot_suggestions() -> list[str]:
-    return catalog.CHAT_SUGGESTIONS
+@app.get("/api/copilot/intro", response_model=CopilotIntro, tags=["copilot"],
+         summary="Lời chào, câu hỏi gợi ý và nhãn tháng của màn Copilot")
+async def copilot_intro() -> CopilotIntro:
+    return catalog.COPILOT_INTRO
 
 
 # ---- Vận hành ----------------------------------------------------------------
@@ -290,18 +366,23 @@ async def info() -> dict:
         "data_source": DATA_SOURCE,
         "integrated_with_domain_services": False,
         "endpoints": [
+            "GET /api/home",
             "GET /api/session/customer",
             "GET /api/copilot/overview",
-            "GET /api/copilot/suggestions",
+            "GET /api/copilot/intro",
             "POST /api/copilot/chat",
             "GET /api/transfer/pending",
             "POST /api/risk/assess",
             "GET /api/risk/explain",
+            "POST /api/transfer/action",
             "GET /api/safety-center",
+            "PATCH /api/safety-center/protections/{key}",
+            "GET /api/ops/session",
             "GET /api/ops/metrics",
             "GET /api/ops/dashboard",
             "GET /api/ops/alerts",
             "GET /api/ops/alerts/{alert_id}",
+            "GET /api/ops/alerts/{alert_id}/detail",
             "GET /api/ops/alerts/{alert_id}/timeline",
             "POST /api/ops/alerts/{alert_id}/decision",
         ],

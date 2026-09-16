@@ -168,6 +168,8 @@ class ProtectionLayer(Contract):
 class SafetyCenter(Contract):
     safety_score: int
     score_label: str
+    updated_label: str
+    shield_enabled: bool
     blocked_count: int
     warned_count: int
     reported_count: int
@@ -226,3 +228,96 @@ class ChatChart(Contract):
     type: Literal["bar"]
     title: str
     data: list[ChatChartPoint]
+
+
+# ---- Màn Home / Copilot -------------------------------------------------------
+
+class HomeContent(Contract):
+    """Nội dung động của màn Home và màn đăng nhập."""
+    greeting: str
+    customer_name: str
+    product_tier: str
+    assistant_hint: str
+
+
+class CopilotIntro(Contract):
+    greeting: str
+    suggestions: list[str]
+    month_label: str
+
+
+# ---- Chi tiết case cho Ops ----------------------------------------------------
+
+class CaseTransaction(Contract):
+    channel: str
+    content: str
+    hold_status: str
+    sla_minutes: int
+
+
+class CaseCustomerProfile(Contract):
+    customer_since: str
+    segment: str
+    avg_transfer_vnd: int
+    alerts90d_count: int
+    alerts90d_top_score: int
+
+
+class CaseModelInfo(Contract):
+    version: str
+    method: str
+    scoring_ms: int
+    confidence_pct: int
+    intervene_threshold: int
+    soft_warn_min: int
+    soft_warn_max: int
+
+
+class CaseNoteChip(Contract):
+    label: str
+    primary: bool
+
+
+class CaseDetail(Contract):
+    transaction: CaseTransaction
+    customer_profile: CaseCustomerProfile
+    model: CaseModelInfo
+    note_chips: list[CaseNoteChip]
+
+
+# ---- Phiên làm việc của chuyên viên Ops ---------------------------------------
+
+class SystemStatusRow(Contract):
+    label: str
+    value: str
+    # tone là ngữ nghĩa, không phải màu: FE tự quyết định biến CSS tương ứng.
+    tone: Literal["ok", "warn", "danger"]
+
+
+class Operator(Contract):
+    name: str
+    role: str
+    shift: str
+    initials: str
+
+
+class OpsSession(Contract):
+    operator: Operator
+    system_status: list[SystemStatusRow]
+    now_label: str
+
+
+# ---- Thao tác ghi -------------------------------------------------------------
+
+class TransferActionRequest(Contract):
+    action: Literal["cancelled", "proceeded", "reported"]
+
+
+class TransferActionResponse(Contract):
+    ok: bool
+    case_status: Literal["pending", "confirmed", "dismissed", "investigating"]
+    message: str
+
+
+class ProtectionToggleRequest(Contract):
+    enabled: bool

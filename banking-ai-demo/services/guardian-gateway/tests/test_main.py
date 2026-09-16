@@ -239,24 +239,29 @@ def test_moi_response_deu_co_header_nguon_du_lieu():
 def test_info_noi_ro_chua_noi_domain():
     body = client.get("/info").json()
     assert body["integrated_with_domain_services"] is False
-    assert len(body["endpoints"]) == 14
+    assert len(body["endpoints"]) == 19
 
 
 def test_openapi_phuc_vu_dung_cac_endpoint_fe_goi():
     paths = client.get("/openapi.json").json()["paths"]
     assert {p for p in paths if p.startswith("/api/")} == {
+        "/api/home",
         "/api/session/customer",
         "/api/copilot/overview",
-        "/api/copilot/suggestions",
+        "/api/copilot/intro",
         "/api/copilot/chat",
         "/api/transfer/pending",
+        "/api/transfer/action",
         "/api/risk/assess",
         "/api/risk/explain",
         "/api/safety-center",
+        "/api/safety-center/protections/{key}",
+        "/api/ops/session",
         "/api/ops/metrics",
         "/api/ops/dashboard",
         "/api/ops/alerts",
         "/api/ops/alerts/{alert_id}",
+        "/api/ops/alerts/{alert_id}/detail",
         "/api/ops/alerts/{alert_id}/timeline",
         "/api/ops/alerts/{alert_id}/decision",
     }
@@ -266,8 +271,8 @@ def test_openapi_phuc_vu_dung_cac_endpoint_fe_goi():
 
 CUSTOMER_KEYS = {"id", "name", "maskedAccount", "balance"}
 TIMELINE_EVENT_KEYS = {"id", "label", "time", "tone"}
-SAFETY_CENTER_KEYS = {"safetyScore", "scoreLabel", "blockedCount", "warnedCount",
-                      "reportedCount", "history", "protections"}
+SAFETY_CENTER_KEYS = {"safetyScore", "scoreLabel", "updatedLabel", "shieldEnabled",
+                      "blockedCount", "warnedCount", "reportedCount", "history", "protections"}
 OPS_DASHBOARD_KEYS = {"deltas", "hourlyAlerts", "scenarioCounts", "modelInputs"}
 CASE_STEP_KEYS = {"id", "time", "label", "done"}
 
@@ -331,7 +336,9 @@ def test_dong_thoi_gian_cua_case_khong_ton_tai_tra_404():
 
 
 def test_goi_y_cau_hoi():
-    body = client.get("/api/copilot/suggestions").json()
+    intro = client.get("/api/copilot/intro").json()
+    assert set(intro) == {"greeting", "suggestions", "monthLabel"}
+    body = intro["suggestions"]
     assert isinstance(body, list) and len(body) == 3
     # Mỗi gợi ý phải khớp một kịch bản trả lời, nếu không bấm vào sẽ ra câu
     # trả lời mặc định — người xem tưởng chat hỏng.
@@ -355,3 +362,84 @@ def test_chat_khac_khong_kem_bieu_do():
     r = client.post("/api/copilot/chat", json={"message": "Tôi có thể tiết kiệm bao nhiêu?"})
     _, _, chart = _doc_token(r.text)
     assert chart is None
+
+
+# ---- Thao tác ghi ------------------------------------------------------------
+
+def test_khach_huy_giao_dich_cap_nhat_case_va_timeline():
+    main._decisions.clear(); main._customer_steps.clear()
+    truoc = len(client.get("/api/ops/alerts/ALT-4092/timeline").json())
+
+    r = client.post("/api/transfer/action", json={"action": "cancelled"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True and body["caseStatus"] == "confirmed"
+
+    # Khép vòng: chuyên viên vận hành phải thấy hành động của khách.
+    assert client.get("/api/ops/alerts/ALT-4092").json()["status"] == "confirmed"
+    sau = client.get("/api/ops/alerts/ALT-4092/timeline").json()
+    assert len(sau) == truoc + 1
+    # Bước cuối luôn là mốc chưa hoàn thành, bước của khách chèn ngay trước nó.
+    assert sau[-1]["done"] is False
+    assert sau[-2]["label"] == "Khách hàng huỷ giao dịch sau cảnh báo"
+    main._decisions.clear(); main._customer_steps.clear()
+
+
+def test_van_chuyen_tien_thi_case_chuyen_dieu_tra():
+    main._decisions.clear(); main._customer_steps.clear()
+    body = client.post("/api/transfer/action", json={"action": "proceeded"}).json()
+    assert body["caseStatus"] == "investigating"
+    main._decisions.clear(); main._customer_steps.clear()
+
+
+def test_hanh_dong_khong_hop_le_bi_tu_choi():
+    assert client.post("/api/transfer/action", json={"action": "chuyen-luon"}).status_code == 422
+
+
+def test_bat_tat_lop_bao_ve_duoc_luu():
+    main._protections.clear()
+    assert client.patch("/api/safety-center/protections/biometric", json={"enabled": True}).status_code == 200
+    layers = {p["key"]: p["enabled"] for p in client.get("/api/safety-center").json()["protections"]}
+    assert layers["biometric"] is True          # mặc định là False
+    assert layers["realtime"] is True           # các lớp khác giữ nguyên
+    main._protections.clear()
+
+
+def test_lop_bao_ve_khong_ton_tai_tra_404():
+    assert client.patch("/api/safety-center/protections/khong-co", json={"enabled": True}).status_code == 404
+
+
+# ---- Dữ liệu còn lại của các màn ---------------------------------------------
+
+def test_noi_dung_man_home():
+    body = client.get("/api/home").json()
+    assert set(body) == {"greeting", "customerName", "productTier", "assistantHint"}
+    assert body["customerName"] == "Nguyễn Minh Anh"
+
+
+def test_phien_lam_viec_ops():
+    body = client.get("/api/ops/session").json()
+    assert set(body) == {"operator", "systemStatus", "nowLabel"}
+    assert set(body["operator"]) == {"name", "role", "shift", "initials"}
+    for row in body["systemStatus"]:
+        # tone là ngữ nghĩa để FE tự chọn màu, không phải biến CSS.
+        assert row["tone"] in {"ok", "warn", "danger"}
+        assert not row["tone"].startswith("var(")
+
+
+def test_chi_tiet_case():
+    body = client.get("/api/ops/alerts/ALT-4092/detail").json()
+    assert set(body) == {"transaction", "customerProfile", "model", "noteChips"}
+    assert set(body["transaction"]) == {"channel", "content", "holdStatus", "slaMinutes"}
+    assert body["model"]["confidencePct"] == 92
+    assert body["model"]["interveneThreshold"] == 75
+    assert len(body["noteChips"]) == 3
+
+
+def test_chi_tiet_case_khong_ton_tai_tra_404():
+    assert client.get("/api/ops/alerts/ALT-0000/detail").status_code == 404
+
+
+def test_trung_tam_an_toan_co_nhan_cap_nhat():
+    body = client.get("/api/safety-center").json()
+    assert body["updatedLabel"] and body["shieldEnabled"] is True
