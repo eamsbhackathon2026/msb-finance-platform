@@ -293,8 +293,13 @@ def _quarter_visual(report: QuarterlyReport) -> tuple[ChatTable | None, ChatChar
         return None, None
     table = ChatTable(
         title=f"Chi tiêu {q.label} theo nhóm",
-        rows=[ChatTableRow(label=c.label_vi, amount=c.amount, pct=c.pct,
-                           trend_pct=c.delta_vs_prev_pct) for c in cats],
+        # delta_vs_prev_pct của domain là số thực (3.5, -49.8); làm tròn về số
+        # nguyên cho khớp cách khối "Chi tiêu theo quý" hiển thị. Giữ None nguyên
+        # (chưa có kỳ trước) — round(None) sẽ nổ.
+        rows=[ChatTableRow(
+            label=c.label_vi, amount=c.amount, pct=c.pct,
+            trend_pct=round(c.delta_vs_prev_pct) if c.delta_vs_prev_pct is not None else None,
+        ) for c in cats],
         total_label="Tổng chi", total_amount=q.expense,
     )
     chart = ChatChart(type="bar", title=f"Chi tiêu {q.label}",

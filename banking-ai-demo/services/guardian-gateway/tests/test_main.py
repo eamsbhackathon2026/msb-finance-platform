@@ -627,3 +627,32 @@ def test_chat_trend_none_giu_nguyen_khong_thanh_khong():
     # ít nhất phải serialize được, và trendPct nếu có mặt thì là int hoặc None
     for row in table["rows"]:
         assert row.get("trendPct") is None or isinstance(row["trendPct"], int)
+
+
+def test_quarter_visual_lam_tron_delta_so_thuc():
+    # delta_vs_prev_pct của domain là SỐ THỰC (3.5, -49.8). ChatTableRow.trend_pct
+    # là int — nếu không làm tròn, pydantic ném ValidationError và chat trả 500.
+    # Bug này đã xảy ra trên production nhưng test cũ không bắt vì catalog fallback
+    # không có delta số thực. Test này dựng thẳng dữ liệu có phần thập phân.
+    from models import QuarterCategory, QuarterlyReport, QuarterSummary
+    report = QuarterlyReport(
+        quarters=[QuarterSummary(
+            period="2026-Q3", label="Quý 3/2026", income=0, expense=1_000_000, net=0, count=3,
+            by_category=[
+                QuarterCategory(category="FAMILY_SUPPORT", label_vi="Hỗ trợ gia đình",
+                                amount=600_000, pct=60, rank=1, delta_vs_prev_pct=3.5),
+                QuarterCategory(category="HEALTHCARE", label_vi="Y tế",
+                                amount=400_000, pct=40, rank=2, delta_vs_prev_pct=-49.8),
+                QuarterCategory(category="BILLS", label_vi="Hoá đơn",
+                                amount=0, pct=0, rank=3, delta_vs_prev_pct=None),
+            ],
+        )],
+        category_totals=[],
+    )
+    table, chart = main._quarter_visual(report)
+    assert table is not None and chart is not None
+    trends = {r.label: r.trend_pct for r in table.rows}
+    assert trends["Hỗ trợ gia đình"] == 4      # 3.5 → làm tròn
+    assert trends["Y tế"] == -50               # -49.8 → làm tròn
+    assert trends["Hoá đơn"] is None           # None giữ nguyên (chưa có kỳ trước)
+    assert all(isinstance(r.trend_pct, int) or r.trend_pct is None for r in table.rows)
