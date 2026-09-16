@@ -65,8 +65,10 @@ metadata:
   labels:
     app: guardian-gateway
 spec:
-  # ClusterIP: FE gọi qua tên service trong cùng namespace, không mở ra Internet.
-  type: ClusterIP
+  # NodePort chứ không ClusterIP: ALB của VNG định tuyến tới node port, controller
+  # từ chối backend ClusterIP ("service type must be either 'NodePort' or
+  # 'LoadBalancer'"). Đổi lại ClusterIP là ingress guardian ngừng hoạt động.
+  type: NodePort
   selector:
     app: guardian-gateway
   ports:

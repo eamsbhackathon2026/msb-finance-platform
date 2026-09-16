@@ -1,0 +1,66 @@
+# Một ALB duy nhất phục vụ cả web app và gateway, định tuyến theo path — rẻ hơn
+# và đơn giản hơn hai load balancer riêng.
+#
+# CẢNH BÁO CÓ CHỦ ĐÍCH: ingress này đưa guardian-gateway ra Internet mà KHÔNG có
+# xác thực, gồm cả các endpoint ghi (POST /api/ops/alerts/{id}/decision). Đây là
+# lựa chọn có cân nhắc trong phạm vi hackathon vì dữ liệu là demo. Trước khi có
+# dữ liệu thật phải bổ sung xác thực.
+#
+# 5 service domain và namespace agent-platform KHÔNG nằm trong ingress này —
+# chúng giữ nguyên ClusterIP, chỉ gọi được từ trong cluster.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: guardian
+  namespace: finance-demo
+  annotations:
+    vks.vngcloud.vn/load-balancer-name: "alb-guardian-demo"
+    vks.vngcloud.vn/scheme: "internet-facing"
+    # Health check TCP hợp với cả hai pool; check HTTP sẽ cần path riêng cho
+    # từng pool vì FE và gateway có đường health khác nhau.
+    vks.vngcloud.vn/healthcheck-protocol: "TCP"
+    # Chat của Copilot chạy trên SSE. Timeout phải đủ dài để một stream đang
+    # nhả token không bị cắt giữa chừng.
+    vks.vngcloud.vn/idle-timeout-client: "120"
+    vks.vngcloud.vn/idle-timeout-member: "120"
+spec:
+  ingressClassName: "vngcloud"
+  # Mọi thứ không khớp rule nào rơi về web app.
+  defaultBackend:
+    service:
+      name: msb-guardian-fe
+      port:
+        number: 80
+  rules:
+    - http:
+        paths:
+          # Path dài hơn thắng, nên /api tới gateway còn phần còn lại tới SPA.
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: guardian-gateway
+                port:
+                  number: 80
+          # Swagger của gateway, để xem hợp đồng API mà không cần port-forward.
+          - path: /docs
+            pathType: Prefix
+            backend:
+              service:
+                name: guardian-gateway
+                port:
+                  number: 80
+          - path: /openapi.json
+            pathType: Exact
+            backend:
+              service:
+                name: guardian-gateway
+                port:
+                  number: 80
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: msb-guardian-fe
+                port:
+                  number: 80

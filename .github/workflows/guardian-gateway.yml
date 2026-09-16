@@ -95,6 +95,12 @@ jobs:
       # Không kiểm tra secret guardian-db như 5 service domain: gateway không
       # kết nối database.
 
+      - name: Áp dụng ingress công khai
+        # Ingress trỏ tới cả msb-guardian-fe (repo khác) lẫn guardian-gateway.
+        # Đặt ở workflow này vì manifest nằm cùng repo; apply là idempotent nên
+        # chạy lại nhiều lần không sao.
+        run: kubectl apply -f banking-ai-demo/k8s/ingress.yaml
+
       - name: Deploy image (commit SHA) to VKS
         run: |
           sed "s#:latest#:${{ github.sha }}#" "${{ env.MANIFEST }}" \
