@@ -43,6 +43,9 @@ from models import (
     CopilotIntro,
     HomeContent,
     LoginUser,
+    MonthCategory,
+    MonthSummary,
+    MonthlyReport,
     Operator,
     OpsSession,
     SimilarScenario,
@@ -563,6 +566,52 @@ QUARTERLY_REPORT = QuarterlyReport(
                 x.amount for q in _QUARTERS for x in q.by_category
                 if x.label_vi == c.label_vi
             ) * 100 / _TONG),
+        )
+        for c in CATEGORIES
+    ],
+)
+
+
+# ---- So sánh theo tháng (bản tạm khi domain lỗi) ------------------------------
+
+def _month(period: str, label: str, year: int, month: int, he_so: float,
+           delta: float | None) -> MonthSummary:
+    """Một tháng dựng từ CATEGORIES với hệ số nhân — giữ đúng tỷ trọng nhóm."""
+    amounts = [(c, round(c.amount * he_so)) for c in CATEGORIES]
+    tong = sum(a for _, a in amounts) or 1
+    return MonthSummary(
+        period=period, label=label, year=year, month=month,
+        income=round(tong * 1.4), expense=tong, net=round(tong * 0.4),
+        count=len(CATEGORIES) * 4, delta_vs_prev_pct=delta,
+        by_category=[
+            MonthCategory(
+                category=c.key.upper().replace("-", "_"), label_vi=c.label_vi,
+                amount=a, pct=round(a * 100 / tong), rank=i + 1, delta_vs_prev_pct=delta,
+            )
+            for i, (c, a) in enumerate(amounts)
+        ],
+    )
+
+
+_MONTHS = [
+    _month("202604", "Tháng 4/2026", 2026, 4, 0.85, None),
+    _month("202605", "Tháng 5/2026", 2026, 5, 0.92, 8.2),
+    _month("202606", "Tháng 6/2026", 2026, 6, 1.05, 14.1),
+    _month("202607", "Tháng 7/2026", 2026, 7, 0.98, -6.7),
+    _month("202608", "Tháng 8/2026", 2026, 8, 1.10, 12.2),
+    _month("202609", "Tháng 9/2026", 2026, 9, 1.00, -9.1),
+]
+
+_TONG_THANG = sum(c.amount for m in _MONTHS for c in m.by_category) or 1
+
+MONTHLY_REPORT = MonthlyReport(
+    months=_MONTHS,
+    category_totals=[
+        CategoryTotal(
+            category=c.key.upper().replace("-", "_"),
+            label_vi=c.label_vi,
+            amount=sum(x.amount for m in _MONTHS for x in m.by_category if x.label_vi == c.label_vi),
+            pct=round(sum(x.amount for m in _MONTHS for x in m.by_category if x.label_vi == c.label_vi) * 100 / _TONG_THANG),
         )
         for c in CATEGORIES
     ],

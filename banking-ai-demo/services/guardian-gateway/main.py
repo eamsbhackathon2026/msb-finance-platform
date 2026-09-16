@@ -59,6 +59,7 @@ from models import (
     HomeContent,
     LoginRequest,
     LoginResponse,
+    MonthlyReport,
     OkResponse,
     OpsDashboard,
     OpsMetrics,
@@ -282,6 +283,8 @@ async def copilot_overview() -> CopilotOverview:
 _SPEND_RE = re.compile(r"chi tiêu|tiêu|chi |tổng hợp|thống kê|nhóm|phân bổ|báo cáo|xem|show", re.IGNORECASE)
 _QUARTER_RE = re.compile(r"quý|quarter", re.IGNORECASE)
 _MONTH_RE = re.compile(r"tháng", re.IGNORECASE)
+# So sánh nhiều tháng: "so với tháng 8", "so sánh các tháng", "mấy tháng gần đây".
+_COMPARE_RE = re.compile(r"so sánh|so với|các tháng|mấy tháng|nhiều tháng|từng tháng|những tháng|vài tháng", re.IGNORECASE)
 
 
 def _quarter_visual(report: QuarterlyReport) -> tuple[ChatTable | None, ChatChart | None]:
@@ -322,14 +325,39 @@ def _overview_visual(overview: CopilotOverview) -> tuple[ChatTable | None, ChatC
     return table, chart
 
 
+def _months_compare_visual(report: MonthlyReport) -> tuple[ChatTable | None, ChatChart | None]:
+    """Bảng so sánh: mỗi DÒNG là một tháng (tổng chi + thay đổi so tháng trước)."""
+    months = report.months
+    if len(months) < 2:  # cần ít nhất hai tháng mới có gì để so
+        return None, None
+    grand = sum(m.expense for m in months) or 1
+    table = ChatTable(
+        title=f"So sánh chi tiêu {len(months)} tháng gần nhất",
+        rows=[ChatTableRow(
+            label=m.label, amount=m.expense, pct=round(m.expense * 100 / grand),
+            trend_pct=round(m.delta_vs_prev_pct) if m.delta_vs_prev_pct is not None else None,
+        ) for m in months],
+        total_label=f"Tổng {len(months)} tháng", total_amount=sum(m.expense for m in months),
+    )
+    chart = ChatChart(type="bar", title="Chi tiêu theo tháng",
+                      data=[ChatChartPoint(label=f"T{m.month}", value=m.expense) for m in months])
+    return table, chart
+
+
 async def _spending_visual(question: str) -> tuple[ChatTable | None, ChatChart | None]:
     """Bảng + biểu đồ số liệu thật cho câu hỏi chi tiêu, hoặc (None, None).
 
-    Dùng lại đúng hai endpoint copilot_quarters/copilot_overview nên số ở bảng
+    Dùng lại đúng các endpoint copilot_months/quarters/overview nên số ở bảng
     khớp từng đồng với màn hình và với điều agent nói — một nguồn số duy nhất.
+
+    Thứ tự xét: SO SÁNH tháng trước (bảng nhiều tháng) → quý (bảng theo nhóm) →
+    một tháng (bảng theo nhóm). So sánh xét trước vì "so với tháng 8" cũng khớp
+    _MONTH_RE, mà ý là so nhiều tháng chứ không phải xem một tháng.
     """
     if not _SPEND_RE.search(question):
         return None, None
+    if _COMPARE_RE.search(question) and _MONTH_RE.search(question):
+        return _months_compare_visual(await copilot_months(months=6))
     if _QUARTER_RE.search(question):
         return _quarter_visual(await copilot_quarters(quarters=8))
     if _MONTH_RE.search(question):
@@ -724,6 +752,24 @@ async def copilot_quarters(quarters: int = 8) -> QuarterlyReport:
     return mapped
 
 
+@app.get("/api/copilot/months", response_model=MonthlyReport, tags=["copilot"],
+         summary="So sánh chi tiêu giữa các tháng gần nhất")
+async def copilot_months(months: int = 6) -> MonthlyReport:
+    """Nhiều tháng gần nhất kèm thay đổi so tháng trước — cho câu hỏi so sánh.
+
+    Cùng nguồn với tool `monthly-comparison` của agent: khách hỏi "tháng này so
+    với tháng 8 thế nào" thì agent gọi tool này, còn màn chat dựng bảng so sánh
+    từ đúng dữ liệu ấy. Một nguồn số, hai bên không lệch.
+    """
+    payload = await domain.monthly_comparison(domain.DEMO_CUSTOMER_ID, months)
+    mapped = mappers.map_monthly(payload) if payload else None
+    if mapped is None:
+        if payload is not None:
+            domain.mark_degraded()
+        return catalog.MONTHLY_REPORT
+    return mapped
+
+
 @app.get("/api/copilot/intro", response_model=CopilotIntro, tags=["copilot"],
          summary="Lời chào, câu hỏi gợi ý và nhãn tháng của màn Copilot")
 async def copilot_intro() -> CopilotIntro:
@@ -759,6 +805,7 @@ async def info() -> dict:
             "GET /api/copilot/overview",
             "GET /api/copilot/intro",
             "GET /api/copilot/quarters",
+            "GET /api/copilot/months",
             "POST /api/copilot/chat",
             "GET /api/transfer/pending",
             "POST /api/risk/assess",

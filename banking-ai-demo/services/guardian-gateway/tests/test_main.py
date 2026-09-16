@@ -240,7 +240,7 @@ def test_info_phan_anh_dung_cau_hinh_domain():
     body = client.get("/info").json()
     # conftest tắt DOMAIN_ENABLED nên /info phải báo đúng như vậy.
     assert body["integrated_with_domain_services"] is False
-    assert len(body["endpoints"]) == 21
+    assert len(body["endpoints"]) == 22
 
 
 def test_openapi_phuc_vu_dung_cac_endpoint_fe_goi():
@@ -252,6 +252,7 @@ def test_openapi_phuc_vu_dung_cac_endpoint_fe_goi():
         "/api/copilot/overview",
         "/api/copilot/intro",
         "/api/copilot/quarters",
+        "/api/copilot/months",
         "/api/copilot/chat",
         "/api/transfer/pending",
         "/api/transfer/action",
@@ -656,3 +657,55 @@ def test_quarter_visual_lam_tron_delta_so_thuc():
     assert trends["Y tế"] == -50               # -49.8 → làm tròn
     assert trends["Hoá đơn"] is None           # None giữ nguyên (chưa có kỳ trước)
     assert all(isinstance(r.trend_pct, int) or r.trend_pct is None for r in table.rows)
+
+
+# ---- GET /api/copilot/months + bảng so sánh tháng ----------------------------
+
+def test_copilot_months_dung_hop_dong():
+    body = client.get("/api/copilot/months").json()
+    assert set(body) == {"months", "categoryTotals"}
+    assert len(body["months"]) >= 2
+    m = body["months"][-1]
+    assert {"period", "label", "year", "month", "income", "expense", "net",
+            "count", "byCategory"} <= set(m)
+    # deltaVsPrevPct có mặt hoặc null, không được là chuỗi
+    assert m.get("deltaVsPrevPct") is None or isinstance(m["deltaVsPrevPct"], (int, float))
+    assert m["label"].startswith("Tháng")
+
+
+def test_chat_so_sanh_thang_dinh_kem_bang_nhieu_thang():
+    # "so với tháng 8" là câu SO SÁNH — bảng phải có mỗi dòng là một tháng,
+    # không phải bảng nhóm của một tháng.
+    r = client.post("/api/copilot/chat", json={"message": "chi tiêu tháng này so với tháng 8 thì sao?"})
+    _, table, chart = _doc_events(r.text)
+    assert table is not None and chart is not None
+    assert "so sánh" in table["title"].lower()
+    assert all(row["label"].startswith("Tháng") for row in table["rows"])
+    assert len(table["rows"]) >= 2
+    # Tổng = cộng các tháng
+    assert sum(row["amount"] for row in table["rows"]) == table["totalAmount"]
+
+
+def test_months_visual_can_it_nhat_hai_thang():
+    from models import MonthlyReport, MonthSummary
+    one = MonthlyReport(months=[MonthSummary(
+        period="202609", label="Tháng 9/2026", year=2026, month=9,
+        income=0, expense=1_000_000, net=0, count=1, delta_vs_prev_pct=None, by_category=[])],
+        category_totals=[])
+    assert main._months_compare_visual(one) == (None, None)
+
+
+def test_months_visual_delta_lam_tron():
+    from models import MonthCategory, MonthlyReport, MonthSummary
+    rep = MonthlyReport(months=[
+        MonthSummary(period="202608", label="Tháng 8/2026", year=2026, month=8,
+                     income=0, expense=2_000_000, net=0, count=2, delta_vs_prev_pct=None, by_category=[]),
+        MonthSummary(period="202609", label="Tháng 9/2026", year=2026, month=9,
+                     income=0, expense=3_000_000, net=0, count=3, delta_vs_prev_pct=49.8, by_category=[]),
+    ], category_totals=[])
+    table, chart = main._months_compare_visual(rep)
+    assert [r.label for r in table.rows] == ["Tháng 8/2026", "Tháng 9/2026"]
+    assert table.rows[0].trend_pct is None            # tháng đầu không mốc
+    assert table.rows[1].trend_pct == 50              # 49.8 → làm tròn
+    assert table.total_amount == 5_000_000
+    assert [p.value for p in chart.data] == [2_000_000, 3_000_000]

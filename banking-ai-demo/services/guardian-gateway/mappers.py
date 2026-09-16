@@ -16,6 +16,9 @@ from datetime import datetime
 from models import (
     Beneficiary,
     CategoryTotal,
+    MonthCategory,
+    MonthSummary,
+    MonthlyReport,
     QuarterCategory,
     QuarterSummary,
     QuarterlyReport,
@@ -459,3 +462,50 @@ def map_quarterly(payload: dict) -> QuarterlyReport | None:
         for t in (payload.get("category_totals") or [])
     ]
     return QuarterlyReport(quarters=quarters, category_totals=totals)
+
+
+def map_monthly(payload: dict) -> MonthlyReport | None:
+    """So sánh theo tháng từ transaction-service.
+
+    Giống map_quarterly: chỉ gắn nhãn tiếng Việt cho mã nhóm, không tính lại con
+    số nào — delta và pct đã do domain tính. `label` của tháng ("Tháng 8/2026")
+    thì domain trả sẵn nên giữ nguyên.
+    """
+    rows = payload.get("summary") or []
+    if not rows:
+        return None
+    months = [
+        MonthSummary(
+            period=m["period"],
+            label=m["label"],
+            year=int(m.get("year") or 0),
+            month=int(m.get("month") or 0),
+            income=int(m.get("income") or 0),
+            expense=int(m.get("expense") or 0),
+            net=int(m.get("net") or 0),
+            count=int(m.get("count") or 0),
+            delta_vs_prev_pct=m.get("delta_vs_prev_pct"),
+            by_category=[
+                MonthCategory(
+                    category=c["category"],
+                    label_vi=_vi_category(c["category"]),
+                    amount=int(c.get("amount") or 0),
+                    pct=int(c.get("pct") or 0),
+                    rank=int(c.get("rank") or 0),
+                    delta_vs_prev_pct=c.get("delta_vs_prev_pct"),
+                )
+                for c in (m.get("by_category") or [])
+            ],
+        )
+        for m in rows
+    ]
+    totals = [
+        CategoryTotal(
+            category=t["category"],
+            label_vi=_vi_category(t["category"]),
+            amount=int(t.get("amount") or 0),
+            pct=int(t.get("pct") or 0),
+        )
+        for t in (payload.get("category_totals") or [])
+    ]
+    return MonthlyReport(months=months, category_totals=totals)

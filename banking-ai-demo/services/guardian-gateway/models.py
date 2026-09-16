@@ -411,3 +411,33 @@ class CategoryTotal(Contract):
 class QuarterlyReport(Contract):
     quarters: list[QuarterSummary]
     category_totals: list[CategoryTotal]
+
+
+# ---- So sánh theo tháng -------------------------------------------------------
+
+class MonthCategory(Contract):
+    category: str
+    label_vi: str
+    amount: int
+    pct: int
+    rank: int
+    delta_vs_prev_pct: float | None = None
+
+
+class MonthSummary(Contract):
+    period: str
+    label: str
+    year: int
+    month: int
+    income: int
+    expense: int
+    net: int
+    count: int
+    # Thay đổi TỔNG chi so với tháng liền trước. None ở tháng đầu cửa sổ.
+    delta_vs_prev_pct: float | None = None
+    by_category: list[MonthCategory]
+
+
+class MonthlyReport(Contract):
+    months: list[MonthSummary]
+    category_totals: list[CategoryTotal]
