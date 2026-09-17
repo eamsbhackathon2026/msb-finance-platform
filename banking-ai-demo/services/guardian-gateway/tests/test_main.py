@@ -725,8 +725,7 @@ def test_strip_markdown_bo_bang_va_dam_giu_chu():
     assert "Đây là chi tiêu Quý 3/2026:" in out
     assert "Nhận xét:" in out
     assert "- Y tế giảm gần 50%." in out
-    assert ">" not in main._strip_markdown_for_plain("> 📊 Thu nhập: 1 ₫
-chữ")
+    assert ">" not in main._strip_markdown_for_plain("> 📊 Thu nhập: 1 ₫\nchữ")
 
 
 def test_strip_markdown_van_ban_thuan_giu_nguyen():
