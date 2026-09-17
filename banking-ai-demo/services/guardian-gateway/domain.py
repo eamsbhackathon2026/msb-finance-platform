@@ -155,6 +155,22 @@ async def scam_match(payload: dict) -> dict | None:
 
 # ---- transaction-service -----------------------------------------------------
 
+async def transactions(customer_id: int, date_from: str | None = None,
+                       direction: str | None = None, limit: int = 300) -> dict | None:
+    params: dict = {"limit": limit}
+    if date_from:
+        params["date_from"] = date_from
+    if direction:
+        params["direction"] = direction
+    return await _get(TRANSACTION_URL, f"/transactions/{customer_id}", params)
+
+
+async def create_transaction(payload: dict) -> dict | None:
+    """Ghi một giao dịch vào transaction_history (POST /transactions)."""
+    return await _post(TRANSACTION_URL, "/transactions", payload)
+
+
+
 async def monthly_summary(customer_id: int) -> dict | None:
     return await _get(TRANSACTION_URL, f"/transactions/{customer_id}/monthly-summary")
 

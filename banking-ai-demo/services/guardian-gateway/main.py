@@ -77,6 +77,9 @@ from models import (
     TransferActionRequest,
     TransferActionResponse,
     TransferBeneficiary,
+    TransferExecuteRequest,
+    TransferExecuteResponse,
+    TransferHistoryItem,
     TransferPrecheckRequest,
     TransferPrecheckResponse,
 )
@@ -892,6 +895,85 @@ async def transfer_beneficiaries() -> list[TransferBeneficiary]:
     ]
 
 
+@app.post("/api/transfer/execute", response_model=TransferExecuteResponse, tags=["risk"],
+          response_model_exclude_none=True,
+          summary="Ghi giao dịch chuyển tiền đã xác thực PIN vào transaction_history")
+async def transfer_execute(payload: TransferExecuteRequest) -> TransferExecuteResponse:
+    """FE gọi sau khi khách nhập đúng PIN. Ghi bản ghi OUT/POSTED để màn Lịch sử
+    giao dịch truy vấn lại được (bảng transaction_history, cửa sổ 3 tháng)."""
+    cust_id = domain.DEMO_CUSTOMER_ID
+    pf = await domain.portfolio(cust_id)
+    accounts = (pf or {}).get("accounts") or []
+    if not accounts:
+        return TransferExecuteResponse(ok=False)
+    resolve = await domain.resolve_beneficiary(cust_id, payload.bank_code, payload.account_no) or {}
+    # Tên người nhận không có cột riêng trong transaction_history: nhét vào đầu
+    # description theo dạng "→ TÊN: nội dung" để history bóc lại được với stk
+    # ngoài danh bạ (danh bạ FE local không trùng danh bạ DB).
+    note = payload.note or ""
+    desc = f"→{payload.holder_name}: {note}" if payload.holder_name else note
+    created = await domain.create_transaction({
+        "customer_id": cust_id,
+        "account_id": int(accounts[0]["account_id"]),
+        "direction": "OUT",
+        "amount": payload.amount,
+        "beneficiary_id": resolve.get("beneficiary_id"),
+        "beneficiary_bank_code": payload.bank_code,
+        # Cột vốn chứa bản masked; màn lịch sử cần số đầy đủ nên lưu full —
+        # nhất quán với chủ trương bỏ che dữ liệu hiển thị UI.
+        "beneficiary_account_masked": payload.account_no,
+        "transaction_type": "FT",
+        "category": "TRANSFER_P2P",
+        "transaction_description": desc,
+        "channel": "MOBILE",
+        "status": "POSTED",
+    })
+    if not created:
+        return TransferExecuteResponse(ok=False)
+    return TransferExecuteResponse(ok=True, transaction_id=created.get("transaction_id"))
+
+
+@app.get("/api/transfer/history", response_model=list[TransferHistoryItem], tags=["risk"],
+         summary="Lịch sử chuyển tiền (FT, chiều OUT) trong 3 tháng gần nhất")
+async def transfer_history() -> list[TransferHistoryItem]:
+    cust_id = domain.DEMO_CUSTOMER_ID
+    date_from = (datetime.now(timezone(timedelta(hours=7))) - timedelta(days=90)).strftime("%Y%m%d")
+    data = await domain.transactions(cust_id, date_from=date_from, direction="OUT")
+    rows = (data or {}).get("transactions") or []
+    bens = await domain.beneficiaries(cust_id, include_full=True)
+    by_id = {b.get("beneficiary_id"): b for b in (bens or {}).get("beneficiaries") or []}
+
+    items: list[TransferHistoryItem] = []
+    for r in rows:
+        if r.get("transaction_type") != "FT":
+            continue  # màn này chỉ hiện giao dịch chuyển tiền
+        desc = r.get("description") or ""
+        name, note = "", desc
+        if desc.startswith("→") and ":" in desc:
+            head, tail = desc[1:].split(":", 1)
+            name, note = head.strip(), tail.strip()
+        b = by_id.get(r.get("beneficiary_id"))
+        if b:
+            name = b.get("name") or b.get("name_masked") or name
+            bank = b.get("bank_code") or r.get("beneficiary_bank_code") or ""
+            account = b.get("account_no") or b.get("account_masked") or r.get("beneficiary_account_masked") or ""
+        else:
+            bank = r.get("beneficiary_bank_code") or ""
+            account = r.get("beneficiary_account_masked") or ""
+        t = (r.get("transaction_time") or "000000").ljust(6, "0")
+        items.append(TransferHistoryItem(
+            id=str(r.get("transaction_id")),
+            datetime=f"{r.get('date')}T{t[0:2]}:{t[2:4]}:{t[4:6]}",
+            name=name or account or "Người nhận",
+            bank=bank,
+            account=account,
+            amount=int(r.get("amount") or 0),
+            note=note,
+            status=r.get("status") or "POSTED",
+        ))
+    return items
+
+
 @app.get("/api/scamshield/signals", response_model=ScamShieldSignals, tags=["risk"],
          summary="Tín hiệu gian lận của một lệnh chuyển — công cụ cho agent Scam Shield")
 async def scamshield_signals(bank_code: str, account_no: str, amount: int, note: str = "") -> ScamShieldSignals:
@@ -1069,6 +1151,8 @@ async def info() -> dict:
             "POST /api/transfer/action",
             "GET /api/transfer/beneficiaries",
             "POST /api/transfer/precheck",
+            "POST /api/transfer/execute",
+            "GET /api/transfer/history",
             "GET /api/scamshield/signals",
             "GET /api/safety-center",
             "PATCH /api/safety-center/protections/{key}",

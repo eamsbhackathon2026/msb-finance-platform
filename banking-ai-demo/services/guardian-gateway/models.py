@@ -391,6 +391,32 @@ class TransferBeneficiary(Contract):
     trusted: bool
 
 
+class TransferExecuteRequest(Contract):
+    """Lệnh chuyển đã qua xác thực PIN trên app — ghi vào transaction_history."""
+    bank_code: str
+    account_no: str
+    holder_name: str = ""
+    amount: int
+    note: str = ""
+
+
+class TransferExecuteResponse(Contract):
+    ok: bool
+    transaction_id: int | None = None
+
+
+class TransferHistoryItem(Contract):
+    """Một dòng của bảng lịch sử chuyển tiền (màn Lịch sử giao dịch trên app)."""
+    id: str
+    datetime: str
+    name: str
+    bank: str
+    account: str
+    amount: int
+    note: str = ""
+    status: str = "POSTED"
+
+
 class TransferPrecheckRequest(Contract):
     bank_code: str
     account_no: str
