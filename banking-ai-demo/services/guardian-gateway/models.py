@@ -295,6 +295,27 @@ class ChatTable(Contract):
     footnote: str | None = None
 
 
+class ChatGridColumn(Contract):
+    label: str
+    # "right" cho cột số để các chữ số thẳng hàng, dễ so.
+    align: Literal["left", "right"] = "left"
+
+
+class ChatGrid(Contract):
+    """Bảng tự do chuyển thể từ markdown mà agent viết ra.
+
+    Khác ChatTable ở chỗ gateway KHÔNG hiểu nội dung, chỉ đổi định dạng. Nhờ vậy
+    bất kỳ câu hỏi tài chính nào agent kẻ bảng được thì người dùng cũng thấy
+    bảng, không cần gateway thêm luật cho từng loại câu hỏi.
+
+    Đánh đổi: số trong đây do LLM viết (dù nó lấy từ tool đọc dữ liệu thật), nên
+    KHÔNG dùng thay ChatTable ở những câu gateway tự dựng được bảng chuẩn —
+    chỗ nào có ChatTable thì ưu tiên ChatTable.
+    """
+    columns: list[ChatGridColumn]
+    rows: list[list[str]]
+
+
 # ---- Màn Home / Copilot -------------------------------------------------------
 
 class HomeContent(Contract):

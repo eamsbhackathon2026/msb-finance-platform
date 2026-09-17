@@ -952,3 +952,54 @@ def test_bo_thang_mep_cua_so_khong_co_thu_nhap():
     assert so_thang == 5, "tháng không có thu nhập không phải một chu kỳ sống"
     assert kha_nang == 1_018_000
     assert thu_nhap == 7_600_000
+
+
+# ---- Bảng markdown của agent → bảng thật (áp dụng cho MỌI câu hỏi) ------------
+
+_MD_MAU = """Phân bổ chi tiêu tháng 9/2026:
+
+| Nhóm chi tiêu | Số tiền | Tỷ trọng |
+|---------------|--------:|---------:|
+| Hỗ trợ gia đình | 1.600.000 ₫ | 65% |
+| **Y tế** | **811.000 ₫** | 33% |
+
+Nhận xét: nhóm Y tế tăng đột biến.
+"""
+
+
+def test_doc_bang_markdown_cua_agent():
+    gs = main._parse_markdown_grids(_MD_MAU)
+    assert len(gs) == 1
+    g = gs[0]
+    assert [c.label for c in g.columns] == ["Nhóm chi tiêu", "Số tiền", "Tỷ trọng"]
+    # Cột chữ canh trái, cột số canh phải cho thẳng hàng.
+    assert [c.align for c in g.columns] == ["left", "right", "right"]
+    # **đậm** phải được gỡ, nếu không ô sẽ hiện thô "**Y tế**".
+    assert g.rows[1] == ["Y tế", "811.000 ₫", "33%"]
+
+
+def test_tu_suy_canh_le_khi_agent_khong_ghi():
+    md = "| Kịch bản | Số tiền |\n| --- | --- |\n| 3 năm | 13.092.250 ₫ |\n| 5 năm | 7.855.350 ₫ |"
+    g = main._parse_markdown_grids(md)[0]
+    assert [c.align for c in g.columns] == ["left", "right"]
+
+
+def test_khoi_khong_phai_bang_thi_bo_qua():
+    # Thiếu dòng kẻ ngang → không phải bảng, không được dựng bảng rỗng.
+    assert main._parse_markdown_grids("| a | b |\n| 1 | 2 |") == []
+    # Có tiêu đề + kẻ ngang nhưng không có dòng dữ liệu nào.
+    assert main._parse_markdown_grids("| a | b |\n| --- | --- |") == []
+    assert main._parse_markdown_grids("không có bảng nào ở đây") == []
+
+
+def test_dong_thieu_o_van_du_cot():
+    md = "| a | b | c |\n| --- | --- | --- |\n| 1 | 2 |"
+    g = main._parse_markdown_grids(md)[0]
+    assert g.rows == [["1", "2", ""]], "dòng thiếu ô phải đệm cho đủ, không lệch cột"
+
+
+def test_gioi_han_so_bang_va_so_dong():
+    mot_bang = "| a |\n| --- |\n" + "".join(f"| {i} |\n" for i in range(40))
+    gs = main._parse_markdown_grids(mot_bang * 6)
+    assert len(gs) <= 3
+    assert all(len(g.rows) <= 15 for g in gs)

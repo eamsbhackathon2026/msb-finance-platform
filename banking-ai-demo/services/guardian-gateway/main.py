@@ -49,6 +49,8 @@ from models import (
     CaseTimelineStep,
     ChatChart,
     ChatChartPoint,
+    ChatGrid,
+    ChatGridColumn,
     ChatRequest,
     ChatTable,
     ChatTableRow,
@@ -317,6 +319,73 @@ def _strip_markdown_for_plain(text: str) -> str:
     out = re.sub(r"(?m)^\s{0,3}>\s?", "", out)        # bỏ dấu trích dẫn >
     out = re.sub(r"\n{3,}", "\n\n", out)          # gộp dòng trống thừa
     return out.strip()
+
+
+# ---- Chuyển bảng markdown của agent thành bảng thật ---------------------------
+
+# Dòng kẻ ngang của bảng markdown: "|---|---:|" (cho phép thiếu | ở hai đầu).
+_GRID_SEP_RE = re.compile(r"^\s*\|?[\s:|-]*-[\s:|-]*\|?\s*$")
+# Ô toàn số: tiền, phần trăm, dấu +/-. Cột như vậy canh phải cho thẳng hàng.
+_GRID_SO_RE = re.compile(r"^[+\-−]?[\d.,%\s₫]+$")
+_GRID_MAX = 3          # ba bảng là hết chỗ trong một bong bóng chat
+_GRID_MAX_ROWS = 15
+_GRID_MAX_COLS = 6
+
+
+def _grid_cells(line: str) -> list[str]:
+    """Bóc các ô của một dòng markdown "| a | b |"."""
+    s = line.strip()
+    if s.startswith("|"):
+        s = s[1:]
+    if s.endswith("|"):
+        s = s[:-1]
+    return [re.sub(r"\*\*(.+?)\*\*", r"\1", o).strip() for o in s.split("|")]
+
+
+def _parse_markdown_grids(text: str) -> list[ChatGrid]:
+    """Mọi bảng markdown trong câu trả lời agent → ChatGrid để FE kẻ bảng thật.
+
+    Đây là chỗ khiến "câu hỏi tài chính nào cũng có bảng" mà không phải viết
+    thêm luật cho từng loại câu: agent vốn đã xuất bảng markdown (đẹp ở
+    admin-web), trước đây gateway vứt đi cho khỏi lộ dấu "|" trên FE.
+    """
+    grids: list[ChatGrid] = []
+    lines = text.split("\n")
+    i = 0
+    while i < len(lines) and len(grids) < _GRID_MAX:
+        if not lines[i].strip().startswith("|"):
+            i += 1
+            continue
+        khoi = []
+        while i < len(lines) and lines[i].strip().startswith("|"):
+            khoi.append(lines[i])
+            i += 1
+        # Cần tiêu đề + dòng kẻ + ít nhất một dòng dữ liệu mới thành bảng.
+        if len(khoi) < 3 or not _GRID_SEP_RE.match(khoi[1]):
+            continue
+        tieu_de = _grid_cells(khoi[0])[:_GRID_MAX_COLS]
+        if not tieu_de:
+            continue
+        can_le = _grid_cells(khoi[1])[:_GRID_MAX_COLS]
+        rows = []
+        for dong in khoi[2:][:_GRID_MAX_ROWS]:
+            o = _grid_cells(dong)[:len(tieu_de)]
+            o += [""] * (len(tieu_de) - len(o))  # dòng thiếu ô thì đệm cho đủ
+            rows.append(o)
+        if not rows:
+            continue
+        cols = []
+        for idx, nhan in enumerate(tieu_de):
+            # Agent thường không ghi canh lề, nên tự suy: cột mà mọi ô đều là
+            # số thì canh phải.
+            danh_dau = can_le[idx] if idx < len(can_le) else ""
+            gia_tri = [r[idx] for r in rows if r[idx]]
+            phai = danh_dau.endswith(":") and not danh_dau.strip().startswith(":")
+            if not phai and gia_tri:
+                phai = all(_GRID_SO_RE.match(v) for v in gia_tri)
+            cols.append(ChatGridColumn(label=nhan, align="right" if phai else "left"))
+        grids.append(ChatGrid(columns=cols, rows=rows))
+    return grids
 
 
 def _quarter_visual(report: QuarterlyReport) -> tuple[ChatTable | None, ChatChart | None]:
@@ -632,11 +701,17 @@ async def copilot_chat(payload: ChatRequest) -> StreamingResponse:
     # tháng 7, kịch bản lại nói tháng 9). Lúc đó lấy câu dẫn thẳng từ tiêu đề
     # bảng để chữ và bảng luôn khớp nhau.
     reply, chart = catalog.FALLBACK_REPLY, None
+    grids: list[ChatGrid] = []
     from_agent = await domain.agent_answer(payload.message)
     if from_agent:
         # Agent trả bảng markdown (đẹp ở admin-web); gỡ markdown cho FE văn bản
         # thuần — bảng số đã có bản riêng do gateway đính bên dưới.
         reply = _strip_markdown_for_plain(from_agent) or catalog.FALLBACK_REPLY
+        if table is None:
+            # Câu này gateway không tự dựng được bảng chuẩn → chuyển thể bảng
+            # markdown của agent. Nhờ nhánh này, câu hỏi tài chính nào agent kẻ
+            # bảng được thì người dùng cũng thấy bảng, không cần thêm luật.
+            grids = _parse_markdown_grids(from_agent)
     elif table is not None:
         reply = f"{table.title}:"
     else:
@@ -661,6 +736,11 @@ async def copilot_chat(payload: ChatRequest) -> StreamingResponse:
             # không có "token" nếu chưa hỗ trợ, nên không làm hỏng client cũ.
             payload_table = json.dumps({"table": table.model_dump(by_alias=True)}, ensure_ascii=False)
             yield f"data: {payload_table}\n\n".encode()
+        for g in grids:
+            # Bảng agent phát sau bảng chuẩn, trước biểu đồ. Client cũ bỏ qua
+            # object không có "token" nên thêm sự kiện này không làm hỏng gì.
+            payload_grid = json.dumps({"grid": g.model_dump(by_alias=True)}, ensure_ascii=False)
+            yield f"data: {payload_grid}\n\n".encode()
         if chart is not None:
             # Sự kiện riêng sau khi hết token. FE bỏ qua object không có "token"
             # nếu chưa hỗ trợ, nên thêm dòng này không làm hỏng client cũ.
