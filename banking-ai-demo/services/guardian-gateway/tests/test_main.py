@@ -1753,3 +1753,12 @@ def test_don_vi_dai_phai_khop_truoc_don_vi_ngan():
     làm mất phần "rưỡi" — lỗi này đã xảy ra thật."""
     assert main._tien_tu_chu("2 triệu rưỡi") == 2_500_000
     assert main._tien_tu_chu("2 trieu") == 2_000_000
+
+
+def test_agent_hong_van_tra_so_tien_vi_code_tu_tinh():
+    """Số tiền do code tính nên không phụ thuộc agent. Agent chết mà vẫn bỏ
+    trống số tiền là vứt đi thông tin đã có sẵn trong tay."""
+    r = client.post("/api/chat-banking/parse", json={"message": "chuyen 2 trieu ruoi cho anh Son"})
+    b = r.json()
+    assert b["source"] == "fallback"       # conftest tắt agent
+    assert b["amount"] == 2_500_000

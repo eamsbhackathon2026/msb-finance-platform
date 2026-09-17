@@ -1760,7 +1760,10 @@ async def chat_banking_parse(payload: ChatBankingRequest) -> ChatBankingDraft:
             raw = None
     got = _doc_json_agent(raw or "")
     if not got:
-        return ChatBankingDraft(intent="other", source="fallback")
+        # Agent lỗi/chậm: vẫn trả số tiền vì phần này do CODE tính, không cần
+        # mô hình. FE dùng bộ luật regex của nó cho phần còn lại.
+        return ChatBankingDraft(intent="other", amount=_tien_tu_chu(payload.message),
+                                source="fallback")
 
     y_dinh = got.get("intent")
     if y_dinh not in {"transfer", "list_beneficiaries", "other"}:
