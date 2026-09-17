@@ -302,6 +302,7 @@ def _strip_markdown_for_plain(text: str) -> str:
     out = re.sub(r"\*\*(.+?)\*\*", r"\1", out)   # bỏ **đậm**
     out = re.sub(r"__(.+?)__", r"\1", out)        # bỏ __đậm__
     out = re.sub(r"(?m)^\s{0,3}#{1,6}\s*", "", out)  # bỏ tiêu đề #
+    out = re.sub(r"(?m)^\s{0,3}>\s?", "", out)        # bỏ dấu trích dẫn >
     out = re.sub(r"\n{3,}", "\n\n", out)          # gộp dòng trống thừa
     return out.strip()
 
