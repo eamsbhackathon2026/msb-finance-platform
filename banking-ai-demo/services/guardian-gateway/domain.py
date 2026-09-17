@@ -499,6 +499,22 @@ class AgentBusy(Exception):
     """
 
 
+def with_customer_context(question: str, customer_id: int | None) -> str:
+    """Gắn mã khách vào câu hỏi gửi agent.
+
+    Bộ công cụ hiện tại nhận customer_id trên ĐƯỜNG DẪN
+    (/transactions/{customer_id}/...), mà agent thì không có cách nào tự biết
+    khách đang đăng nhập là ai — gateway mới là nơi giữ phiên. Không truyền thì
+    agent đoán bừa hoặc bỏ trống rồi trả lời "chưa xem được dữ liệu".
+
+    Đặt ở đầu câu và ghi rõ là bối cảnh hệ thống, để mô hình không đọc nhầm
+    thành một phần câu hỏi của khách.
+    """
+    if not customer_id:
+        return question
+    return f"[Bối cảnh hệ thống: customer_id={customer_id}]\n{question}"
+
+
 async def agent_stream(question: str, agent_id: str | None = None, kind: str = "copilot",
                        customer_id: int | None = None, session_key: str | None = None):
     """Phát từng mẩu chữ của agent NGAY khi nền tảng gửi ra.
@@ -518,7 +534,7 @@ async def agent_stream(question: str, agent_id: str | None = None, kind: str = "
         return
     _mark_touched()
     started = time.monotonic()
-    body = {"input": {"message": question}}
+    body = {"input": {"message": with_customer_context(question, customer_id)}}
     if session_key:
         body["session_key"] = session_key
 
@@ -625,7 +641,7 @@ async def agent_answer(question: str, agent_id: str | None = None, kind: str = "
                 f"{AGENT_SERVICE_URL}/v1/agents/{aid}/runs",
                 headers={"X-API-Key": AGENT_API_KEY},
                 json={
-                    "input": {"message": question},
+                    "input": {"message": with_customer_context(question, customer_id)},
                     "mode": "sync",
                     **({"session_key": session_key} if session_key else {}),
                 },
