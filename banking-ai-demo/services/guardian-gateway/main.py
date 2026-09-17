@@ -59,6 +59,7 @@ from models import (
     Customer,
     DecisionRequest,
     HomeContent,
+    InvestRates,
     LoginRequest,
     LoginResponse,
     MonthlyReport,
@@ -1363,6 +1364,21 @@ async def copilot_months(months: int = 6) -> MonthlyReport:
     return mapped
 
 
+@app.get("/api/invest/rates", response_model=InvestRates, tags=["copilot"],
+         summary="Biểu lãi suất tiết kiệm — product × interest_rate × interest_rate_term")
+async def invest_rates() -> InvestRates:
+    """Biểu lãi suất hiện tại cho màn Khám phá sản phẩm → Biểu lãi suất.
+
+    transaction-service join 3 bảng và chọn đợt hiệu lực mới nhất của từng cặp
+    (sản phẩm, kỳ hạn); gateway chỉ xoay dữ liệu phẳng thành bảng theo kỳ hạn để
+    FE vẽ bảng và biểu đồ so sánh lãi suất cùng kỳ hạn. Service chết thì trả
+    biểu cố định trong catalog (khớp seed) để buổi trình bày không trắng màn."""
+    raw = await domain.savings_rates()
+    if not raw or not raw.get("rates"):
+        return catalog.INVEST_RATES
+    return mappers.map_invest_rates(raw)
+
+
 @app.get("/api/copilot/intro", response_model=CopilotIntro, tags=["copilot"],
          summary="Lời chào, câu hỏi gợi ý và nhãn tháng của màn Copilot")
 async def copilot_intro() -> CopilotIntro:
@@ -1402,6 +1418,7 @@ async def info() -> dict:
             "GET /api/copilot/months",
             "GET /api/copilot/month",
             "POST /api/copilot/chat",
+            "GET /api/invest/rates",
             "GET /api/transfer/pending",
             "POST /api/risk/assess",
             "GET /api/risk/explain",

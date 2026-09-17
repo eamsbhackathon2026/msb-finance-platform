@@ -240,7 +240,7 @@ def test_info_phan_anh_dung_cau_hinh_domain():
     body = client.get("/info").json()
     # conftest tắt DOMAIN_ENABLED nên /info phải báo đúng như vậy.
     assert body["integrated_with_domain_services"] is False
-    assert len(body["endpoints"]) == 28
+    assert len(body["endpoints"]) == 29
 
 
 def test_openapi_phuc_vu_dung_cac_endpoint_fe_goi():
@@ -255,6 +255,7 @@ def test_openapi_phuc_vu_dung_cac_endpoint_fe_goi():
         "/api/copilot/months",
         "/api/copilot/month",
         "/api/copilot/chat",
+        "/api/invest/rates",
         "/api/transfer/pending",
         "/api/transfer/action",
         "/api/transfer/beneficiaries",
@@ -275,6 +276,26 @@ def test_openapi_phuc_vu_dung_cac_endpoint_fe_goi():
         "/api/ops/alerts/{alert_id}/timeline",
         "/api/ops/alerts/{alert_id}/decision",
     }
+
+
+def test_invest_rates_tra_bieu_lai_suat_theo_ky_han():
+    """Biểu lãi suất: nhóm theo kỳ hạn, xếp tăng dần, con số khớp đợt 2026-09-01.
+
+    conftest tắt DOMAIN_ENABLED nên đây là dữ liệu catalog — catalog được chép
+    đúng từ db/seed.sql, vì vậy test này cũng là chốt chống lệch giữa fallback
+    và dữ liệu thật."""
+    body = client.get("/api/invest/rates").json()
+    assert body["asOf"] == "2026-09-01"
+    assert {p["id"] for p in body["products"]} == {1, 2, 3, 4, 7}
+
+    months = [r["term"]["months"] for r in body["rows"]]
+    assert months == sorted(months)
+
+    rows = {r["term"]["code"]: r for r in body["rows"]}
+    t12 = {c["productId"]: c["ratePct"] for c in rows["T12"]["rates"]}
+    assert t12 == {1: 5.5, 2: 5.8, 4: 6.1}
+    kkh = {c["productId"]: c["ratePct"] for c in rows["KKH"]["rates"]}
+    assert kkh == {3: 0.5, 7: 0.1}
 
 
 # ---- Các endpoint gộp theo màn hình ------------------------------------------

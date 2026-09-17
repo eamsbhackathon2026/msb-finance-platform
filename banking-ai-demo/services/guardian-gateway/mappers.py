@@ -16,6 +16,11 @@ from datetime import datetime
 from models import (
     Beneficiary,
     CategoryTotal,
+    InvestRates,
+    RateCell,
+    RateProduct,
+    RateRow,
+    RateTerm,
     MonthCategory,
     MonthSummary,
     MonthlyReport,
@@ -509,3 +514,29 @@ def map_monthly(payload: dict) -> MonthlyReport | None:
         for t in (payload.get("category_totals") or [])
     ]
     return MonthlyReport(months=months, category_totals=totals)
+
+
+def map_invest_rates(raw: dict) -> InvestRates:
+    """Xoay payload phẳng của transaction-service thành bảng theo kỳ hạn.
+
+    Service trả một dòng cho mỗi (sản phẩm, kỳ hạn); FE cần nhóm sẵn theo kỳ hạn
+    để vẽ bảng biểu lãi suất và biểu đồ so sánh cùng kỳ hạn mà không phải tự gộp.
+    """
+    rates = raw.get("rates") or []
+    product_names: dict[int, str] = {}
+    terms: dict[str, RateTerm] = {}
+    cells: dict[str, list[RateCell]] = {}
+    for r in rates:
+        pid = int(r["product_id"])
+        product_names.setdefault(pid, r["product_name"])
+        code = r["term_code"]
+        terms.setdefault(code, RateTerm(code=code, months=int(r["term_months"]), label=r["term_label"]))
+        cells.setdefault(code, []).append(RateCell(product_id=pid, rate_pct=float(r["rate_pct"])))
+    return InvestRates(
+        as_of=str(raw.get("as_of") or ""),
+        products=[RateProduct(id=pid, name=name) for pid, name in sorted(product_names.items())],
+        rows=[
+            RateRow(term=terms[code], rates=cells[code])
+            for code in sorted(terms, key=lambda c: terms[c].months)
+        ],
+    )

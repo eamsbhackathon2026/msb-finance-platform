@@ -20,7 +20,7 @@ TRUNCATE TABLE
   product_recommendation, spending_insight, notification, feedback, llm_trace,
   guardian_case, account_event, behavior_profile, transaction_history,
   risk_decision, fraud_case, scam_scenario, beneficiary, loan, deposit,
-  account, customer, product
+  account, customer, interest_rate, interest_rate_term, product
 RESTART IDENTITY CASCADE;
 
 -- 1. Danh mục sản phẩm ------------------------------------------------
@@ -38,6 +38,63 @@ INSERT INTO product (product_id, product_name, product_group, product_currency, 
   (11, 'Thẻ tín dụng MSB Visa Platinum', 'CARD', 'VND', 'ACTIVE', '24.0'),
   (12, 'Bảo hiểm Nhân thọ An Tâm', 'INSURANCE', 'VND', 'ACTIVE', NULL),
   (13, 'Quỹ Cổ phiếu Tăng trưởng', 'INVESTMENT', 'VND', 'COMING_SOON', '11.0');
+
+-- 1b. Biểu lãi suất tiết kiệm (kỳ hạn + lãi theo đợt hiệu lực) --------
+INSERT INTO interest_rate_term (term_code, term_months, term_label) VALUES
+  ('KKH', 0, 'Không kỳ hạn'),
+  ('T01', 1, '1 tháng'),
+  ('T03', 3, '3 tháng'),
+  ('T06', 6, '6 tháng'),
+  ('T09', 9, '9 tháng'),
+  ('T12', 12, '12 tháng'),
+  ('T18', 18, '18 tháng'),
+  ('T24', 24, '24 tháng');
+
+INSERT INTO interest_rate (rate_id, product_id, term_code, rate_pct, effective_from) VALUES
+  (1, 1, 'T01', 3.4, '2026-06-01'),
+  (2, 1, 'T03', 3.7, '2026-06-01'),
+  (3, 1, 'T06', 5.0, '2026-06-01'),
+  (4, 1, 'T09', 5.1, '2026-06-01'),
+  (5, 1, 'T12', 5.3, '2026-06-01'),
+  (6, 1, 'T18', 5.4, '2026-06-01'),
+  (7, 1, 'T24', 5.4, '2026-06-01'),
+  (8, 2, 'T01', 3.7, '2026-06-01'),
+  (9, 2, 'T03', 4.0, '2026-06-01'),
+  (10, 2, 'T06', 5.3, '2026-06-01'),
+  (11, 2, 'T09', 5.5, '2026-06-01'),
+  (12, 2, 'T12', 5.6, '2026-06-01'),
+  (13, 2, 'T18', 5.8, '2026-06-01'),
+  (14, 2, 'T24', 5.9, '2026-06-01'),
+  (15, 3, 'KKH', 0.3, '2026-06-01'),
+  (16, 4, 'T03', 3.8, '2026-06-01'),
+  (17, 4, 'T06', 5.1, '2026-06-01'),
+  (18, 4, 'T09', 5.4, '2026-06-01'),
+  (19, 4, 'T12', 5.9, '2026-06-01'),
+  (20, 4, 'T18', 6.0, '2026-06-01'),
+  (21, 4, 'T24', 6.1, '2026-06-01'),
+  (22, 7, 'KKH', 0.1, '2026-06-01'),
+  (23, 1, 'T01', 3.6, '2026-09-01'),
+  (24, 1, 'T03', 3.9, '2026-09-01'),
+  (25, 1, 'T06', 5.2, '2026-09-01'),
+  (26, 1, 'T09', 5.3, '2026-09-01'),
+  (27, 1, 'T12', 5.5, '2026-09-01'),
+  (28, 1, 'T18', 5.6, '2026-09-01'),
+  (29, 1, 'T24', 5.6, '2026-09-01'),
+  (30, 2, 'T01', 3.9, '2026-09-01'),
+  (31, 2, 'T03', 4.2, '2026-09-01'),
+  (32, 2, 'T06', 5.5, '2026-09-01'),
+  (33, 2, 'T09', 5.7, '2026-09-01'),
+  (34, 2, 'T12', 5.8, '2026-09-01'),
+  (35, 2, 'T18', 6.0, '2026-09-01'),
+  (36, 2, 'T24', 6.1, '2026-09-01'),
+  (37, 3, 'KKH', 0.5, '2026-09-01'),
+  (38, 4, 'T03', 4.0, '2026-09-01'),
+  (39, 4, 'T06', 5.3, '2026-09-01'),
+  (40, 4, 'T09', 5.6, '2026-09-01'),
+  (41, 4, 'T12', 6.1, '2026-09-01'),
+  (42, 4, 'T18', 6.2, '2026-09-01'),
+  (43, 4, 'T24', 6.3, '2026-09-01'),
+  (44, 7, 'KKH', 0.1, '2026-09-01');
 
 -- 2. Khách hàng -------------------------------------------------------
 -- 100001 · SALARY · NGUYEN VAN MINH    · Kỹ sư phần mềm, lương 32tr, có vay tiêu dùng

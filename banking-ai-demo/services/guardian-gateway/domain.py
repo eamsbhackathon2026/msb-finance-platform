@@ -189,6 +189,14 @@ async def insights(customer_id: int) -> dict | None:
     return await _get(TRANSACTION_URL, f"/customers/{customer_id}/insights")
 
 
+async def savings_rates() -> dict | None:
+    """Biểu lãi suất hiện tại của sản phẩm tiết kiệm.
+
+    transaction-service join product × interest_rate × interest_rate_term và tự
+    chọn đợt hiệu lực mới nhất cho từng cặp (sản phẩm, kỳ hạn)."""
+    return await _get(TRANSACTION_URL, "/products/savings/rates")
+
+
 async def recommendations(customer_id: int) -> dict | None:
     return await _get(TRANSACTION_URL, f"/customers/{customer_id}/recommendations")
 

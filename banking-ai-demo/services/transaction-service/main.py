@@ -46,6 +46,8 @@ OWNS_TABLES = [
     "spending_insight",
     "product",
     "product_recommendation",
+    "interest_rate",
+    "interest_rate_term",
 ]
 
 CATEGORIES = [
@@ -871,6 +873,49 @@ def list_products(
     sql += " ORDER BY product_group, product_id"
     rows = query(sql, params)
     return {"count": len(rows), "products": rows}
+
+
+@app.get("/products/savings/rates", tags=["product"])
+def savings_rates(product_group: str = Query("SAVINGS", description="Nhóm sản phẩm cần tra biểu lãi suất")):
+    """Biểu lãi suất HIỆN TẠI của sản phẩm tiết kiệm: product × interest_rate × interest_rate_term.
+
+    interest_rate lưu theo đợt hiệu lực (effective_from), nên "hiện tại" là đợt
+    mới nhất chưa vượt ngày hôm nay của từng cặp (sản phẩm, kỳ hạn) — KHÔNG phải
+    MAX toàn bảng: hai sản phẩm có thể điều chỉnh lãi vào hai ngày khác nhau.
+    """
+    terms = query(
+        "SELECT term_code, term_months, term_label FROM interest_rate_term ORDER BY term_months"
+    )
+    rows = query(
+        """
+        SELECT p.product_id, p.product_name, t.term_code, t.term_months, t.term_label,
+               r.rate_pct, r.effective_from
+        FROM interest_rate r
+        JOIN product p ON p.product_id = r.product_id
+        JOIN interest_rate_term t ON t.term_code = r.term_code
+        WHERE p.product_group = %s AND p.product_status = 'ACTIVE'
+          AND r.effective_from = (
+              SELECT MAX(r2.effective_from) FROM interest_rate r2
+              WHERE r2.product_id = r.product_id AND r2.term_code = r.term_code
+                AND r2.effective_from <= CURRENT_DATE)
+        ORDER BY t.term_months, p.product_id
+        """,
+        (product_group.upper(),),
+    )
+    out = [
+        {
+            "product_id": r["product_id"],
+            "product_name": r["product_name"],
+            "term_code": r["term_code"],
+            "term_months": int(r["term_months"]),
+            "term_label": r["term_label"],
+            "rate_pct": float(num(r["rate_pct"])),
+            "effective_from": str(r["effective_from"]),
+        }
+        for r in rows
+    ]
+    as_of = max((r["effective_from"] for r in out), default=None)
+    return {"count": len(out), "as_of": as_of, "terms": terms, "rates": out}
 
 
 @app.get("/customers/{customer_id}/recommendations", tags=["product"])

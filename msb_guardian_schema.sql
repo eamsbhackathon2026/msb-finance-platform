@@ -1,5 +1,5 @@
 -- =====================================================================
--- MSB AI Financial Guardian · PostgreSQL DDL (chuyển từ DBML, 18 bảng)
+-- MSB AI Financial Guardian · PostgreSQL DDL (chuyển từ DBML, 20 bảng)
 -- Chạy: psql -U guardian -d guardian -f msb_guardian_schema.sql
 --  1. Kiểu khóa ngoại được thống nhất với khóa chính: customer_id, product_id,
 --     account_id, beneficiary_id, transaction_id, insight_id → INTEGER.
@@ -31,7 +31,24 @@ CREATE TABLE product (
   CONSTRAINT ck_product_group  CHECK (product_group IN ('SAVINGS','LOAN','CARD','INSURANCE','INVESTMENT')),
   CONSTRAINT ck_product_status CHECK (product_status IN ('ACTIVE','INACTIVE','COMING_SOON'))
 );
-COMMENT ON TABLE product IS 'Danh mục sản phẩm MSB (giả lập) phục vụ Journey A – Financial Copilot. Dữ liệu tham chiếu, seed một lần, không cập nhật trong luồng giao dịch. Nếu cần so sánh lãi suất, thêm cột product_interest_rate NUMERIC.';
+COMMENT ON TABLE product IS 'Danh mục sản phẩm MSB (giả lập) phục vụ Journey A – Financial Copilot. Dữ liệu tham chiếu, seed một lần, không cập nhật trong luồng giao dịch. product_interest chỉ để hiển thị; số dùng để tính/so sánh nằm ở interest_rate.';
+
+CREATE TABLE interest_rate_term (
+  term_code    VARCHAR(10)  PRIMARY KEY,              -- KKH | T01 | T03 | T06 | T09 | T12 | T18 | T24
+  term_months  INTEGER      NOT NULL UNIQUE,          -- 0 = không kỳ hạn; dùng để sắp xếp biểu lãi suất
+  term_label   VARCHAR(30)  NOT NULL                  -- Nhãn hiển thị: 'Không kỳ hạn', '6 tháng'...
+);
+COMMENT ON TABLE interest_rate_term IS 'Danh mục kỳ hạn gửi tiết kiệm. Dữ liệu tham chiếu, seed một lần; màn Biểu lãi suất dùng term_months để xếp thứ tự cột.';
+
+CREATE TABLE interest_rate (
+  rate_id        INTEGER      PRIMARY KEY,
+  product_id     INTEGER      NOT NULL REFERENCES product(product_id),
+  term_code      VARCHAR(10)  NOT NULL REFERENCES interest_rate_term(term_code),
+  rate_pct       NUMERIC(5,2) NOT NULL,               -- %/năm, dạng số để tính và so sánh (khác product_interest chỉ hiển thị)
+  effective_from DATE         NOT NULL,               -- Biểu lãi suất theo đợt; "hiện tại" = MAX(effective_from) <= CURRENT_DATE
+  CONSTRAINT uq_interest_rate UNIQUE (product_id, term_code, effective_from)
+);
+COMMENT ON TABLE interest_rate IS 'Lãi suất %/năm theo (sản phẩm, kỳ hạn, đợt hiệu lực). Màn Biểu lãi suất lấy đợt mới nhất chưa vượt ngày hiện tại; giữ các đợt cũ để đối chiếu lịch sử điều chỉnh.';
 
 CREATE TABLE customer (
   customer_id        INTEGER      PRIMARY KEY,       -- Mã CIF (CUSTOMER ID bên T24)

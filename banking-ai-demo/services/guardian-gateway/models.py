@@ -562,3 +562,32 @@ class MonthSummary(Contract):
 class MonthlyReport(Contract):
     months: list[MonthSummary]
     category_totals: list[CategoryTotal]
+
+
+# ---- Màn Biểu lãi suất (Khám phá sản phẩm → Biểu lãi suất) --------------------
+
+class RateTerm(Contract):
+    code: str        # KKH | T01 | T03 ... — khớp interest_rate_term.term_code
+    months: int      # 0 = không kỳ hạn; FE dùng để xếp trục kỳ hạn
+    label: str
+
+
+class RateProduct(Contract):
+    id: int
+    name: str
+
+
+class RateCell(Contract):
+    product_id: int
+    rate_pct: float  # %/năm — đợt hiệu lực mới nhất của cặp (sản phẩm, kỳ hạn)
+
+
+class RateRow(Contract):
+    term: RateTerm
+    rates: list[RateCell]
+
+
+class InvestRates(Contract):
+    as_of: str                    # Ngày hiệu lực mới nhất trong biểu — hiển thị "Áp dụng từ ..."
+    products: list[RateProduct]
+    rows: list[RateRow]           # Mỗi dòng một kỳ hạn, để FE vẽ bảng + biểu đồ so sánh cùng kỳ hạn

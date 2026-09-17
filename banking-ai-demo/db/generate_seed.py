@@ -110,6 +110,42 @@ PRODUCTS = [
     (13, "Quỹ Cổ phiếu Tăng trưởng",           "INVESTMENT", "VND", "COMING_SOON", "11.0"),
 ]
 
+# Kỳ hạn gửi tiết kiệm — term_months=0 là không kỳ hạn, dùng để xếp cột biểu lãi suất.
+RATE_TERMS = [
+    ("KKH", 0,  "Không kỳ hạn"),
+    ("T01", 1,  "1 tháng"),
+    ("T03", 3,  "3 tháng"),
+    ("T06", 6,  "6 tháng"),
+    ("T09", 9,  "9 tháng"),
+    ("T12", 12, "12 tháng"),
+    ("T18", 18, "18 tháng"),
+    ("T24", 24, "24 tháng"),
+]
+
+# Lãi suất %/năm theo (product_id → {term_code: rate}) cho hai đợt hiệu lực:
+# đợt cũ 2026-06-01 và đợt hiện hành 2026-09-01 (thấp hơn/cao hơn ~0.2 điểm) —
+# để endpoint "lãi suất hiện tại" thực sự phải chọn MAX(effective_from).
+# Sản phẩm 3 (linh hoạt) và 7 (tài khoản thanh toán) chỉ có lãi không kỳ hạn.
+CURRENT_RATES = {
+    1: {"T01": 3.6, "T03": 3.9, "T06": 5.2, "T09": 5.3, "T12": 5.5, "T18": 5.6, "T24": 5.6},
+    2: {"T01": 3.9, "T03": 4.2, "T06": 5.5, "T09": 5.7, "T12": 5.8, "T18": 6.0, "T24": 6.1},
+    4: {"T03": 4.0, "T06": 5.3, "T09": 5.6, "T12": 6.1, "T18": 6.2, "T24": 6.3},
+    3: {"KKH": 0.5},
+    7: {"KKH": 0.1},
+}
+RATE_EFFECTIVE_OLD = date(2026, 6, 1)
+RATE_EFFECTIVE_CURRENT = date(2026, 9, 1)
+
+interest_rate_rows: list[tuple] = []
+_rate_id = 0
+for effective, delta in ((RATE_EFFECTIVE_OLD, -0.2), (RATE_EFFECTIVE_CURRENT, 0.0)):
+    for pid in sorted(CURRENT_RATES):
+        for term_code, rate in CURRENT_RATES[pid].items():
+            _rate_id += 1
+            interest_rate_rows.append(
+                (_rate_id, pid, term_code, round(max(rate + delta, 0.1), 2), effective.isoformat())
+            )
+
 # ---------------------------------------------------------------------------
 # 2. Mười khách hàng — phủ đủ ba phân khúc
 # ---------------------------------------------------------------------------
@@ -1376,7 +1412,7 @@ TRUNCATE TABLE
   product_recommendation, spending_insight, notification, feedback, llm_trace,
   guardian_case, account_event, behavior_profile, transaction_history,
   risk_decision, fraud_case, scam_scenario, beneficiary, loan, deposit,
-  account, customer, product
+  account, customer, interest_rate, interest_rate_term, product
 RESTART IDENTITY CASCADE;
 
 """)
@@ -1386,6 +1422,14 @@ w(insert("product",
          ["product_id", "product_name", "product_group", "product_currency",
           "product_status", "product_interest"],
          PRODUCTS))
+
+w("-- 1b. Biểu lãi suất tiết kiệm (kỳ hạn + lãi theo đợt hiệu lực) --------\n")
+w(insert("interest_rate_term",
+         ["term_code", "term_months", "term_label"],
+         RATE_TERMS))
+w(insert("interest_rate",
+         ["rate_id", "product_id", "term_code", "rate_pct", "effective_from"],
+         interest_rate_rows))
 
 w("-- 2. Khách hàng -------------------------------------------------------\n")
 for cid, name, target, dob, note in CUSTOMERS:

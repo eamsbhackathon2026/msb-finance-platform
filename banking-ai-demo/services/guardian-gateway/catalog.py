@@ -15,6 +15,11 @@ from models import (
     Beneficiary,
     BudgetSummary,
     CaseTimelineStep,
+    InvestRates,
+    RateCell,
+    RateProduct,
+    RateRow,
+    RateTerm,
     ChatChart,
     ChatChartPoint,
     CopilotOverview,
@@ -627,5 +632,41 @@ MONTHLY_REPORT = MonthlyReport(
             pct=round(sum(x.amount for m in _MONTHS for x in m.by_category if x.label_vi == c.label_vi) * 100 / _TONG_THANG),
         )
         for c in CATEGORIES
+    ],
+)
+
+
+# ============ BIỂU LÃI SUẤT TIẾT KIỆM ============
+# Khớp đợt hiệu lực 2026-09-01 trong db/seed.sql — DB chết thì màn Biểu lãi suất
+# vẫn hiển thị đúng con số mà DB sẽ trả.
+
+_RATE_PRODUCTS = [
+    RateProduct(id=1, name="Tiết kiệm Măng Non 6 tháng"),
+    RateProduct(id=2, name="Tiết kiệm Online 12 tháng"),
+    RateProduct(id=3, name="Tiết kiệm Linh hoạt không kỳ hạn"),
+    RateProduct(id=4, name="Tiết kiệm Tích lũy An nhàn"),
+    RateProduct(id=7, name="Tài khoản Thanh toán Chuẩn"),
+]
+
+_RATE_TABLE: list[tuple[str, int, str, list[tuple[int, float]]]] = [
+    ("KKH", 0,  "Không kỳ hạn", [(3, 0.5), (7, 0.1)]),
+    ("T01", 1,  "1 tháng",      [(1, 3.6), (2, 3.9)]),
+    ("T03", 3,  "3 tháng",      [(1, 3.9), (2, 4.2), (4, 4.0)]),
+    ("T06", 6,  "6 tháng",      [(1, 5.2), (2, 5.5), (4, 5.3)]),
+    ("T09", 9,  "9 tháng",      [(1, 5.3), (2, 5.7), (4, 5.6)]),
+    ("T12", 12, "12 tháng",     [(1, 5.5), (2, 5.8), (4, 6.1)]),
+    ("T18", 18, "18 tháng",     [(1, 5.6), (2, 6.0), (4, 6.2)]),
+    ("T24", 24, "24 tháng",     [(1, 5.6), (2, 6.1), (4, 6.3)]),
+]
+
+INVEST_RATES = InvestRates(
+    as_of="2026-09-01",
+    products=_RATE_PRODUCTS,
+    rows=[
+        RateRow(
+            term=RateTerm(code=code, months=months, label=label),
+            rates=[RateCell(product_id=pid, rate_pct=pct) for pid, pct in cells],
+        )
+        for code, months, label, cells in _RATE_TABLE
     ],
 )
