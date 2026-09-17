@@ -709,3 +709,24 @@ def test_months_visual_delta_lam_tron():
     assert table.rows[1].trend_pct == 50              # 49.8 → làm tròn
     assert table.total_amount == 5_000_000
     assert [p.value for p in chart.data] == [2_000_000, 3_000_000]
+
+
+def test_strip_markdown_bo_bang_va_dam_giu_chu():
+    # Agent trả bảng markdown + **đậm**; FE văn bản thuần phải nhận chữ sạch,
+    # không dấu | và không **, vì bảng số đã có bản riêng do gateway đính.
+    md = (
+        "Đây là chi tiêu Quý 3/2026:\n\n"
+        "| Nhóm | Số tiền |\n|---|---:|\n| Hỗ trợ gia đình | 9.300.000 ₫ |\n\n"
+        "**Nhận xét:**\n- **Y tế** giảm gần 50%.\n"
+    )
+    out = main._strip_markdown_for_plain(md)
+    assert "|" not in out
+    assert "**" not in out and "---" not in out
+    assert "Đây là chi tiêu Quý 3/2026:" in out
+    assert "Nhận xét:" in out
+    assert "- Y tế giảm gần 50%." in out
+
+
+def test_strip_markdown_van_ban_thuan_giu_nguyen():
+    plain = "Tháng 9 bạn chi 2.465.000 ₫, giảm 62% so tháng 8.\n- Ăn uống giảm mạnh."
+    assert main._strip_markdown_for_plain(plain) == plain

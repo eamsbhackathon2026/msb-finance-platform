@@ -287,6 +287,25 @@ _MONTH_RE = re.compile(r"tháng", re.IGNORECASE)
 _COMPARE_RE = re.compile(r"so sánh|so với|các tháng|mấy tháng|nhiều tháng|từng tháng|những tháng|vài tháng", re.IGNORECASE)
 
 
+def _strip_markdown_for_plain(text: str) -> str:
+    """Gỡ markdown khỏi câu trả lời agent cho msb-guardian-fe (render văn bản thuần).
+
+    Agent xuất bảng markdown (kiểu Excel) để render đẹp ở admin-web của nền tảng
+    agent. Nhưng bong bóng chat của msb-guardian-fe render {content} dạng văn bản
+    thuần và ĐÃ có bảng số liệu riêng do gateway đính (số của domain, đảm bảo
+    đúng). Nên ở đường này: bỏ nguyên khối bảng (dòng bắt đầu bằng "|") để không
+    hiện dấu | thô và không trùng bảng, đồng thời gỡ **đậm** và # tiêu đề. Phần
+    chữ nhận xét và gạch đầu dòng "- " giữ nguyên.
+    """
+    kept = [ln for ln in text.split("\n") if not ln.lstrip().startswith("|")]
+    out = "\n".join(kept)
+    out = re.sub(r"\*\*(.+?)\*\*", r"\1", out)   # bỏ **đậm**
+    out = re.sub(r"__(.+?)__", r"\1", out)        # bỏ __đậm__
+    out = re.sub(r"(?m)^\s{0,3}#{1,6}\s*", "", out)  # bỏ tiêu đề #
+    out = re.sub(r"\n{3,}", "\n\n", out)          # gộp dòng trống thừa
+    return out.strip()
+
+
 def _quarter_visual(report: QuarterlyReport) -> tuple[ChatTable | None, ChatChart | None]:
     if not report.quarters:
         return None, None
@@ -381,7 +400,9 @@ async def copilot_chat(payload: ChatRequest) -> StreamingResponse:
     reply, chart = catalog.FALLBACK_REPLY, None
     from_agent = await domain.agent_answer(payload.message)
     if from_agent:
-        reply = from_agent
+        # Agent trả bảng markdown (đẹp ở admin-web); gỡ markdown cho FE văn bản
+        # thuần — bảng số đã có bản riêng do gateway đính bên dưới.
+        reply = _strip_markdown_for_plain(from_agent) or catalog.FALLBACK_REPLY
     else:
         for pattern, text, attached in catalog.SCRIPTED_REPLIES:
             if re.search(pattern, payload.message, re.IGNORECASE):
