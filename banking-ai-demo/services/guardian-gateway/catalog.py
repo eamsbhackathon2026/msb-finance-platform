@@ -337,6 +337,12 @@ TRANSFER_BENEFICIARIES = [
                         relationship="MERCHANT", trusted=True),
     TransferBeneficiary(id="b3", name="NGUYEN VAN TUAN", bank="ACB", account="5270 118 264",
                         relationship="UNKNOWN", trusted=False),
+    # Hai người cùng tên KHANH — khớp seed 6b (300901/300902): Chat Banking gặp
+    # câu "chuyển cho anh Khánh" phải hỏi lại chọn ai, kể cả khi domain lỗi.
+    TransferBeneficiary(id="300901", name="PHAM QUOC KHANH", bank="MSB", account="0330168839210",
+                        relationship="FRIEND", trusted=True),
+    TransferBeneficiary(id="300902", name="TRAN DUY KHANH", bank="VCB", account="9704229981",
+                        relationship="FAMILY", trusted=True),
 ]
 
 

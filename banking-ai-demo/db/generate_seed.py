@@ -1471,6 +1471,28 @@ w(insert("beneficiary",
           "beneficiary_is_synthetic_mule", "beneficiary_status"],
          beneficiary_out))
 
+# Hai người nhận cùng tên "KHANH" của khách demo 100008 — dựng kịch bản Chat
+# Banking: "chuyển 500k cho anh Khánh" là câu mơ hồ, bot phải hỏi lại chọn ai.
+# ID 3009xx nằm ngoài dải sinh tự động (ben_seq) nên không đụng hàng có sẵn;
+# cố ý KHÔNG đưa vào beneficiary_rows để không làm lệch baseline/thống kê đã sinh.
+KHANH_BENEFICIARIES = [
+    (300901, 100008, "MSB", "0330168839210", "0330 ****", "PHAM QUOC KHANH", "PHAM QUOC K***",
+     "PERSONAL", "FRIEND", "2025-10-05 10:00:00+07", "2026-09-12 14:00:00+07",
+     14, 21400000, 0, 1528571, 345, False, "ACTIVE"),
+    (300902, 100008, "VCB", "9704229981", "9704 ****", "TRAN DUY KHANH", "TRAN DUY K***",
+     "PERSONAL", "FAMILY", "2026-01-18 10:00:00+07", "2026-09-08 14:00:00+07",
+     6, 7800000, 0, 1300000, 240, False, "ACTIVE"),
+]
+w("-- 6b. Người nhận trùng tên 'Khánh' — demo Chat Banking hỏi lại chọn ai --\n")
+w(insert("beneficiary",
+         ["beneficiary_id", "customer_id", "beneficiary_bank_code", "beneficiary_account_no",
+          "beneficiary_account_masked", "beneficiary_name", "beneficiary_name_masked",
+          "beneficiary_type", "beneficiary_relationship", "beneficiary_first_seen_at",
+          "beneficiary_last_tx_at", "beneficiary_tx_count", "beneficiary_total_out",
+          "beneficiary_total_in", "beneficiary_avg_amount", "beneficiary_age_days",
+          "beneficiary_is_synthetic_mule", "beneficiary_status"],
+         KHANH_BENEFICIARIES))
+
 w("-- 7. Playbook kịch bản lừa đảo ----------------------------------------\n")
 w(insert("scam_scenario",
          ["scenario_id", "scenario_name", "group_code", "pattern", "agent_can_ask",
