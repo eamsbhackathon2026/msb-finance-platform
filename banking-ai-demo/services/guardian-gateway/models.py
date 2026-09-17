@@ -810,3 +810,22 @@ class CopilotNotification(Contract):
     title: str
     body: str
     cta_label: str | None = None
+
+
+# ---- Sổ tiết kiệm đến hạn (nguồn của thông báo trên màn Copilot) ---------------
+
+class MaturingDeposit(Contract):
+    deposit_id: int
+    product_name: str | None = None
+    amount: int              # VND
+    rate_pct: float          # %/năm đang hưởng (interest + margin)
+    term_months: int | None = None
+    maturity_date: str       # ISO yyyy-mm-dd — gateway đổi từ YYYYMMDD của core
+    due_today: bool
+    overdue: bool            # đã qua ngày đáo hạn mà chưa tái tục
+
+
+class MaturingDeposits(Contract):
+    as_of: str               # Ngày (giờ VN) dùng để so — FE hiển thị "hôm nay"
+    count: int
+    deposits: list[MaturingDeposit]

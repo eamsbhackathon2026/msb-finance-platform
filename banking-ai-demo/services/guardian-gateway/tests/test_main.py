@@ -240,7 +240,7 @@ def test_info_phan_anh_dung_cau_hinh_domain():
     body = client.get("/info").json()
     # conftest tắt DOMAIN_ENABLED nên /info phải báo đúng như vậy.
     assert body["integrated_with_domain_services"] is False
-    assert len(body["endpoints"]) == 36
+    assert len(body["endpoints"]) == 37
 
 
 def test_openapi_phuc_vu_dung_cac_endpoint_fe_goi():
@@ -257,6 +257,7 @@ def test_openapi_phuc_vu_dung_cac_endpoint_fe_goi():
         "/api/copilot/month",
         "/api/copilot/chat",
         "/api/invest/rates",
+        "/api/invest/maturing-deposits",
         "/api/invest/open",
         "/api/transfer/intervene",
         "/api/transfer/intervene/{decision_id}",
@@ -288,6 +289,17 @@ def test_openapi_phuc_vu_dung_cac_endpoint_fe_goi():
         "/api/ops/alerts/{alert_id}/timeline",
         "/api/ops/alerts/{alert_id}/decision",
     }
+
+
+def test_invest_maturing_deposits_stub_tra_so_demo_den_han_hom_nay():
+    """Domain tắt → sổ demo 7009 đến hạn ĐÚNG hôm nay: maturityDate phải trùng
+    asOf và được đổ lúc trả lời (hằng số tĩnh sẽ sai ngay ngày hôm sau)."""
+    body = client.get("/api/invest/maturing-deposits").json()
+    assert body["count"] == 1 and len(body["deposits"]) == 1
+    d = body["deposits"][0]
+    assert d["dueToday"] is True and d["overdue"] is False
+    assert d["maturityDate"] == body["asOf"] != ""
+    assert d["amount"] == 770_000_000
 
 
 def test_copilot_notifications_du_3_nhac_viec():

@@ -18,6 +18,7 @@ from models import (
     BudgetSummary,
     CaseTimelineStep,
     CopilotNotification,
+    MaturingDeposit,
     InvestRates,
     RateCell,
     RateProduct,
@@ -826,3 +827,20 @@ COPILOT_NOTIFICATIONS = [
         cta_label="Xem khoản vay",
     ),
 ]
+
+
+# ============ SỔ TIẾT KIỆM ĐẾN HẠN (bản tạm khi domain lỗi) ============
+# Khớp deposit 7009 của khách demo. maturity_date/as_of để trống — endpoint đổ
+# ngày HÔM NAY (giờ VN) vào lúc trả lời, vì "đến hạn hôm nay" là ngày động,
+# hằng số tĩnh sẽ sai ngay ngày hôm sau.
+
+MATURING_DEPOSIT_DEMO = MaturingDeposit(
+    deposit_id=7009,
+    product_name="Tiết kiệm Online 12 tháng",
+    amount=770_000_000,
+    rate_pct=6.1,
+    term_months=12,
+    maturity_date="",
+    due_today=True,
+    overdue=False,
+)

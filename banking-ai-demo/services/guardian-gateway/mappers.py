@@ -24,6 +24,8 @@ from models import (
     CaseTransaction,
     CategoryTotal,
     InvestRates,
+    MaturingDeposit,
+    MaturingDeposits,
     RateCell,
     RateProduct,
     RateRow,
@@ -979,5 +981,32 @@ def map_invest_rates(raw: dict) -> InvestRates:
         rows=[
             RateRow(term=terms[code], rates=cells[code])
             for code in sorted(terms, key=lambda c: terms[c].months)
+        ],
+    )
+
+
+def _core_ymd_to_iso(ymd) -> str:
+    """'20270410' (định dạng T24) → '2027-04-10'; giá trị lạ trả nguyên văn."""
+    s = str(ymd or "")
+    return f"{s[0:4]}-{s[4:6]}-{s[6:8]}" if len(s) == 8 and s.isdigit() else s
+
+
+def map_maturing_deposits(raw: dict) -> MaturingDeposits:
+    """Sổ đến hạn từ customer-profile-service → hợp đồng FE (ngày sang ISO)."""
+    return MaturingDeposits(
+        as_of=_core_ymd_to_iso(raw.get("as_of")),
+        count=int(raw.get("count") or 0),
+        deposits=[
+            MaturingDeposit(
+                deposit_id=int(d["deposit_id"]),
+                product_name=d.get("product_name"),
+                amount=int(float(d.get("amount") or 0)),
+                rate_pct=float(d.get("interest_rate") or 0),
+                term_months=d.get("term_months"),
+                maturity_date=_core_ymd_to_iso(d.get("maturity_date")),
+                due_today=bool(d.get("due_today")),
+                overdue=bool(d.get("overdue")),
+            )
+            for d in (raw.get("deposits") or [])
         ],
     )

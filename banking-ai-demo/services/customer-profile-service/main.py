@@ -453,6 +453,40 @@ def get_portfolio(customer_id: int):
     }
 
 
+@app.get("/customers/{customer_id}/deposits/maturing", tags=["customer"])
+def deposits_maturing(customer_id: int, days: int = Query(0, ge=0, le=31, description="Cửa sổ ngày tới; 0 = đến hạn HÔM NAY")):
+    """Sổ tiết kiệm có maturity_date rơi vào hôm nay (days=0) hoặc trong `days`
+    ngày tới — gồm cả sổ ĐÃ quá hạn mà chưa tái tục, vì khách vẫn cần được nhắc
+    chọn sản phẩm tái gửi. Ngày so theo giờ VN, cùng định dạng YYYYMMDD của core."""
+    _customer_or_404(customer_id)
+    today = now_vn().strftime("%Y%m%d")
+    horizon = (now_vn() + timedelta(days=days)).strftime("%Y%m%d")
+    rows = query(
+        """
+        SELECT d.*, p.product_name
+        FROM deposit d LEFT JOIN product p ON p.product_id = d.product_id
+        WHERE d.customer_id = %s AND d.maturity_date IS NOT NULL AND d.maturity_date <= %s
+        ORDER BY d.maturity_date
+        """,
+        (customer_id, horizon),
+    )
+    items = [
+        {
+            "deposit_id": d["deposit_id"],
+            "product_id": d.get("product_id"),
+            "product_name": d.get("product_name"),
+            "amount": float(num(d.get("amount"))),
+            "interest_rate": float(num(d.get("interest"))) + float(num(d.get("interest_margin"))),
+            "term_months": as_int(d.get("term")),
+            "maturity_date": d.get("maturity_date"),
+            "due_today": d.get("maturity_date") == today,
+            "overdue": bool(d.get("maturity_date") and d["maturity_date"] < today),
+        }
+        for d in rows
+    ]
+    return {"customer_id": customer_id, "as_of": today, "count": len(items), "deposits": items}
+
+
 # ---------------------------------------------------------------------------
 # Baseline / digital twin
 # ---------------------------------------------------------------------------

@@ -58,6 +58,7 @@ from models import (
     CopilotIntro,
     CopilotNotification,
     CopilotOverview,
+    MaturingDeposits,
     Customer,
     DecisionRequest,
     GuardianAction,
@@ -2152,6 +2153,21 @@ async def savings_options(amount: int, months: int, limit: int = 5) -> SavingsOp
     )
 
 
+@app.get("/api/invest/maturing-deposits", response_model=MaturingDeposits, tags=["copilot"],
+         summary="Check sổ tiết kiệm có maturity_date đến hạn hôm nay (hoặc trong ?days ngày tới)")
+async def invest_maturing_deposits(days: int = 0) -> MaturingDeposits:
+    """FE gọi để CHECK sổ đến hạn: customer-profile-service so maturity_date của
+    từng sổ với ngày hôm nay (giờ VN); days=0 nghĩa là đúng hôm nay, kèm cả sổ
+    đã quá hạn chưa tái tục. Domain chết → trả sổ demo 7009 đến hạn đúng hôm nay
+    (ngày đổ lúc trả lời — hằng số tĩnh sẽ sai ngay ngày hôm sau)."""
+    raw = await domain.deposits_maturing(domain.current_customer_id(), days)
+    if raw is None:
+        today = datetime.now(timezone(timedelta(hours=7))).date().isoformat()
+        demo = catalog.MATURING_DEPOSIT_DEMO.model_copy(update={"maturity_date": today})
+        return MaturingDeposits(as_of=today, count=1, deposits=[demo])
+    return mappers.map_maturing_deposits(raw)
+
+
 @app.get("/api/copilot/notifications", response_model=list[CopilotNotification], tags=["copilot"],
          response_model_exclude_none=True,
          summary="Nhắc việc tài chính dưới nhóm chi tiêu: sổ đến hạn, sao kê thẻ, kỳ trả nợ")
@@ -2163,14 +2179,19 @@ async def copilot_notifications() -> list[CopilotNotification]:
     catalog vì DB chưa có sao kê thẻ/lịch trả nợ để tính. CTA của mục sổ tiết
     kiệm dẫn sang màn Biểu lãi suất để khách chọn sản phẩm tái gửi tối ưu."""
     items = [n.model_copy() for n in catalog.COPILOT_NOTIFICATIONS]
-    pf = await domain.portfolio(domain.current_customer_id())
-    deposits = (pf or {}).get("deposits") or []
+    # Check thật qua /deposits/maturing (days=0): sổ có maturity_date đúng hôm
+    # nay hoặc đã quá hạn chưa tái tục. Không có sổ nào (hoặc domain chết) thì
+    # giữ nguyên nội dung demo trong catalog.
+    due = await domain.deposits_maturing(domain.current_customer_id(), 0)
+    deposits = (due or {}).get("deposits") or []
     if deposits:
-        nearest = min(deposits, key=lambda d: str(d.get("maturity_date") or "9999-12-31"))
-        amount = int(float(nearest.get("amount") or 0))
+        d = deposits[0]
+        amount = int(float(d.get("amount") or 0))
         if amount > 0:
             vnd = f"{amount:,.0f}".replace(",", ".") + " ₫"
-            items[0].title = f"Sổ tiết kiệm {vnd} đến hạn hôm nay"
+            name = d.get("product_name") or "Sổ tiết kiệm"
+            when = "đã quá hạn chưa tái tục" if d.get("overdue") else "đến hạn hôm nay"
+            items[0].title = f"Sổ {name} {vnd} {when}"
     return items
 
 
@@ -2215,6 +2236,7 @@ async def info() -> dict:
             "GET /api/copilot/month",
             "POST /api/copilot/chat",
             "GET /api/invest/rates",
+            "GET /api/invest/maturing-deposits",
             "POST /api/invest/open",
             "GET /api/transfer/pending",
             "POST /api/risk/assess",

@@ -193,6 +193,12 @@ async def account_events(customer_id: int) -> dict | None:
     return await _get(CUSTOMER_PROFILE_URL, f"/customers/{customer_id}/events")
 
 
+async def deposits_maturing(customer_id: int, days: int = 0) -> dict | None:
+    """Sổ tiết kiệm có maturity_date <= hôm nay + days (0 = đến hạn hôm nay),
+    gồm cả sổ đã quá hạn chưa tái tục. Nguồn của thông báo 'sổ đến hạn' bên FE."""
+    return await _get(CUSTOMER_PROFILE_URL, f"/customers/{customer_id}/deposits/maturing", {"days": days})
+
+
 async def account_posting(account_id: int, direction: str, amount: int) -> dict | None:
     """Hạch toán ghi nợ (DEBIT) / ghi có (CREDIT) tài khoản thanh toán.
     Trả None khi service lỗi HOẶC ghi nợ vượt số dư (profile trả 409)."""
