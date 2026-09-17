@@ -43,6 +43,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 import catalog
 import domain
 import mappers
+from plain_stream import PlainTextStreamer
 from models import (
     AssessRequest,
     CaseDetail,
@@ -69,8 +70,15 @@ from models import (
     MonthlyReport,
     MonthSummary,
     OkResponse,
+    Operator,
+    OpsAuditLog,
+    OpsCase,
     OpsDashboard,
+    OpsLoginRequest,
+    OpsLoginResult,
     OpsMetrics,
+    OpsModelConfig,
+    OpsScenario,
     OpsSession,
     PendingTransfer,
     ProtectionToggleRequest,
@@ -82,6 +90,7 @@ from models import (
     SavingsOption,
     SavingsOptions,
     SafetyCenter,
+    ScenarioCount,
     ScamAlert,
     ScamShieldSignals,
     ScamShieldVerdict,
@@ -213,7 +222,7 @@ async def _ops_context() -> tuple[list[dict], dict[int, str], dict[str, str]] | 
     Trả None khi không lấy được danh sách quyết định — không có nó thì không
     dựng được màn nào, các phần còn lại có cũng vô nghĩa.
     """
-    decisions = await domain.risk_decisions(limit=50)
+    decisions = await domain.risk_decisions(limit=mappers.DECISION_FETCH_LIMIT)
     if not decisions:
         return None
     rows = decisions.get("decisions") or []
@@ -238,6 +247,92 @@ async def _ops_context() -> tuple[list[dict], dict[int, str], dict[str, str]] | 
     return rows, names, statuses
 
 
+# Quyết định của chuyên viên so với trạng thái case trong action-feedback.
+# Đóng case bằng hai trạng thái CLOSED_* sẽ sinh feedback nguồn "ops".
+CASE_DECISIONS = {
+    "confirmed": "CLOSED_FRAUD",
+    "dismissed": "CLOSED_LEGIT",
+    "investigating": "CALLBACK_DONE",
+}
+
+_VN_WEEKDAYS = ["Thứ Hai", "Thứ Ba", "Thứ Tư", "Thứ Năm", "Thứ Sáu", "Thứ Bảy", "Chủ Nhật"]
+
+
+def _now_vn() -> datetime:
+    return datetime.now(timezone(timedelta(hours=7)))
+
+
+def _vi_now_label() -> str:
+    """Nhãn thời gian trên thanh đầu trang Ops, ví dụ "Thứ Ba, 15/09/2026 · 09:41"."""
+    now = _now_vn()
+    return f"{_VN_WEEKDAYS[now.weekday()]}, {now:%d/%m/%Y · %H:%M}"
+
+
+# Quyền tối thiểu để vào được /ops. `GET /users/{id}/permissions` của
+# identity-service TRA VỀ effective_permissions chứ KHÔNG trả role_scope (dù
+# service có truy vấn cột đó nội bộ) — gate ở đây dựa trên quyền thật thay vì
+# role_scope như mô tả ban đầu trong phase-02-ops-internal-auth.md, vì đó là
+# trường duy nhất mà response thực tế cung cấp.
+OPS_REQUIRED_PERMISSION = "ops.dashboard.read"
+
+# Chỉ một vai trò BACKOFFICE tồn tại trong dữ liệu hiện có (ràng buộc CHECK của
+# app_user.role, xem phase-02-ops-internal-auth.md) nên không phân biệt được
+# analyst/manager/auditor — nhãn vai trò là hằng số, khớp catalog.OPS_SESSION.
+OPS_OPERATOR_ROLE_LABEL = "Fraud Ops"
+
+
+def _ops_shift_label() -> str:
+    """Suy ca trực từ giờ hiện tại — Operator.shift là trường bắt buộc nhưng
+    identity-service không có khái niệm ca làm việc."""
+    hour = _now_vn().hour
+    if 5 <= hour < 12:
+        return "Ca sáng"
+    if 12 <= hour < 18:
+        return "Ca chiều"
+    return "Ca tối"
+
+
+def _ops_initials(full_name_masked: str | None, username: str) -> str:
+    """'NGUYEN VAN M***' -> 'NM'. Không có tên (nhiều tài khoản để trống
+    full_name) thì lấy hai ký tự đầu của tên đăng nhập."""
+    if full_name_masked:
+        parts = [p.strip("*") for p in full_name_masked.split() if p.strip("*")]
+        if len(parts) >= 2:
+            return (parts[0][0] + parts[-1][0]).upper()
+        if parts:
+            return parts[0][:2].upper()
+    return username[:2].upper()
+
+
+def _ops_operator_from_user(user: dict) -> Operator:
+    """Dựng hồ sơ hiển thị cho sidebar/header Ops từ hồ sơ đã che PII của
+    identity-service. `name` có thể là tên đã che (vd "NGUYEN VAN M***") khi
+    full_name có dữ liệu; nhiều tài khoản demo để trống nên rơi về username."""
+    username = user.get("username") or ""
+    name = user.get("full_name_masked") or username
+    return Operator(
+        name=name,
+        role=OPS_OPERATOR_ROLE_LABEL,
+        shift=_ops_shift_label(),
+        initials=_ops_initials(user.get("full_name_masked"), username),
+    )
+
+
+async def _case_of_decision(decision_id: str, customer_id: int) -> dict | None:
+    """Case mở cho một quyết định, nếu có.
+
+    action-feedback không lọc theo decision_id nên lấy theo khách rồi khớp tại
+    chỗ — một lời gọi, và danh sách case của một khách rất ngắn.
+    """
+    rows = await domain.cases(limit=100)
+    if not rows:
+        return None
+    for case in rows.get("cases") or []:
+        if str(case.get("decision_id")) == decision_id:
+            return case
+    return None
+
+
 async def _scenario_names() -> dict[str, str]:
     """Tên kịch bản theo decision_id.
 
@@ -245,12 +340,44 @@ async def _scenario_names() -> dict[str, str]:
     nâng mức, mà nâng mức chỉ xảy ra với một phần quyết định. View /ops/decisions
     thì có sẵn scenario_name cho mọi dòng — một lời gọi là đủ cho cả danh sách.
     """
-    view = await domain.ops_decisions(limit=50)
+    view = await domain.ops_decisions(limit=mappers.DECISION_FETCH_LIMIT)
     return {
         d["decision_id"]: d["scenario_name"]
         for d in ((view or {}).get("decisions") or [])
         if d.get("decision_id") and d.get("scenario_name")
     }
+
+
+async def _decisions_with_scenario_names() -> list[dict] | None:
+    """Danh sách quyết định, mỗi dòng gắn thêm tên kịch bản.
+
+    Bảng risk_decision KHÔNG có cột scenario_name — tên nằm ở view
+    ops_decision_log. Thiếu bước ghép này thì mọi dòng rơi vào nhãn "Chưa khớp
+    kịch bản", và biểu đồ theo kịch bản trên Ops Dashboard đếm nhầm hết.
+    """
+    decisions = await domain.risk_decisions(limit=mappers.DECISION_FETCH_LIMIT)
+    if not decisions:
+        return None
+    names = await _scenario_names()
+    return [
+        {**d, "scenario_name": names.get(d.get("decision_id"), d.get("scenario_name"))}
+        for d in (decisions.get("decisions") or [])
+    ]
+
+
+def _scenario_counts(rows: list[dict]) -> list[ScenarioCount]:
+    """Số vụ theo tên kịch bản, KHÔNG cắt bớt.
+
+    Biểu đồ trên Ops Dashboard chỉ vẽ 5 cột cao nhất, nhưng màn playbook liệt kê
+    đủ kịch bản nên phải có cả phần đuôi — nếu không, kịch bản thứ sáu trở đi
+    luôn hiện 0 dù thực tế có cảnh báo.
+    """
+    counts: dict[str, int] = {}
+    for d in rows:
+        name = d.get("scenario_name")
+        if name:
+            counts[name] = counts.get(name, 0) + 1
+    return [ScenarioCount(name=n, count=c) for n, c in sorted(counts.items(), key=lambda kv: -kv[1])]
 
 
 _SCENARIO_RE = re.compile(r"\bS\d{2}\b")
@@ -818,10 +945,11 @@ async def _spending_visual(question: str) -> tuple[ChatTable | None, ChatChart |
 @app.post("/api/copilot/chat", tags=["copilot"],
           summary="Chat với Copilot (Server-Sent Events)")
 async def copilot_chat(payload: ChatRequest) -> StreamingResponse:
-    """Phát câu trả lời theo từng token.
+    """Phát câu trả lời theo từng token, lấy thẳng từ dòng chảy của agent.
 
     Định dạng phải khớp đúng bộ parse bên FE: mỗi dòng `data: {"token": "..."}`,
-    kết thúc bằng `data: [DONE]`. FE bỏ qua dòng không bắt đầu bằng `data:`.
+    kết thúc bằng `data: [DONE]`. FE bỏ qua dòng không bắt đầu bằng `data:`, nên
+    FE không phải sửa gì khi đường này đổi từ phát lại sang phát thẳng.
     """
     # Lấy bảng + biểu đồ số liệu THẬT cho câu hỏi chi tiêu TRƯỚC, để biết câu này
     # có bảng hay không (và để middleware kịp đóng dấu X-Guardian-Data-Source
@@ -832,64 +960,91 @@ async def copilot_chat(payload: ChatRequest) -> StreamingResponse:
     # giờ kèm hai bảng nói về hai chuyện khác nhau.
     grid_gw = await _product_visual(payload.message) if table is None else None
 
-    # agent-service trả lời nếu đã cấu hình. Chưa cấu hình hoặc gọi hỏng thì rơi
-    # về câu dẫn — nhưng KHÔNG bao giờ đọc kịch bản viết cứng (tháng 9) khi câu
-    # hỏi đã có bảng số thật kèm theo, vì kịch bản sẽ mâu thuẫn với bảng (hỏi
-    # tháng 7, kịch bản lại nói tháng 9). Lúc đó lấy câu dẫn thẳng từ tiêu đề
-    # bảng để chữ và bảng luôn khớp nhau.
-    reply, chart = catalog.FALLBACK_REPLY, None
-    grids: list[ChatGrid] = []
-    from_agent = await domain.agent_answer(payload.message)
-    if from_agent:
-        # Agent trả bảng markdown (đẹp ở admin-web); gỡ markdown cho FE văn bản
-        # thuần — bảng số đã có bản riêng do gateway đính bên dưới.
-        reply = _strip_markdown_for_plain(from_agent) or catalog.FALLBACK_REPLY
-        if table is None and grid_gw is None:
-            # Câu này gateway không tự dựng được bảng chuẩn → chuyển thể bảng
-            # markdown của agent. Nhờ nhánh này, câu hỏi tài chính nào agent kẻ
-            # bảng được thì người dùng cũng thấy bảng, không cần thêm luật.
-            grids = _parse_markdown_grids(from_agent)
-    elif table is not None:
-        reply = f"{table.title}:"
+    # Câu dẫn dự phòng, chỉ dùng khi agent không phát ra chữ nào. KHÔNG bao giờ
+    # đọc kịch bản viết cứng (tháng 9) khi câu hỏi đã có bảng số thật kèm theo,
+    # vì kịch bản sẽ mâu thuẫn với bảng (hỏi tháng 7, kịch bản nói tháng 9). Lúc
+    # đó lấy câu dẫn thẳng từ tiêu đề bảng để chữ và bảng luôn khớp nhau.
+    fallback, chart = catalog.FALLBACK_REPLY, None
+    if table is not None:
+        fallback = f"{table.title}:"
     elif grid_gw is not None:
-        reply = f"{grid_gw.title}:"
+        fallback = f"{grid_gw.title}:"
     else:
         for pattern, text, attached in catalog.SCRIPTED_REPLIES:
             if re.search(pattern, payload.message, re.IGNORECASE):
-                reply, chart = text, attached
+                fallback, chart = text, attached
                 break
-
-    # Bảng sản phẩm của gateway thay cho mọi bảng agent tự kẻ: số lãi và tiền
-    # trả góp phải là số của biểu lãi, không phải số LLM chép lại.
-    if grid_gw is not None:
-        grids = [grid_gw]
 
     # Chart số thật ghi đè chart kịch bản tĩnh (nếu có).
     if data_chart is not None:
         chart = data_chart
 
-    async def stream() -> AsyncIterator[bytes]:
-        # Tách giữ nguyên khoảng trắng, giống replayAsStream bên FE, để ghép lại
-        # không mất dấu cách.
-        for token in (t for t in re.split(r"(\s+)", reply) if t):
-            chunk = json.dumps({"token": token}, ensure_ascii=False)
-            yield f"data: {chunk}\n\n".encode()
+    def sse(obj: dict) -> bytes:
+        return f"data: {json.dumps(obj, ensure_ascii=False)}\n\n".encode()
+
+    async def replay(text: str) -> AsyncIterator[bytes]:
+        """Phát lại một câu đã có sẵn theo nhịp token, cho nhánh dự phòng.
+
+        Tách giữ nguyên khoảng trắng, giống replayAsStream bên FE, để ghép lại
+        không mất dấu cách.
+        """
+        for token in (t for t in re.split(r"(\s+)", text) if t):
+            yield sse({"token": token})
             await asyncio.sleep(CHAT_TOKEN_DELAY_MS / 1000)
+
+    async def stream() -> AsyncIterator[bytes]:
+        # Phát THẲNG từ agent: chữ ra tới trình duyệt ngay khi mô hình sinh ra,
+        # thay vì chờ trọn lần xử lý rồi mới phát lại. Bộ gỡ markdown chạy trên
+        # dòng chảy vì FE render văn bản thuần.
+        plain = PlainTextStreamer()
+        # Giữ NGUYÊN BẢN song song với phần đã gỡ: bảng markdown bị bộ gỡ bỏ
+        # khỏi phần chữ, nhưng chính những dòng đó mới dựng được bảng thật.
+        raw: list[str] = []
+        emitted = False
+        try:
+            async for piece in domain.agent_stream(
+                payload.message, kind="copilot",
+                session_key=domain.copilot_session_key(),
+            ):
+                raw.append(piece)
+                clean = plain.feed(piece)
+                if clean:
+                    emitted = True
+                    yield sse({"token": clean})
+            rest = plain.close()
+            if rest:
+                emitted = True
+                yield sse({"token": rest})
+        except domain.AgentBusy:
+            # Hỏi dồn khi câu trước chưa trả lời xong. Nói thành lời, đừng im
+            # lặng rơi về kịch bản — người dùng cần biết mình chỉ phải đợi.
+            async for chunk in replay("Mình đang trả lời câu trước, bạn đợi một chút rồi hỏi lại nhé."):
+                yield chunk
+            emitted = True
+
+        if not emitted:
+            # Agent chưa cấu hình hoặc hỏng trước khi kịp phát chữ nào.
+            async for chunk in replay(fallback):
+                yield chunk
+
+        # Bảng sản phẩm của gateway thay cho mọi bảng agent tự kẻ: số lãi và tiền
+        # trả góp phải là số của biểu lãi, không phải số LLM chép lại. Không có
+        # bảng chuẩn nào thì mới chuyển thể bảng markdown agent vừa viết ra.
+        if grid_gw is not None:
+            grids = [grid_gw]
+        elif table is None and raw:
+            grids = _parse_markdown_grids("".join(raw))
+        else:
+            grids = []
+
         if table is not None:
             # Sự kiện bảng phát sau khi hết token, trước biểu đồ. FE bỏ qua object
             # không có "token" nếu chưa hỗ trợ, nên không làm hỏng client cũ.
-            payload_table = json.dumps({"table": table.model_dump(by_alias=True)}, ensure_ascii=False)
-            yield f"data: {payload_table}\n\n".encode()
+            yield sse({"table": table.model_dump(by_alias=True)})
         for g in grids:
-            # Bảng agent phát sau bảng chuẩn, trước biểu đồ. Client cũ bỏ qua
-            # object không có "token" nên thêm sự kiện này không làm hỏng gì.
-            payload_grid = json.dumps({"grid": g.model_dump(by_alias=True)}, ensure_ascii=False)
-            yield f"data: {payload_grid}\n\n".encode()
+            yield sse({"grid": g.model_dump(by_alias=True)})
         if chart is not None:
-            # Sự kiện riêng sau khi hết token. FE bỏ qua object không có "token"
-            # nếu chưa hỗ trợ, nên thêm dòng này không làm hỏng client cũ.
-            payload_chart = json.dumps({"chart": chart.model_dump(by_alias=True)}, ensure_ascii=False)
-            yield f"data: {payload_chart}\n\n".encode()
+            yield sse({"chart": chart.model_dump(by_alias=True)})
         yield b"data: [DONE]\n\n"
 
     return StreamingResponse(
@@ -935,7 +1090,7 @@ async def assess_risk(payload: AssessRequest) -> RiskAssessment:
          summary="Bốn chỉ số KPI của Ops Dashboard")
 async def ops_metrics() -> OpsMetrics:
     summary = await domain.ops_summary()
-    decisions = await domain.risk_decisions(limit=50)
+    decisions = await domain.risk_decisions(limit=mappers.DECISION_FETCH_LIMIT)
     if not summary or not decisions:
         return catalog.OPS_METRICS
     return mappers.map_metrics(summary, decisions.get("decisions") or [])
@@ -988,8 +1143,17 @@ async def ops_decision(alert_id: str, payload: DecisionRequest) -> OkResponse:
             "action_taken": action_taken,
             "outcome": outcome,
         })
+        # Và đóng case tương ứng. Đóng bằng CLOSED_FRAUD/CLOSED_LEGIT khiến
+        # action-feedback sinh một feedback nguồn "ops": kết luận của chuyên
+        # viên quay lại thành nhãn huấn luyện, thay vì dừng ở màn hình.
+        case_row = await _case_of_decision(alert_id, int(dec.get("customer_id") or 0))
+        if case_row and case_row.get("case_id"):
+            await domain.update_case(case_row["case_id"], CASE_DECISIONS[payload.decision],
+                                     payload.note or None)
     else:
         _alert_by_id(alert_id)  # 404 nếu id không tồn tại, trước khi ghi gì
+    # Bản ghi trong bộ nhớ chỉ còn phục vụ id dạng ALT-xxxx của dữ liệu tạm:
+    # chúng không có dòng nào trong database để ghi vào.
     _decisions[alert_id] = payload.decision
     return OkResponse(ok=True)
 
@@ -1274,7 +1438,12 @@ async def _scamshield_verdict(bank_code: str, account_no: str, amount: int, note
         f"{bank_code}, nội dung chuyển khoản: \"{note}\". Hãy dùng công cụ kiểm tra dấu hiệu "
         "lừa đảo cho tài khoản này rồi kết luận."
     ).replace(",", ".")
-    answer = await domain.agent_answer(question, agent_id=domain.SCAMSHIELD_AGENT_ID)
+    answer = await domain.agent_answer(
+        question, agent_id=domain.SCAMSHIELD_AGENT_ID, kind="shield_advice",
+        # _last_decision_id là lệnh chuyển vừa được chấm điểm; có nó thì dòng
+        # nhật ký mở thẳng được case tương ứng bên Ops.
+        decision_id=_last_decision_id,
+    )
     if answer and (parsed := _parse_verdict(answer)):
         return parsed
     return _fallback_verdict(signals)
@@ -1599,27 +1768,113 @@ async def transfer_intervene(payload: InterveneRequest) -> InterveneAdvice:
 
 # ---- Màn Ops -----------------------------------------------------------------
 
+@app.post("/api/ops/login", response_model=OpsLoginResult, tags=["ops"],
+          response_model_exclude_none=True,
+          summary="Đăng nhập nội bộ cho Ops — chỉ tài khoản vận hành mới vào được")
+async def ops_login(payload: OpsLoginRequest) -> OpsLoginResult:
+    """Xác thực rồi gate bằng quyền vận hành thật, không phải chỉ so `role`.
+
+    Khác `POST /api/auth/login` (đăng nhập khách) ở hai điểm cố ý:
+
+    1. KHÔNG CÓ NHÁNH "DEGRADED". identity-service không gọi được thì không ai
+       vào Ops được — trả lỗi 503 để FE báo "chưa kết nối được", chứ không cho
+       qua bằng hồ sơ demo như màn khách (màn khách ưu tiên không chặn buổi
+       trình bày; màn nội bộ ưu tiên không mở cửa khi không xác minh được).
+    2. TỪ CHỐI TÀI KHOẢN KHÔNG CÓ QUYỀN VẬN HÀNH. Đúng mật khẩu chưa đủ: còn
+       phải có `OPS_REQUIRED_PERMISSION` trong quyền hiệu lực của tài khoản
+       (tra qua `domain.user_permissions`), vì `role` chỉ là mã CUSTOMER/ADMIN
+       còn quyền là thứ nghiệp vụ khai trong app_role.
+
+    Giữ nguyên quyết định cũ: không gọi `/users/{id}/login-attempt` (xem
+    `domain.auth_verify`) — gõ sai vài lần không được khoá tài khoản demo.
+    """
+    result = await domain.auth_verify(payload.username, payload.password)
+    if result is None:
+        raise HTTPException(status_code=503,
+                            detail="Không gọi được hệ thống danh tính (identity-service).")
+
+    if not result.get("authenticated"):
+        return OpsLoginResult(authenticated=False, reason=result.get("reason") or "invalid_credentials")
+
+    user = result.get("user") or {}
+    user_id = user.get("user_id")
+    perms = await domain.user_permissions(user_id) if user_id is not None else None
+    if perms is None:
+        raise HTTPException(status_code=503,
+                            detail="Không gọi được hệ thống danh tính (identity-service).")
+
+    granted = perms.get("effective_permissions") or []
+    if not perms.get("role_defined") or OPS_REQUIRED_PERMISSION not in granted:
+        return OpsLoginResult(authenticated=False, reason="not_backoffice")
+
+    return OpsLoginResult(authenticated=True, operator=_ops_operator_from_user(user))
+
+
 @app.get("/api/ops/session", response_model=OpsSession, tags=["ops"],
          summary="Chuyên viên đang trực và tình trạng hệ thống")
-async def ops_session() -> OpsSession:
-    return catalog.OPS_SESSION
+async def ops_session(username: str | None = None) -> OpsSession:
+    """Chuyên viên đang trực, tình trạng hệ thống và giờ hiện tại.
+
+    `username` đến từ phiên Ops đã đăng nhập ở FE (`src/lib/ops-auth.ts`). Có
+    thì tra identity-service để hiện đúng người đang trực; không có (hoặc tra
+    hỏng) thì giữ hằng số catalog như trước phase đăng nhập nội bộ.
+    """
+    if not domain.DOMAIN_ENABLED:
+        domain.mark_degraded()
+        return catalog.OPS_SESSION
+    risk, scam, feedback = await asyncio.gather(
+        domain.health(domain.RISK_SCORING_URL),
+        domain.health(domain.SCAM_KNOWLEDGE_URL),
+        domain.health(domain.ACTION_FEEDBACK_URL),
+    )
+    operator = catalog.OPS_SESSION.operator
+    if username:
+        user = await domain.user_by_username(username)
+        if user:
+            operator = _ops_operator_from_user(user)
+    return OpsSession(
+        operator=operator,
+        system_status=mappers.map_system_status(
+            {"Risk Engine": risk, "Tri thức lừa đảo": scam, "Ghi nhận & phản hồi": feedback},
+            domain.agent_configured(domain.SCAMSHIELD_AGENT_ID) or domain.agent_configured(),
+        ),
+        now_label=_vi_now_label(),
+    )
 
 
 @app.get("/api/ops/alerts/{alert_id}/detail", response_model=CaseDetail, tags=["ops"],
          summary="Chi tiết giao dịch, hồ sơ khách và thông tin mô hình của case")
 async def ops_alert_detail(alert_id: str) -> CaseDetail:
-    _alert_by_id(alert_id)  # 404 nếu id không tồn tại
-    return catalog.CASE_DETAIL
+    """Trước đây hàm này trả hằng số cho MỌI case, và id dạng UUID thật luôn 404
+    vì `_alert_by_id` chỉ tra trong dữ liệu tạm."""
+    dec = await domain.risk_decision(alert_id)
+    if not dec:
+        _alert_by_id(alert_id)  # 404 nếu id không tồn tại ở cả dữ liệu tạm
+        domain.mark_degraded()
+        return catalog.CASE_DETAIL
+    customer_id = int(dec.get("customer_id") or 0)
+    cust, info, history, case_row = await asyncio.gather(
+        domain.customer(customer_id),
+        domain.risk_info(),
+        domain.customer_decisions(customer_id),
+        _case_of_decision(alert_id, customer_id),
+    )
+    return mappers.map_case_detail(
+        dec, cust, case_row, info,
+        (history or {}).get("decisions") or [],
+        catalog.CASE_DETAIL, _now_vn(),
+    )
 
 
 @app.get("/api/ops/dashboard", response_model=OpsDashboard, tags=["ops"],
          summary="Phần bổ trợ của Ops Dashboard (delta, biểu đồ, đầu vào mô hình)")
 async def ops_dashboard() -> OpsDashboard:
-    decisions = await domain.risk_decisions(limit=50)
-    if not decisions:
+    rows = await _decisions_with_scenario_names()
+    if rows is None:
+        domain.mark_degraded()
         return catalog.OPS_DASHBOARD
     return mappers.map_dashboard(
-        decisions.get("decisions") or [],
+        rows,
         catalog.OPS_DASHBOARD.model_inputs,  # mô tả đầu vào mô hình, không phải dữ liệu
     )
 
@@ -1627,12 +1882,93 @@ async def ops_dashboard() -> OpsDashboard:
 @app.get("/api/ops/alerts/{alert_id}/timeline", response_model=list[CaseTimelineStep], tags=["ops"],
          summary="Dòng thời gian xử lý của một case")
 async def ops_alert_timeline(alert_id: str) -> list[CaseTimelineStep]:
-    _alert_by_id(alert_id)  # 404 nếu id không tồn tại
-    if alert_id != catalog.CUSTOMER_CASE_ID or not _customer_steps:
-        return catalog.CASE_TIMELINE
-    # Chèn bước của khách TRƯỚC bước cuối ("chờ quyết định xử lý"), vì bước đó
-    # luôn là mốc chưa hoàn thành và phải nằm ở cuối danh sách.
-    return [*catalog.CASE_TIMELINE[:-1], *_customer_steps, catalog.CASE_TIMELINE[-1]]
+    """Trước đây trả đúng năm bước viết cứng cho mọi case, bất kể chuyện gì đã
+    thật sự xảy ra."""
+    dec = await domain.risk_decision(alert_id)
+    if not dec:
+        _alert_by_id(alert_id)  # 404 nếu id không tồn tại ở cả dữ liệu tạm
+        domain.mark_degraded()
+        if alert_id != catalog.CUSTOMER_CASE_ID or not _customer_steps:
+            return catalog.CASE_TIMELINE
+        # Chèn bước của khách TRƯỚC bước cuối ("chờ quyết định xử lý"), vì bước
+        # đó luôn là mốc chưa hoàn thành và phải nằm ở cuối danh sách.
+        return [*catalog.CASE_TIMELINE[:-1], *_customer_steps, catalog.CASE_TIMELINE[-1]]
+    customer_id = int(dec.get("customer_id") or 0)
+    traces, case_row = await asyncio.gather(
+        domain.llm_traces(decision_id=alert_id, limit=20),
+        _case_of_decision(alert_id, customer_id),
+    )
+    return mappers.map_case_timeline(dec, case_row, (traces or {}).get("traces") or [])
+
+
+@app.get("/api/ops/cases", response_model=list[OpsCase], tags=["ops"],
+         response_model_exclude_none=True,
+         summary="Danh sách case vận hành")
+async def ops_cases(status: str | None = None) -> list[OpsCase]:
+    """Case mở cho chuyên viên, từ bảng guardian_case.
+
+    Lọc theo trạng thái làm ở đây chứ không đẩy xuống action-feedback: danh sách
+    case của một ngày demo rất ngắn, và lọc tại chỗ thì đổi bộ lọc không phải
+    gọi mạng lại.
+    """
+    rows = await domain.cases(limit=100)
+    if not rows:
+        domain.mark_degraded()
+        cases = catalog.OPS_CASES
+    else:
+        people = await domain.customers()
+        names = {
+            int(c["customer_id"]): c.get("name_masked") or "—"
+            for c in ((people or {}).get("customers") or [])
+        }
+        scen = await domain.scenarios()
+        scenario_names = {
+            s["scenario_id"]: s["scenario_name"]
+            for s in ((scen or {}).get("scenarios") or [])
+        }
+        cases = mappers.map_ops_cases(rows.get("cases") or [], names, scenario_names)
+    return [c for c in cases if not status or c.status == status]
+
+
+@app.get("/api/ops/scenarios", response_model=list[OpsScenario], tags=["ops"],
+         summary="Playbook kịch bản lừa đảo đang áp dụng")
+async def ops_scenarios() -> list[OpsScenario]:
+    rows = await domain.scenarios()
+    if not rows:
+        domain.mark_degraded()
+        return catalog.OPS_SCENARIOS
+    # Đếm từ chính tập quyết định mà biểu đồ trên Ops Dashboard dùng, nên hai màn
+    # không bao giờ nói hai con số khác nhau cho cùng một kịch bản. Khác ở chỗ
+    # màn này lấy đủ, không chỉ 5 kịch bản dẫn đầu.
+    counts = _scenario_counts(await _decisions_with_scenario_names() or [])
+    return mappers.map_ops_scenarios(rows.get("scenarios") or [], counts)
+
+
+@app.get("/api/ops/model", response_model=OpsModelConfig, tags=["ops"],
+         summary="Ngưỡng và trần điểm của risk engine")
+async def ops_model() -> OpsModelConfig:
+    """Chỉ đọc. Ngưỡng do risk-scoring-service giữ; đổi ở đây không có tác dụng."""
+    info = await domain.risk_info()
+    if not info or not info.get("factor_caps"):
+        domain.mark_degraded()
+        return catalog.OPS_MODEL
+    return mappers.map_ops_model(info, catalog.OPS_DASHBOARD.model_inputs)
+
+
+@app.get("/api/ops/audit", response_model=OpsAuditLog, tags=["ops"],
+         response_model_exclude_none=True,
+         summary="Nhật ký mọi lượt gọi LLM")
+async def ops_audit(agent: str | None = None, status: str | None = None) -> OpsAuditLog:
+    """Bằng chứng "AI kiểm toán được": bản ghi timeout/error vẫn còn nguyên nên
+    tỷ lệ dùng bản dự phòng là con số thật, không phải con số tự khai."""
+    traces = await domain.llm_traces(agent=agent, status=status, limit=100)
+    stats = await domain.llm_trace_stats()
+    if not traces or not stats:
+        domain.mark_degraded()
+        # Lọc cả dữ liệu dự phòng: bộ lọc trên màn hình phải có tác dụng kể cả
+        # khi domain chưa gọi được, nếu không người dùng tưởng màn hình hỏng.
+        return mappers.filter_audit(catalog.OPS_AUDIT, status=status)
+    return mappers.map_ops_audit(traces.get("traces") or [], stats)
 
 
 # ---- Gợi ý câu hỏi cho chat --------------------------------------------------
@@ -1798,6 +2134,7 @@ async def info() -> dict:
             "GET /api/scamshield/signals",
             "GET /api/safety-center",
             "PATCH /api/safety-center/protections/{key}",
+            "POST /api/ops/login",
             "GET /api/ops/session",
             "GET /api/ops/metrics",
             "GET /api/ops/dashboard",
@@ -1806,6 +2143,10 @@ async def info() -> dict:
             "GET /api/ops/alerts/{alert_id}/detail",
             "GET /api/ops/alerts/{alert_id}/timeline",
             "POST /api/ops/alerts/{alert_id}/decision",
+            "GET /api/ops/cases",
+            "GET /api/ops/scenarios",
+            "GET /api/ops/model",
+            "GET /api/ops/audit",
         ],
         "pending_work": [
             "agent-service: cần API key và agent id thì chat mới dùng LLM thật",

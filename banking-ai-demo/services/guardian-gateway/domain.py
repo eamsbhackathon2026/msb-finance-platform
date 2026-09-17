@@ -16,11 +16,16 @@ một web app không còn dữ liệu dự phòng nào:
 """
 from __future__ import annotations
 
+import json
+import logging
 import os
+import time
 from contextvars import ContextVar
 from typing import Any
 
 import httpx
+
+logger = logging.getLogger("guardian-gateway.domain")
 
 CUSTOMER_PROFILE_URL = os.getenv("CUSTOMER_PROFILE_SERVICE_URL", "http://customer-profile-service")
 TRANSACTION_URL = os.getenv("TRANSACTION_SERVICE_URL", "http://transaction-service")
@@ -135,6 +140,36 @@ async def _post(base: str, path: str, payload: dict) -> Any | None:
     except Exception:
         mark_degraded()
         return None
+
+
+async def _patch(base: str, path: str, payload: dict) -> Any | None:
+    if not DOMAIN_ENABLED:
+        return None
+    _mark_touched()
+    try:
+        async with httpx.AsyncClient(timeout=PEER_TIMEOUT) as client:
+            r = await client.patch(f"{base}{path}", json=payload)
+            r.raise_for_status()
+            return r.json()
+    except Exception:
+        mark_degraded()
+        return None
+
+
+async def health(base: str) -> bool:
+    """Một service có trả lời không. Dùng cho bảng tình trạng hệ thống bên Ops.
+
+    Không đi qua _get: service chết là thông tin cần hiển thị, không phải lỗi
+    khiến cả phản hồi bị đánh dấu degraded.
+    """
+    if not DOMAIN_ENABLED:
+        return False
+    try:
+        async with httpx.AsyncClient(timeout=PEER_TIMEOUT) as client:
+            r = await client.get(f"{base}/health")
+            return r.status_code == 200
+    except Exception:
+        return False
 
 
 # ---- customer-profile-service ------------------------------------------------
@@ -277,6 +312,25 @@ async def risk_decisions(limit: int = 50) -> dict | None:
     return await _get(RISK_SCORING_URL, "/risk-decisions", {"limit": limit})
 
 
+async def customer_decisions(customer_id: int, limit: int = 50) -> dict | None:
+    """Các lần chấm điểm của riêng một khách, mới nhất trước.
+
+    Chi tiết case cần nó để nói "mức chuyển trung bình" và "đã cảnh báo mấy lần
+    trong 90 ngày" bằng số thật của chính khách đó.
+    """
+    return await _get(RISK_SCORING_URL, "/risk-decisions",
+                      {"customer_id": customer_id, "limit": limit})
+
+
+async def risk_info() -> dict | None:
+    """Cấu hình engine: trần điểm 6 yếu tố và ba ngưỡng pass/soft_warn/intervene.
+
+    Màn "Mô hình & ngưỡng" đọc từ đây thay vì chép lại con số 40/75 sang FE —
+    ngưỡng đổi bên risk-scoring thì màn hình đổi theo, không phải sửa hai nơi.
+    """
+    return await _get(RISK_SCORING_URL, "/info")
+
+
 async def customers() -> dict | None:
     return await _get(CUSTOMER_PROFILE_URL, "/customers")
 
@@ -305,6 +359,33 @@ async def cases(limit: int = 50) -> dict | None:
     return await _get(ACTION_FEEDBACK_URL, "/cases", {"limit": limit})
 
 
+async def update_case(case_id: str, status: str, note: str | None = None) -> dict | None:
+    """Đổi trạng thái một case.
+
+    Đóng bằng CLOSED_FRAUD/CLOSED_LEGIT thì action-feedback tự sinh một feedback
+    nguồn `ops` — kết luận của chuyên viên chính là nhãn huấn luyện đáng tin nhất,
+    nên quyết định ở màn Ops phải đi qua đây chứ không chỉ nằm trong bộ nhớ.
+    """
+    return await _patch(ACTION_FEEDBACK_URL, f"/cases/{case_id}",
+                        {"status": status, "note": note})
+
+
+async def llm_traces(agent: str | None = None, status: str | None = None,
+                     decision_id: str | None = None, limit: int = 50) -> dict | None:
+    params: dict = {"limit": limit}
+    if agent:
+        params["agent"] = agent
+    if status:
+        params["status"] = status
+    if decision_id:
+        params["decision_id"] = decision_id
+    return await _get(ACTION_FEEDBACK_URL, "/llm-traces", params)
+
+
+async def llm_trace_stats() -> dict | None:
+    return await _get(ACTION_FEEDBACK_URL, "/llm-traces/stats")
+
+
 async def notifications(customer_id: int) -> dict | None:
     return await _get(ACTION_FEEDBACK_URL, f"/customers/{customer_id}/notifications")
 
@@ -330,6 +411,23 @@ async def auth_verify(username: str, password: str) -> dict | None:
     return await _post(IDENTITY_URL, "/auth/verify", {"username": username, "password": password})
 
 
+async def user_permissions(user_id: int) -> dict | None:
+    """Quyền hiệu lực của một tài khoản, dùng để gate đăng nhập Ops.
+
+    `role_defined=False` nghĩa là vai trò của user chưa được khai trong
+    app_role — coi đó là KHÔNG có quyền vận hành, khác hẳn "vai trò không có
+    quyền nào" (mảng rỗng nhưng role_defined=True). Nhầm hai trường hợp này sẽ
+    chặn nhầm người dùng hợp lệ hoặc cho lọt người không có quyền.
+    """
+    return await _get(IDENTITY_URL, f"/users/{user_id}/permissions")
+
+
+async def user_by_username(username: str) -> dict | None:
+    """Tra một tài khoản theo tên đăng nhập — dùng để hiện tên chuyên viên đang
+    trực trên `GET /api/ops/session` sau khi họ đã đăng nhập ở FE."""
+    return await _get(IDENTITY_URL, f"/users/by-username/{username}")
+
+
 # ---- agent-service (chỉ gọi, KHÔNG sửa) --------------------------------------
 
 def agent_configured(agent_id: str | None = None) -> bool:
@@ -342,7 +440,141 @@ def agent_configured(agent_id: str | None = None) -> bool:
     return bool(AGENT_SERVICE_URL and AGENT_API_KEY and (agent_id or AGENT_ID))
 
 
-async def agent_answer(question: str, agent_id: str | None = None) -> str | None:
+async def _write_llm_trace(kind: str, question: str, answer: str | None,
+                           status: str, latency_ms: int, agent_id: str,
+                           customer_id: int | None, decision_id: str | None) -> None:
+    """Ghi lại một lượt gọi Agent Platform vào bảng llm_trace.
+
+    Trước đây không ai ghi bảng này lúc chạy: tool `log_llm_call` không được gán
+    cho trợ lý nào, còn gateway thì gọi agent xong là thôi. Hệ quả là màn "Nhật
+    ký quyết định AI" chỉ hiện dữ liệu mẫu, và mọi lượt gọi thật — kể cả lượt
+    hỏng — không để lại dấu vết nào.
+
+    Ghi hỏng thì bỏ qua: nhật ký không được phép làm hỏng câu trả lời cho khách.
+    Vì vậy hàm này KHÔNG dùng _post (nó đánh dấu degraded) — hỏng ở đây không có
+    nghĩa là dữ liệu trả cho người dùng bị suy giảm.
+    """
+    if not DOMAIN_ENABLED:
+        return
+    payload = {
+        "decision_id": decision_id,
+        "customer_id": customer_id if customer_id is not None else DEMO_CUSTOMER_ID,
+        "agent": kind,
+        # Response Run của Agent Platform không trả tên model (RunUsage chỉ có số
+        # token), nên gateway thật sự không biết model nào đã chạy. Ghi đúng thứ
+        # mình biết thay vì đoán.
+        "model": "agent-platform",
+        "prompt_key": f"{kind}@{agent_id[:8]}",
+        # action-feedback tự chạy mask_free_text khi ghi; gateway không có
+        # common.py nên không tự mask được.
+        "prompt_masked": question[:500],
+        "response": (answer or "")[:1000],
+        "latency_ms": latency_ms,
+        "status": status,
+    }
+    try:
+        async with httpx.AsyncClient(timeout=PEER_TIMEOUT) as client:
+            await client.post(f"{ACTION_FEEDBACK_URL}/llm-traces", json=payload)
+    except Exception:
+        return
+
+
+class AgentBusy(Exception):
+    """Hội thoại còn một lần xử lý chưa xong (nền tảng trả 409 run_in_progress).
+
+    Khác hẳn "agent hỏng": người dùng chỉ cần đợi câu trước trả lời xong. Nuốt
+    nó thành lỗi chung sẽ khiến màn hình im lặng rơi về kịch bản viết sẵn.
+    """
+
+
+async def agent_stream(question: str, agent_id: str | None = None, kind: str = "copilot",
+                       customer_id: int | None = None, session_key: str | None = None):
+    """Phát từng mẩu chữ của agent NGAY khi nền tảng gửi ra.
+
+    Đường `mode=sync` phải chờ trọn lần xử lý rồi mới có chữ, nên màn hình khách
+    trắng suốt thời gian mô hình chạy. Endpoint stream của nền tảng gửi SSE với
+    `event` trùng `type`; ở đây chỉ quan tâm `message.delta` (có `text`) và hai
+    sự kiện kết thúc `run.completed` / `run.failed`.
+
+    Ngắt kết nối giữa chừng sẽ HỦY lần xử lý bên nền tảng — đúng thiết kế của nó.
+
+    Ném `AgentBusy` khi gặp 409. Mọi hỏng khác kết thúc dòng chảy êm và để lại
+    một dòng `llm_trace`, giống đường sync.
+    """
+    aid = agent_id or AGENT_ID
+    if not agent_configured(aid):
+        return
+    _mark_touched()
+    started = time.monotonic()
+    body = {"input": {"message": question}}
+    if session_key:
+        body["session_key"] = session_key
+
+    full: list[str] = []
+    status, logged = "ok", ""
+    try:
+        async with httpx.AsyncClient(timeout=max(PEER_TIMEOUT, 120.0)) as client:
+            async with client.stream("POST", f"{AGENT_SERVICE_URL}/v1/agents/{aid}/runs/stream",
+                                     headers={"X-API-Key": AGENT_API_KEY}, json=body) as r:
+                if r.status_code == 409:
+                    await r.aread()
+                    raise AgentBusy()
+                r.raise_for_status()
+                async for line in r.aiter_lines():
+                    # Bỏ qua heartbeat (": ping") và dòng event:/id:; chỉ data mới có nội dung.
+                    if not line.startswith("data:"):
+                        continue
+                    try:
+                        event = json.loads(line[5:].strip())
+                    except ValueError:
+                        continue
+                    kind_of = event.get("type")
+                    if kind_of == "message.delta":
+                        text = event.get("text") or ""
+                        if text:
+                            full.append(text)
+                            yield text
+                    elif kind_of == "run.failed":
+                        status = "error"
+                        logged = f"run.failed: {(event.get('error') or {}).get('code', 'không rõ')}"
+                        break
+                    elif kind_of == "run.completed":
+                        break
+    except AgentBusy:
+        raise
+    except Exception as err:
+        if isinstance(err, httpx.TimeoutException):
+            status, logged = "timeout", "stream quá hạn"
+        else:
+            status, logged = "error", f"{type(err).__name__}: {err}"
+        logger.warning("agent_stream hỏng (%s): %s", kind, logged)
+        mark_degraded()
+    finally:
+        answer = "".join(full)
+        if status == "ok" and not answer:
+            status, logged = "error", "stream không có nội dung"
+        try:
+            await _write_llm_trace(kind, question, logged or answer, status,
+                                   round((time.monotonic() - started) * 1000),
+                                   aid, customer_id, None)
+        except Exception as err:  # nhật ký hỏng không được làm hỏng câu trả lời
+            logger.warning("không ghi được nhật ký lượt stream: %s", err)
+
+
+def copilot_session_key(customer_id: int | None = None) -> str:
+    """Khoá hội thoại của Copilot, một hội thoại cho mỗi khách.
+
+    Thiếu khoá này thì mỗi câu hỏi mở một hội thoại mới bên Agent Platform và
+    trợ lý không nhớ gì: hỏi "còn tháng trước thì sao?" được trả lời như câu đầu.
+    `session_key` là cách nền tảng cho phép người gọi bằng API key tự đặt tên
+    hội thoại (duy nhất theo trợ lý + khoá).
+    """
+    return f"copilot-{customer_id if customer_id is not None else DEMO_CUSTOMER_ID}"
+
+
+async def agent_answer(question: str, agent_id: str | None = None, kind: str = "copilot",
+                       customer_id: int | None = None, decision_id: str | None = None,
+                       session_key: str | None = None) -> str | None:
     """Hỏi agent-service một câu và lấy câu trả lời dạng văn bản.
 
     Dùng đúng hợp đồng công khai của nền tảng (api/openapi.yaml trong repo
@@ -369,17 +601,47 @@ async def agent_answer(question: str, agent_id: str | None = None) -> str | None
     if not agent_configured(aid):
         return None
     _mark_touched()
+    started = time.monotonic()
+
+    def elapsed_ms() -> int:
+        return round((time.monotonic() - started) * 1000)
+
+    answer: str | None = None
     try:
         async with httpx.AsyncClient(timeout=max(PEER_TIMEOUT, 60.0)) as client:
             r = await client.post(
                 f"{AGENT_SERVICE_URL}/v1/agents/{aid}/runs",
                 headers={"X-API-Key": AGENT_API_KEY},
-                json={"input": {"message": question}, "mode": "sync"},
+                json={
+                    "input": {"message": question},
+                    "mode": "sync",
+                    **({"session_key": session_key} if session_key else {}),
+                },
             )
             r.raise_for_status()
             body = r.json()
         output = body.get("output")
-        return output if isinstance(output, str) and output.strip() else None
-    except Exception:
+        answer = output if isinstance(output, str) and output.strip() else None
+        status, logged = ("ok", answer) if answer else ("error", "agent trả lời rỗng")
+    except Exception as err:
+        # Ba lý do hỏng khác hẳn nhau nhưng trước đây cho ra cùng một None không
+        # dấu vết: 401 vì sai cách gửi khóa, 404 vì agent id không có trong môi
+        # trường này, 409 vì hội thoại còn run đang chạy. Ghi lại để lần sau đọc
+        # nhật ký là biết, thay vì phải đoán.
+        if isinstance(err, httpx.TimeoutException):
+            status, logged = "timeout", f"quá {max(PEER_TIMEOUT, 60.0):.0f}s không có phản hồi"
+        elif isinstance(err, httpx.HTTPStatusError):
+            status, logged = "error", f"HTTP {err.response.status_code}: {err.response.text[:200]}"
+        else:
+            status, logged = "error", f"{type(err).__name__}: {err}"
+        logger.warning("agent_answer hỏng (%s): %s", kind, logged)
         mark_degraded()
-        return None
+
+    # Ghi nhật ký nằm NGOÀI khối trên và có lưới riêng: nhật ký là việc phụ,
+    # hỏng ở đây không được phép nuốt mất câu trả lời đã lấy được.
+    try:
+        await _write_llm_trace(kind, question, logged, status, elapsed_ms(),
+                               aid, customer_id, decision_id)
+    except Exception as err:
+        logger.warning("không ghi được nhật ký lượt gọi agent: %s", err)
+    return answer

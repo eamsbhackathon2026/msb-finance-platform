@@ -118,8 +118,8 @@ def test_nguoi_nhan_khong_khop_thi_la_moi():
 def test_chi_so_ops():
     summary = {"summary": {"suspicious_total": 25, "prevented_total": 8, "proceeded_after_intervene": 1}}
     decisions = [
-        {"level": "intervene", "tx_snapshot": {"amount": 560000000.0}},
-        {"level": "soft_warn", "tx_snapshot": {"amount": 95000000.0}},
+        {"level": "intervene", "outcome": "prevented", "tx_snapshot": {"amount": 560000000.0}},
+        {"level": "soft_warn", "outcome": None, "tx_snapshot": {"amount": 95000000.0}},
     ]
     m = mappers.map_metrics(summary, decisions)
     assert m.alerts_fired == 25
@@ -127,6 +127,21 @@ def test_chi_so_ops():
     assert m.cancel_rate_pct == 89           # 8 / (8+1)
     # Giá trị đã bảo vệ chỉ cộng các ca thực sự bị chặn.
     assert m.protected_value_vnd == 560_000_000
+
+
+def test_gia_tri_da_bao_ve_khong_dem_ca_khach_van_chuyen():
+    """Trên dữ liệu thật, cộng theo mức thay vì theo kết cục cho ra 24,2 tỷ
+    trong khi tiền thật sự giữ lại được chỉ 4,1 tỷ."""
+    summary = {"summary": {"suspicious_total": 3, "prevented_total": 1, "proceeded_after_intervene": 1}}
+    decisions = [
+        {"level": "intervene", "outcome": "prevented", "tx_snapshot": {"amount": 100_000_000}},
+        {"level": "intervene", "outcome": "held", "tx_snapshot": {"amount": 50_000_000}},
+        # Cảnh báo rồi nhưng khách vẫn chuyển: không bảo vệ được đồng nào.
+        {"level": "intervene", "outcome": "proceeded", "tx_snapshot": {"amount": 900_000_000}},
+        # Chưa xử lý xong thì chưa tính.
+        {"level": "intervene", "outcome": None, "tx_snapshot": {"amount": 700_000_000}},
+    ]
+    assert mappers.map_metrics(summary, decisions).protected_value_vnd == 150_000_000
 
 
 def test_chi_so_ops_khong_chia_cho_khong():
@@ -258,3 +273,289 @@ def test_gateway_khong_tinh_lai_ty_trong():
 def test_khong_co_quy_nao_thi_tra_none():
     # Để phần gọi biết mà dùng dữ liệu tạm, thay vì hiện màn hình trống.
     assert mappers.map_quarterly({"summary": [], "category_totals": []}) is None
+
+
+# ---- Bốn màn vận hành phụ ----------------------------------------------------
+
+# Chép từ GET /cases của action-feedback-service
+CASE_ROWS = [
+    {"case_id": "CASE-2026-0007", "decision_id": "cab99d05-c621-4552-b57c-f644ba1f67de",
+     "customer_id": 100008, "scenario_id": "S05", "status": "OPEN",
+     "narrative": "Giao dịch 95,000,000 VND toi nguoi nhan moi.",
+     "created_at": "2026-09-15T09:41:20+07:00", "closed_at": None},
+    {"case_id": "CASE-2026-0003", "decision_id": "aaa11111-2222-3333-4444-555566667777",
+     "customer_id": 100008, "scenario_id": "S09", "status": "CLOSED_FRAUD",
+     "narrative": "Khach huy giao dich sau canh bao.",
+     "created_at": "2026-09-14T21:30:41+07:00", "closed_at": "2026-09-15T07:05:00+07:00"},
+]
+
+# Chép từ GET /scams của scam-knowledge-service
+SCENARIO_ROWS = [
+    {"scenario_id": "S09", "scenario_name": "Chiem quyen dieu khien thiet bi",
+     "group_code": "G5", "pattern": "TAKEOVER", "agent_can_ask": "N",
+     "advice_title": "Tam giu lenh", "advice_body": "Xac thuc lai bang sinh trac.",
+     "recommended_action": "hold", "priority": 0},
+    {"scenario_id": "S05", "scenario_name": "Mao danh co quan cong an",
+     "group_code": "G1", "pattern": "DRAIN", "agent_can_ask": "Y",
+     "advice_title": "Cong an khong yeu cau chuyen tien",
+     "advice_body": "Co quan cong an khong lam viec qua dien thoai.",
+     "recommended_action": "cancel", "priority": 1},
+]
+
+# Chép từ GET /info của risk-scoring-service
+RISK_INFO = {
+    "service": "risk-scoring-service",
+    "factor_caps": {"amount_deviation": 25, "new_beneficiary": 20, "time_of_day": 10,
+                    "behavior_drift": 20, "relationship_history": 15, "recent_context": 20},
+    "levels": {"pass": "< 40", "soft_warn": "40 - 74", "intervene": ">= 75"},
+}
+
+# Chép từ GET /llm-traces và /llm-traces/stats của action-feedback-service
+TRACE_ROWS = [
+    {"trace_id": 1042, "decision_id": "cab99d05-c621-4552-b57c-f644ba1f67de",
+     "agent": "shield_explain", "model": "z-ai/glm-5.2-hackathon", "status": "ok",
+     "latency_ms": 1080, "created_at": "2026-09-15T09:41:03+07:00"},
+    {"trace_id": 1041, "decision_id": None, "agent": "copilot",
+     "model": "z-ai/glm-5.2-hackathon", "status": "timeout", "latency_ms": 6000,
+     "created_at": "2026-09-15T09:38:50+07:00"},
+]
+TRACE_STATS = {
+    "total_calls": 10,
+    "fallback_rate": 0.2,
+    "breakdown": [
+        {"agent": "copilot", "status": "ok", "n": 6, "avg_latency_ms": 800},
+        {"agent": "copilot", "status": "timeout", "n": 2, "avg_latency_ms": 6000},
+        {"agent": "shield_explain", "status": "ok", "n": 2, "avg_latency_ms": 1100},
+    ],
+}
+
+
+def test_case_moi_nhat_len_dau_va_co_nhan_tieng_viet():
+    rows = mappers.map_ops_cases(CASE_ROWS, {100008: "NGUYEN THI B***"}, {"S05": "Mao danh"})
+    assert [c.id for c in rows] == ["CASE-2026-0007", "CASE-2026-0003"]
+    assert rows[0].status == "open" and rows[0].status_label == "Đang mở"
+    assert rows[1].status == "closedFraud"
+    assert rows[0].customer == "NGUYEN THI B***"
+
+
+def test_case_khong_khop_kich_ban_van_co_chu_de_doc():
+    # S09 không có trong bảng tên truyền vào: không để ô trống, cũng không ném
+    # mã trần ra bảng cho chuyên viên đọc.
+    rows = mappers.map_ops_cases(CASE_ROWS, {}, {"S05": "Mao danh"})
+    assert rows[1].scenario_name == "Kịch bản S09"
+    assert rows[0].customer == "—"
+
+
+def test_kich_ban_sap_theo_do_uu_tien_va_gan_so_vu_hom_nay():
+    from models import ScenarioCount
+    rows = mappers.map_ops_scenarios(
+        SCENARIO_ROWS, [ScenarioCount(name="Mao danh co quan cong an", count=48)]
+    )
+    # priority 0 là TAKEOVER — luôn đứng đầu danh sách.
+    assert rows[0].id == "S09"
+    assert rows[0].can_ask is False
+    assert rows[0].pattern_label == "Chiếm quyền điều khiển thiết bị"
+    assert rows[1].alerts_today == 48
+    assert rows[1].action_label == "Khuyên huỷ giao dịch"
+
+
+def test_nguong_rut_tu_chuoi_mo_ta_cua_engine():
+    cfg = mappers.map_ops_model(RISK_INFO, ["Lịch sử giao dịch 12 tháng"])
+    assert (cfg.soft_warn_min, cfg.intervene_min) == (40, 75)
+    # Tổng trần điểm 6 yếu tố vượt 100 — engine cộng rồi mới chặn trên.
+    assert cfg.max_score == 110
+    assert len(cfg.factors) == 6
+    assert all(f.label != f.key for f in cfg.factors)
+
+
+def test_ty_le_du_phong_chi_dem_timeout_va_error():
+    log = mappers.map_ops_audit(TRACE_ROWS, TRACE_STATS)
+    assert log.total_calls == 10
+    assert log.fallback_rate_pct == 20
+    copilot = [a for a in log.per_agent if a.agent_label == "Trợ lý tài chính"][0]
+    assert (copilot.calls, copilot.fallback_calls) == (8, 2)
+    # cache không phải lỗi nên không tính vào tỷ lệ dự phòng.
+    shield = [a for a in log.per_agent if a.agent_label.startswith("Scam Shield")][0]
+    assert shield.fallback_calls == 0
+
+
+def test_trace_khong_co_decision_thi_bo_han_field():
+    log = mappers.map_ops_audit(TRACE_ROWS, TRACE_STATS)
+    assert log.traces[0].decision_id == "cab99d05-c621-4552-b57c-f644ba1f67de"
+    assert log.traces[1].decision_id is None
+    assert log.traces[1].status_label.startswith("Quá hạn")
+
+
+def test_do_tre_bo_qua_nhom_chua_do_duoc_thoi_gian():
+    """avg_latency_ms = NULL nghĩa là chưa đo, không phải 0 ms.
+
+    Cộng như 0 sẽ báo hệ thống nhanh gấp đôi thực tế — đúng con số mà buổi
+    trình bày sẽ bị hỏi lại.
+    """
+    stats = {
+        "total_calls": 4,
+        "fallback_rate": 0.0,
+        "breakdown": [
+            {"agent": "copilot", "status": "ok", "n": 2, "avg_latency_ms": 1000},
+            {"agent": "copilot", "status": "cache", "n": 2, "avg_latency_ms": None},
+        ],
+    }
+    log = mappers.map_ops_audit([], stats)
+    assert log.avg_latency_ms == 1000
+    assert log.per_agent[0].calls == 4
+
+
+def test_chua_co_ban_ghi_nao_thi_khong_bia_ra_mot_luot_goi():
+    # Upstream trả total_calls = 1 khi bảng rỗng để khỏi chia cho 0.
+    log = mappers.map_ops_audit([], {"total_calls": 1, "fallback_rate": 0.0, "breakdown": []})
+    assert (log.total_calls, log.fallback_rate_pct, log.avg_latency_ms) == (0, 0, 0)
+
+
+def test_trang_thai_la_vao_nhom_loi_va_nhan_di_kem_dung_nhom_do():
+    log = mappers.map_ops_audit(
+        [{"trace_id": 9, "agent": "copilot", "model": "m", "status": "weird",
+          "latency_ms": 10, "created_at": "2026-09-15T09:00:00+07:00"}],
+        {"total_calls": 1, "fallback_rate": 0.0, "breakdown": [{"agent": "copilot", "status": "ok", "n": 1, "avg_latency_ms": 10}]},
+    )
+    trace = log.traces[0]
+    assert trace.status == "error"
+    assert trace.status_label == mappers.TRACE_STATUS["error"]
+
+
+# ---- Chi tiết case và dòng thời gian ------------------------------------------
+#
+# Ba endpoint này từng trả hằng số cho mọi case. Dữ liệu mẫu dưới đây chép theo
+# đúng hình dạng bản ghi thật của risk_decision, guardian_case và llm_trace.
+
+from datetime import datetime, timedelta, timezone
+
+import catalog
+
+VN = timezone(timedelta(hours=7))
+NOW = datetime(2026, 9, 15, 10, 30, tzinfo=VN)
+
+DECISION = {
+    "decision_id": "cab99d05-c621-4552-b57c-f644ba1f67de",
+    "customer_id": 100008,
+    "tx_snapshot": {
+        "amount": 95_000_000, "bank_code": "VCB", "memo_masked": "Nop tien xac minh",
+        "tx_time": "2026-09-15T09:41:02+07:00",
+        "session_flags": {"new_device": True, "on_call": True, "screen_sharing": False},
+    },
+    "score": 87, "level": "intervene", "scenario_id": "S05",
+    "action_taken": None, "outcome": None,
+    "created_at": "2026-09-15T09:41:02+07:00",
+    "intervened_at": "2026-09-15T09:41:03+07:00",
+    "actioned_at": None,
+}
+
+CASE_ROW = {
+    "case_id": "CASE-2026-0007", "decision_id": DECISION["decision_id"],
+    "customer_id": 100008, "scenario_id": "S05", "status": "OPEN",
+    "narrative": "Giao dich 95,000,000 VND toi nguoi nhan moi.",
+    "created_at": "2026-09-15T09:41:20+07:00", "closed_at": None,
+}
+
+CUSTOMER_ROW = {"customer_id": 100008, "name_masked": "NGUYEN THI B***", "persona": "SENIOR", "age": 68}
+
+HISTORY = [
+    DECISION,
+    {"decision_id": "old-1", "level": "intervene", "score": 58,
+     "tx_snapshot": {"amount": 10_000_000}, "created_at": "2026-08-30T10:00:00+07:00"},
+    {"decision_id": "old-2", "level": "pass", "score": 12,
+     "tx_snapshot": {"amount": 3_000_000}, "created_at": "2026-09-01T10:00:00+07:00"},
+    # Ngoài cửa sổ 90 ngày: không được tính vào "cảnh báo gần đây".
+    {"decision_id": "old-3", "level": "intervene", "score": 99,
+     "tx_snapshot": {"amount": 1_000_000}, "created_at": "2026-01-01T10:00:00+07:00"},
+]
+
+
+def test_kenh_giao_dich_noi_ca_boi_canh_phien():
+    channel = mappers.map_channel(DECISION["tx_snapshot"])
+    # Cờ bật mới được nhắc; cờ tắt thì không.
+    assert "thiết bị mới" in channel and "đang trong cuộc gọi" in channel
+    assert "chia sẻ màn hình" not in channel
+
+
+def test_chi_tiet_case_lay_so_that_cua_khach():
+    detail = mappers.map_case_detail(DECISION, CUSTOMER_ROW, CASE_ROW, RISK_INFO,
+                                     HISTORY, catalog.CASE_DETAIL, NOW)
+    profile = detail.customer_profile
+    # Chỉ đếm lượt có can thiệp, trong 90 ngày, và không đếm chính case đang mở.
+    assert profile.recent_alerts_count == 1
+    assert profile.recent_alerts_top_score == 58
+    assert profile.segment == "Cao tuổi"
+    assert profile.avg_transfer_vnd == round((95_000_000 + 10_000_000 + 3_000_000 + 1_000_000) / 4)
+
+
+def test_chi_tiet_case_lay_nguong_tu_engine_khong_chep_tay():
+    detail = mappers.map_case_detail(DECISION, CUSTOMER_ROW, CASE_ROW, RISK_INFO,
+                                     HISTORY, catalog.CASE_DETAIL, NOW)
+    assert (detail.model.soft_warn_min, detail.model.soft_warn_max) == (40, 74)
+    assert detail.model.intervene_threshold == 75
+
+
+def test_sla_dem_nguoc_tu_luc_mo_case_va_case_dong_thi_het_han():
+    detail = mappers.map_case_detail(DECISION, CUSTOMER_ROW, CASE_ROW, RISK_INFO,
+                                     HISTORY, catalog.CASE_DETAIL, NOW)
+    # Mở 09:41, hiện 10:30 → đã dùng 49 phút trong 60.
+    assert detail.transaction.sla_minutes == 11
+    closed = {**CASE_ROW, "status": "CLOSED_FRAUD", "closed_at": "2026-09-15T10:00:00+07:00"}
+    done = mappers.map_case_detail(DECISION, CUSTOMER_ROW, closed, RISK_INFO,
+                                   HISTORY, catalog.CASE_DETAIL, NOW)
+    assert done.transaction.sla_minutes == 0
+    assert done.transaction.hold_status == "Đã chặn — xác nhận lừa đảo"
+
+
+def test_dong_thoi_gian_dung_theo_moc_that():
+    traces = [
+        {"trace_id": 1, "agent": "shield_explain", "status": "ok", "latency_ms": 1080,
+         "created_at": "2026-09-15T09:41:04+07:00"},
+        {"trace_id": 2, "agent": "copilot", "status": "timeout", "latency_ms": 6000,
+         "created_at": "2026-09-15T09:41:10+07:00"},
+    ]
+    steps = mappers.map_case_timeline(DECISION, CASE_ROW, traces)
+    labels = [s.label for s in steps]
+    assert labels[0].startswith("Khách hàng khởi tạo lệnh chuyển 95.000.000")
+    assert any("87/100" in l and "can thiệp" in l for l in labels)
+    assert any("đã dùng bản dự phòng" in l for l in labels)
+    assert any("Mở case CASE-2026-0007" in l for l in labels)
+    # Chưa xử lý xong nên bước cuối là mốc chưa hoàn thành.
+    assert steps[-1].done is False and steps[-1].label == "Chờ quyết định xử lý"
+    assert [s.time for s in steps[:-1]] == sorted(s.time for s in steps[:-1])
+
+
+def test_case_da_xu_ly_thi_khong_con_buoc_cho():
+    done_decision = {**DECISION, "action_taken": "cancel",
+                     "actioned_at": "2026-09-15T09:45:00+07:00"}
+    closed_case = {**CASE_ROW, "status": "CLOSED_FRAUD", "closed_at": "2026-09-15T10:00:00+07:00"}
+    steps = mappers.map_case_timeline(done_decision, closed_case, [])
+    assert all(s.done for s in steps)
+    assert steps[-1].label.startswith("Đóng case")
+    assert any("Khách hàng huỷ giao dịch" == s.label for s in steps)
+
+
+def test_tinh_trang_he_thong_noi_dung_service_nao_chet():
+    rows = mappers.map_system_status({"Risk Engine": True, "Tri thức lừa đảo": False}, False)
+    by_label = {r.label: r for r in rows}
+    assert by_label["Risk Engine"].tone == "ok"
+    assert by_label["Tri thức lừa đảo"].tone == "danger"
+    # Chưa cấu hình agent là cảnh báo, không phải lỗi — demo vẫn chạy được.
+    assert by_label["Trợ lý AI"].tone == "warn"
+
+
+def test_trang_thai_case_dong_khong_con_bi_hieu_la_cho_xu_ly():
+    # Bảng cũ dùng CONFIRMED_FRAUD/DISMISSED, không phải giá trị thật của cột,
+    # nên mọi case đã đóng đều hiện "chờ xử lý".
+    assert mappers.CASE_STATUS_MAP["CLOSED_FRAUD"] == "confirmed"
+    assert mappers.CASE_STATUS_MAP["CLOSED_LEGIT"] == "dismissed"
+    assert mappers.CASE_STATUS_MAP["CALLBACK_DONE"] == "investigating"
+
+
+def test_case_con_mo_thi_van_con_buoc_cho_du_khach_da_hanh_dong():
+    """Bắt được nhờ chạy trên case thật CASE-2026-0006: hệ thống đã tạm giữ lệnh
+    (action_taken=hold) nhưng case vẫn OPEN, tức vẫn chờ chuyên viên quyết định."""
+    held = {**DECISION, "action_taken": "hold", "actioned_at": "2026-09-15T09:42:00+07:00"}
+    steps = mappers.map_case_timeline(held, CASE_ROW, [])
+    assert steps[-1].label == "Chờ quyết định xử lý"
+    assert steps[-1].done is False

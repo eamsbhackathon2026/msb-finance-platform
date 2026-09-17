@@ -400,6 +400,95 @@ class OpsSession(Contract):
     now_label: str
 
 
+# ---- Đăng nhập nội bộ cho Ops --------------------------------------------------
+
+class OpsLoginRequest(Contract):
+    username: str
+    password: str
+
+
+class OpsLoginResult(Contract):
+    """Khác `LoginResponse` của khách ở hai điểm: không có nhánh "degraded" (identity-
+    service chết là không ai vào Ops được, xem `main.ops_login`), và lý do từ chối
+    có thêm `not_backoffice` cho tài khoản đúng mật khẩu nhưng không có quyền vận
+    hành."""
+    authenticated: bool
+    operator: Operator | None = None
+    # Lý do khi authenticated=false: not_backoffice | invalid_credentials | disabled | locked
+    reason: str | None = None
+
+
+# ---- Bốn màn vận hành phụ trong sidebar Ops -----------------------------------
+
+class OpsCase(Contract):
+    """Một case vận hành, dịch từ bảng guardian_case."""
+    id: str
+    decision_id: str
+    customer: str
+    scenario_name: str
+    status: Literal["open", "callbackDone", "closedFraud", "closedLegit"]
+    status_label: str
+    narrative: str
+    opened_at: str
+    closed_at: str | None = None
+
+
+class OpsScenario(Contract):
+    """Một kịch bản lừa đảo trong playbook, dịch từ bảng scam_scenario."""
+    id: str
+    name: str
+    group_label: str
+    pattern_label: str
+    action_label: str
+    can_ask: bool
+    advice_title: str
+    advice_body: str
+    priority: int
+    alerts_today: int
+
+
+class OpsModelFactor(Contract):
+    key: str
+    label: str
+    max_score: int
+
+
+class OpsModelConfig(Contract):
+    """Ngưỡng và trần điểm của risk engine — chỉ đọc, do risk-scoring giữ."""
+    soft_warn_min: int
+    intervene_min: int
+    max_score: int
+    factors: list[OpsModelFactor]
+    inputs: list[str]
+
+
+class AuditTrace(Contract):
+    id: str
+    time: str
+    agent_label: str
+    model: str
+    status: Literal["ok", "cache", "timeout", "error"]
+    status_label: str
+    latency_ms: int | None = None
+    decision_id: str | None = None
+
+
+class AuditAgentStat(Contract):
+    agent_label: str
+    calls: int
+    fallback_calls: int
+    avg_latency_ms: int
+
+
+class OpsAuditLog(Contract):
+    """Nhật ký mọi lượt gọi LLM — bằng chứng AI kiểm toán được."""
+    total_calls: int
+    fallback_rate_pct: int
+    avg_latency_ms: int
+    per_agent: list[AuditAgentStat]
+    traces: list[AuditTrace]
+
+
 # ---- Thao tác ghi -------------------------------------------------------------
 
 class TransferActionRequest(Contract):

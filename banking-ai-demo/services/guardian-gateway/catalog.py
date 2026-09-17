@@ -12,6 +12,8 @@ nguồn chứ không phải đổi hợp đồng.
 from __future__ import annotations
 
 from models import (
+    AuditAgentStat,
+    AuditTrace,
     Beneficiary,
     BudgetSummary,
     CaseTimelineStep,
@@ -27,9 +29,14 @@ from models import (
     HourlyAlertPoint,
     Insight,
     KpiDelta,
+    OpsAuditLog,
+    OpsCase,
     OpsDashboard,
     OpsDeltas,
     OpsMetrics,
+    OpsModelConfig,
+    OpsModelFactor,
+    OpsScenario,
     PendingTransfer,
     ProtectionLayer,
     RiskAssessment,
@@ -680,5 +687,102 @@ INVEST_RATES = InvestRates(
             rates=[RateCell(product_id=pid, rate_pct=pct) for pid, pct in cells],
         )
         for code, months, label, cells in _RATE_TABLE
+    ],
+)
+
+
+# ============ BỐN MÀN VẬN HÀNH PHỤ ============
+#
+# Bản dự phòng khi 5 service domain chưa gọi được. Cùng vai trò với OPS_ALERTS:
+# giữ màn hình nói được một câu chuyện đủ nghĩa, và mọi lần dùng tới đều đóng
+# dấu X-Guardian-Data-Source = fallback.
+#
+# Ba kịch bản dưới đây chép theo ĐÚNG mã, tên và độ ưu tiên trong bảng
+# scam_scenario của database ea-hackathon (đối chiếu 2026-09-17). Nếu bịa mã
+# riêng thì khi rơi dự phòng, màn hình nói S05 là một chuyện còn database hiểu
+# S05 là chuyện khác.
+
+OPS_CASES = [
+    OpsCase(
+        id="CASE-2026-0007", decision_id=CUSTOMER_CASE_ID, customer=CUSTOMER.name,
+        scenario_name=MAIN_SCENARIO, status="open", status_label="Đang mở",
+        narrative="Giao dịch 85.000.000 VND tới tài khoản mới mở, khách được cảnh báo và đang chờ xử lý.",
+        opened_at="2026-09-15T09:41:20", closed_at=None,
+    ),
+    OpsCase(
+        id="CASE-2026-0006", decision_id="ALT-4090", customer="Lê Thị Hồng",
+        scenario_name="Đầu tư ảo", status="callbackDone", status_label="Đã gọi lại khách",
+        narrative="Giao dịch 42.000.000 VND tới sàn đầu tư chưa xác minh; đã gọi lại khách xác nhận.",
+        opened_at="2026-09-15T08:12:05", closed_at=None,
+    ),
+    OpsCase(
+        id="CASE-2026-0005", decision_id="ALT-4088", customer="Phạm Văn Duy",
+        scenario_name="Giả nhân viên ngân hàng", status="closedFraud",
+        status_label="Đã đóng — xác nhận lừa đảo",
+        narrative="Khách huỷ giao dịch sau cảnh báo; tài khoản người nhận đã báo cáo cộng đồng.",
+        opened_at="2026-09-14T21:30:41", closed_at="2026-09-15T07:05:00",
+    ),
+]
+
+OPS_SCENARIOS = [
+    OpsScenario(
+        id="S09", name="Chiếm quyền điều khiển thiết bị của khách",
+        group_label="Chiếm quyền thiết bị", pattern_label="Chiếm quyền điều khiển thiết bị",
+        action_label="Tạm giữ lệnh", can_ask=False,
+        advice_title="Thiết bị của bạn có dấu hiệu bị điều khiển từ xa",
+        advice_body="Hệ thống phát hiện ứng dụng điều khiển từ xa hoặc dịch vụ trợ năng lạ đang hoạt động trên thiết bị. Trong tình huống này, hỏi khách qua ứng dụng là tự lộ, nên tạm giữ lệnh và xác thực lại bằng sinh trắc.",
+        priority=0, alerts_today=3,
+    ),
+    OpsScenario(
+        id="S01", name="Giả danh công an, yêu cầu chuyển vào 'tài khoản an toàn'",
+        group_label="Mạo danh", pattern_label="Rút sạch tài khoản",
+        action_label="Khuyên huỷ giao dịch", can_ask=True,
+        advice_title="Công an không bao giờ yêu cầu chuyển tiền",
+        advice_body="Cơ quan công an, viện kiểm sát và tòa án không làm việc qua điện thoại và không yêu cầu chuyển tiền vào 'tài khoản an toàn' để chứng minh trong sạch.",
+        priority=1, alerts_today=31,
+    ),
+    OpsScenario(
+        id="S03", name="Deepfake video call giả người thân mượn tiền gấp",
+        group_label="Deepfake", pattern_label="Một lệnh đơn lẻ",
+        action_label="Tạm giữ lệnh", can_ask=True,
+        advice_title="Hãy gọi lại bằng số bạn vẫn lưu",
+        advice_body="Công nghệ deepfake dựng được khuôn mặt và giọng nói người thân trong một cuộc gọi video ngắn. Gọi lại bằng số bạn tự lưu trước khi chuyển.",
+        priority=2, alerts_today=6,
+    ),
+]
+
+OPS_MODEL = OpsModelConfig(
+    soft_warn_min=40,
+    intervene_min=75,
+    max_score=110,
+    factors=[
+        OpsModelFactor(key="amount_deviation", label="Số tiền lệch thói quen", max_score=25),
+        OpsModelFactor(key="new_beneficiary", label="Người nhận mới", max_score=20),
+        OpsModelFactor(key="time_of_day", label="Giờ giao dịch bất thường", max_score=10),
+        OpsModelFactor(key="behavior_drift", label="Hành vi đổi khác", max_score=20),
+        OpsModelFactor(key="relationship_history", label="Chưa từng giao dịch với người nhận", max_score=15),
+        OpsModelFactor(key="recent_context", label="Sự kiện đáng ngờ ngay trước đó", max_score=20),
+    ],
+    inputs=OPS_DASHBOARD.model_inputs,
+)
+
+OPS_AUDIT = OpsAuditLog(
+    total_calls=128,
+    fallback_rate_pct=6,
+    avg_latency_ms=940,
+    per_agent=[
+        AuditAgentStat(agent_label="Scam Shield — giải thích rủi ro", calls=54, fallback_calls=3, avg_latency_ms=1_120),
+        AuditAgentStat(agent_label="Trợ lý tài chính", calls=74, fallback_calls=5, avg_latency_ms=810),
+    ],
+    traces=[
+        AuditTrace(id="1042", time="2026-09-15T09:41:03", agent_label="Scam Shield — giải thích rủi ro",
+                   model="z-ai/glm-5.2-hackathon", status="ok", status_label="Thành công",
+                   latency_ms=1_080, decision_id=CUSTOMER_CASE_ID),
+        AuditTrace(id="1041", time="2026-09-15T09:38:50", agent_label="Trợ lý tài chính",
+                   model="z-ai/glm-5.2-hackathon", status="timeout",
+                   status_label="Quá hạn — đã dùng bản dự phòng", latency_ms=6_000, decision_id=None),
+        AuditTrace(id="1040", time="2026-09-15T09:22:14", agent_label="Trợ lý tài chính",
+                   model="z-ai/glm-5.2-hackathon", status="ok", status_label="Thành công",
+                   latency_ms=760, decision_id=None),
     ],
 )

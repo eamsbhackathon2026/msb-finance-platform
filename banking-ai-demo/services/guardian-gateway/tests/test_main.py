@@ -240,7 +240,7 @@ def test_info_phan_anh_dung_cau_hinh_domain():
     body = client.get("/info").json()
     # conftest tắt DOMAIN_ENABLED nên /info phải báo đúng như vậy.
     assert body["integrated_with_domain_services"] is False
-    assert len(body["endpoints"]) == 29
+    assert len(body["endpoints"]) == 34
 
 
 def test_openapi_phuc_vu_dung_cac_endpoint_fe_goi():
@@ -272,11 +272,16 @@ def test_openapi_phuc_vu_dung_cac_endpoint_fe_goi():
         "/api/risk/explain",
         "/api/safety-center",
         "/api/safety-center/protections/{key}",
+        "/api/ops/login",
         "/api/ops/session",
         "/api/ops/metrics",
         "/api/ops/dashboard",
         "/api/ops/alerts",
         "/api/ops/alerts/{alert_id}",
+        "/api/ops/cases",
+        "/api/ops/scenarios",
+        "/api/ops/model",
+        "/api/ops/audit",
         "/api/ops/alerts/{alert_id}/detail",
         "/api/ops/alerts/{alert_id}/timeline",
         "/api/ops/alerts/{alert_id}/decision",
@@ -363,6 +368,90 @@ def test_ops_dashboard():
         assert set(d) == {"valueLabel", "up"}
     assert len(body["hourlyAlerts"]) == 24
     assert len(body["modelInputs"]) == 4
+
+
+# ---- Bốn màn vận hành phụ ----------------------------------------------------
+
+OPS_CASE_KEYS = {"id", "decisionId", "customer", "scenarioName", "status",
+                 "statusLabel", "narrative", "openedAt", "closedAt"}
+OPS_SCENARIO_KEYS = {"id", "name", "groupLabel", "patternLabel", "actionLabel",
+                     "canAsk", "adviceTitle", "adviceBody", "priority", "alertsToday"}
+OPS_MODEL_KEYS = {"softWarnMin", "interveneMin", "maxScore", "factors", "inputs"}
+OPS_AUDIT_KEYS = {"totalCalls", "fallbackRatePct", "avgLatencyMs", "perAgent", "traces"}
+
+
+def test_ops_cases_dung_hop_dong():
+    body = client.get("/api/ops/cases").json()
+    assert len(body) > 0
+    for case in body:
+        # closedAt là optional bên TS; case đang mở thì bỏ hẳn field.
+        assert set(case) <= OPS_CASE_KEYS
+        assert {"id", "decisionId", "customer", "status", "statusLabel"} <= set(case)
+        assert case["status"] in {"open", "callbackDone", "closedFraud", "closedLegit"}
+
+
+def test_ops_cases_loc_theo_trang_thai():
+    dang_mo = client.get("/api/ops/cases?status=open").json()
+    assert all(c["status"] == "open" for c in dang_mo)
+    assert len(dang_mo) < len(client.get("/api/ops/cases").json())
+
+
+def test_ops_scenarios_khong_ro_ma_noi_bo_ra_man_hinh():
+    body = client.get("/api/ops/scenarios").json()
+    assert len(body) > 0
+    for scen in body:
+        assert set(scen) == OPS_SCENARIO_KEYS
+        # Chuyên viên vận hành đọc tiếng Việt, không đọc TAKEOVER hay G5.
+        assert scen["patternLabel"] not in {"SINGLE", "SERIES", "DRAIN", "TAKEOVER", "RECEIVER"}
+        assert scen["groupLabel"] not in {"G1", "G2", "G3", "G4", "G5"}
+        assert scen["actionLabel"] not in {"cancel", "hold", "contact", "continue"}
+
+
+def test_ops_scenarios_takeover_khong_duoc_hoi_khach():
+    body = client.get("/api/ops/scenarios").json()
+    takeover = [s for s in body if "Chiếm quyền" in s["patternLabel"]]
+    assert takeover, "playbook dự phòng phải có kịch bản chiếm quyền thiết bị"
+    # Kẻ gian đang nhìn thấy màn hình khách: hỏi khách là tự lộ.
+    assert all(s["canAsk"] is False for s in takeover)
+
+
+def test_ops_model_khop_nguong_cua_engine():
+    body = client.get("/api/ops/model").json()
+    assert set(body) == OPS_MODEL_KEYS
+    # Hai ngưỡng này là hằng số của risk-scoring-service (LEVEL_SOFT_WARN,
+    # LEVEL_INTERVENE); màn case hiển thị đúng cặp số đó.
+    assert body["softWarnMin"] == 40
+    assert body["interveneMin"] == 75
+    assert body["softWarnMin"] < body["interveneMin"]
+    for f in body["factors"]:
+        assert set(f) == {"key", "label", "maxScore"}
+        assert f["label"] != f["key"]
+
+
+def test_ops_audit_dung_hop_dong():
+    body = client.get("/api/ops/audit").json()
+    assert set(body) == OPS_AUDIT_KEYS
+    assert 0 <= body["fallbackRatePct"] <= 100
+    for stat in body["perAgent"]:
+        assert set(stat) == {"agentLabel", "calls", "fallbackCalls", "avgLatencyMs"}
+        assert stat["fallbackCalls"] <= stat["calls"]
+    for trace in body["traces"]:
+        assert set(trace) <= {"id", "time", "agentLabel", "model", "status",
+                              "statusLabel", "latencyMs", "decisionId"}
+        assert trace["status"] in {"ok", "cache", "timeout", "error"}
+
+
+def test_nhat_ky_ai_loc_duoc_ca_khi_dung_du_lieu_du_phong():
+    """Bộ lọc phải có tác dụng ở cả hai nguồn dữ liệu.
+
+    Test chạy với DOMAIN_ENABLED=false nên đây chính là nhánh dự phòng: nếu bộ
+    lọc chỉ hoạt động khi có database, người trình bày sẽ tưởng màn hình hỏng.
+    """
+    body = client.get("/api/ops/audit?status=timeout").json()
+    assert len(body["traces"]) > 0
+    assert all(t["status"] == "timeout" for t in body["traces"])
+    # Ba con số là của toàn bộ nhật ký, không đổi theo bộ lọc.
+    assert body["totalCalls"] == client.get("/api/ops/audit").json()["totalCalls"]
 
 
 def test_dong_thoi_gian_cua_case():
@@ -602,6 +691,155 @@ def test_login_password_hash_khong_bao_gio_ra_response(monkeypatch):
     body = client.post("/api/auth/login", json={"username": "x", "password": "y"}).json()
     assert "passwordHash" not in body["user"]
     assert "password_hash" not in body["user"]
+
+
+# ---- POST /api/ops/login ------------------------------------------------------
+#
+# Khác /api/auth/login: không có nhánh "degraded" (identity-service chết thì
+# không ai vào Ops được), và còn phải gate bằng quyền hiệu lực chứ không chỉ
+# xác thực đúng mật khẩu — xem domain.user_permissions.
+
+_ADMIN_USER = {
+    "user_id": 1, "username": "0901000001", "role": "ADMIN",
+    "customer_id": None, "full_name_masked": None,
+    "email_masked": None, "phone_masked": None, "user_status": "ACTIVE",
+}
+_CUSTOMER_USER = {
+    "user_id": 13, "username": "kh100008", "role": "CUSTOMER",
+    "customer_id": 100008, "full_name_masked": "NGUYEN VAN M***",
+    "email_masked": None, "phone_masked": None, "user_status": "ACTIVE",
+}
+
+
+def test_ops_login_tai_khoan_khach_bi_tu_choi_role_chua_khai(monkeypatch):
+    # app_role chưa khai vai trò CUSTOMER: role_defined=False.
+    async def fake_verify(username, password):
+        return {"authenticated": True, "user": _CUSTOMER_USER}
+
+    async def fake_permissions(user_id):
+        return {"user_id": user_id, "role": "CUSTOMER", "role_defined": False,
+                "effective_permissions": [], "note": "chưa khai"}
+
+    monkeypatch.setattr(main.domain, "auth_verify", fake_verify)
+    monkeypatch.setattr(main.domain, "user_permissions", fake_permissions)
+    r = client.post("/api/ops/login", json={"username": "kh100008", "password": "123456"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["authenticated"] is False
+    assert body["reason"] == "not_backoffice"
+    assert "operator" not in body
+
+
+def test_ops_login_tai_khoan_dung_mat_khau_nhung_thieu_quyen_ops_bi_tu_choi(monkeypatch):
+    # Vai trò đã khai (role_defined=True) nhưng không có quyền ops.dashboard.read.
+    async def fake_verify(username, password):
+        return {"authenticated": True, "user": _CUSTOMER_USER}
+
+    async def fake_permissions(user_id):
+        return {"user_id": user_id, "role": "CUSTOMER", "role_defined": True,
+                "role_status": "ACTIVE", "user_status": "ACTIVE",
+                "effective_permissions": ["app.transfer.create"],
+                "declared_permissions": ["app.transfer.create"]}
+
+    monkeypatch.setattr(main.domain, "auth_verify", fake_verify)
+    monkeypatch.setattr(main.domain, "user_permissions", fake_permissions)
+    r = client.post("/api/ops/login", json={"username": "kh100008", "password": "123456"})
+    body = r.json()
+    assert body["authenticated"] is False
+    assert body["reason"] == "not_backoffice"
+
+
+def test_ops_login_tai_khoan_noi_bo_du_quyen_duoc_nhan(monkeypatch):
+    async def fake_verify(username, password):
+        return {"authenticated": True, "user": _ADMIN_USER}
+
+    async def fake_permissions(user_id):
+        assert user_id == 1
+        return {"user_id": user_id, "role": "ADMIN", "role_defined": True,
+                "role_status": "ACTIVE", "user_status": "ACTIVE",
+                "effective_permissions": ["ops.dashboard.read", "ops.alerts.read",
+                                          "ops.alerts.decide"],
+                "declared_permissions": ["ops.dashboard.read", "ops.alerts.read",
+                                         "ops.alerts.decide"]}
+
+    monkeypatch.setattr(main.domain, "auth_verify", fake_verify)
+    monkeypatch.setattr(main.domain, "user_permissions", fake_permissions)
+    r = client.post("/api/ops/login", json={"username": "0901000001", "password": "đúng"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["authenticated"] is True
+    assert body["operator"]["name"] == "0901000001"  # không có full_name → rơi về username
+    assert body["operator"]["role"] == "Fraud Ops"
+    assert body["operator"]["initials"] == "09"
+    assert body["operator"]["shift"] in {"Ca sáng", "Ca chiều", "Ca tối"}
+
+
+def test_ops_login_sai_mat_khau_hoac_khoa_chuyen_tiep_ly_do_khong_goi_them_permissions(monkeypatch):
+    async def fake_verify(username, password):
+        return {"authenticated": False, "reason": "locked"}
+
+    async def fail_permissions(user_id):
+        raise AssertionError("không được gọi permissions khi chưa xác thực được")
+
+    monkeypatch.setattr(main.domain, "auth_verify", fake_verify)
+    monkeypatch.setattr(main.domain, "user_permissions", fail_permissions)
+    r = client.post("/api/ops/login", json={"username": "0901000005", "password": "sai"})
+    body = r.json()
+    assert body["authenticated"] is False
+    assert body["reason"] == "locked"
+
+
+def test_ops_login_identity_chet_luc_xac_thuc_tra_503_khong_co_nhanh_du_phong(monkeypatch):
+    async def fake_verify(username, password):
+        return None
+    monkeypatch.setattr(main.domain, "auth_verify", fake_verify)
+    r = client.post("/api/ops/login", json={"username": "0901000001", "password": "x"})
+    assert r.status_code == 503
+
+
+def test_ops_login_identity_chet_luc_tra_quyen_tra_503(monkeypatch):
+    async def fake_verify(username, password):
+        return {"authenticated": True, "user": _ADMIN_USER}
+
+    async def fake_permissions(user_id):
+        return None
+
+    monkeypatch.setattr(main.domain, "auth_verify", fake_verify)
+    monkeypatch.setattr(main.domain, "user_permissions", fake_permissions)
+    r = client.post("/api/ops/login", json={"username": "0901000001", "password": "x"})
+    assert r.status_code == 503
+
+
+# ---- GET /api/ops/session?username= -------------------------------------------
+
+def test_ops_session_khong_kem_username_giu_hang_so_catalog(monkeypatch):
+    monkeypatch.setattr(main.domain, "DOMAIN_ENABLED", True)
+
+    async def health(base):
+        return True
+    monkeypatch.setattr(main.domain, "health", health)
+    body = client.get("/api/ops/session").json()
+    assert body["operator"]["name"] == catalog.OPS_SESSION.operator.name
+
+
+def test_ops_session_kem_username_tra_chuyen_vien_that(monkeypatch):
+    monkeypatch.setattr(main.domain, "DOMAIN_ENABLED", True)
+
+    async def health(base):
+        return True
+
+    async def user_by_username(username):
+        assert username == "0901000002"
+        return {"user_id": 2, "username": "0901000002", "role": "ADMIN",
+                "customer_id": None, "full_name_masked": "TRAN THI H***",
+                "email_masked": None, "phone_masked": None, "user_status": "ACTIVE"}
+
+    monkeypatch.setattr(main.domain, "health", health)
+    monkeypatch.setattr(main.domain, "user_by_username", user_by_username)
+    body = client.get("/api/ops/session?username=0901000002").json()
+    assert body["operator"]["name"] == "TRAN THI H***"
+    assert body["operator"]["initials"] == "TH"
+    assert body["operator"]["role"] == "Fraud Ops"
 
 
 # ---- Bảng + biểu đồ số liệu thật đính vào câu trả lời chi tiêu ----------------
@@ -1224,3 +1462,189 @@ def test_top_factors_dang_chuoi_van_doc_duoc():
 
 def test_top_factors_none_thi_khong_ra_ly_do_rac():
     assert main._factor_reasons({"top_factors": "none", "factors": {}}) == []
+
+
+# ---- Đường đi dữ liệu thật của màn Ops ----------------------------------------
+#
+# Bộ test chạy với DOMAIN_ENABLED=false nên mặc định chỉ đi nhánh dự phòng. Các
+# test dưới đây giả lập 5 service để đi đúng nhánh đọc database — nơi ba endpoint
+# này từng trả hằng số cho mọi case.
+
+import mappers
+
+DECISION_ID = "cab99d05-c621-4552-b57c-f644ba1f67de"
+
+_DECISION = {
+    "decision_id": DECISION_ID, "customer_id": 100008,
+    "tx_snapshot": {"amount": 95_000_000, "memo_masked": "Nop tien xac minh",
+                    "session_flags": {"new_device": True}},
+    "score": 87, "level": "intervene", "scenario_id": "S05",
+    "created_at": "2026-09-15T09:41:02+07:00",
+    "intervened_at": "2026-09-15T09:41:03+07:00", "actioned_at": None,
+}
+_CASE = {"case_id": "CASE-2026-0007", "decision_id": DECISION_ID, "customer_id": 100008,
+         "status": "OPEN", "narrative": "x", "created_at": "2026-09-15T09:41:20+07:00",
+         "closed_at": None}
+
+
+@pytest.fixture
+def domain_that(monkeypatch):
+    """Năm service trả dữ liệu thật; ghi lại các lời gọi ghi để test soi."""
+    written: dict = {}
+
+    async def risk_decision(decision_id):
+        return _DECISION if decision_id == DECISION_ID else None
+
+    async def cases(limit=50):
+        return {"cases": [_CASE]}
+
+    async def customer(customer_id):
+        return {"customer_id": customer_id, "name_masked": "NGUYEN THI B***", "persona": "SENIOR"}
+
+    async def risk_info():
+        return {"levels": {"pass": "< 40", "soft_warn": "40 - 74", "intervene": ">= 75"},
+                "factor_caps": {"amount_deviation": 25}}
+
+    async def customer_decisions(customer_id, limit=50):
+        return {"decisions": [_DECISION]}
+
+    async def llm_traces(agent=None, status=None, decision_id=None, limit=50):
+        return {"traces": [{"trace_id": 1, "agent": "shield_explain", "status": "ok",
+                            "latency_ms": 1080, "created_at": "2026-09-15T09:41:04+07:00"}]}
+
+    async def transfer_action(payload):
+        written["action"] = payload
+        return {"ok": True}
+
+    async def update_case(case_id, status, note=None):
+        written["case"] = {"case_id": case_id, "status": status, "note": note}
+        return {"case": {}}
+
+    monkeypatch.setattr(main.domain, "DOMAIN_ENABLED", True)
+    for name, fn in [("risk_decision", risk_decision), ("cases", cases), ("customer", customer),
+                     ("risk_info", risk_info), ("customer_decisions", customer_decisions),
+                     ("llm_traces", llm_traces), ("transfer_action", transfer_action),
+                     ("update_case", update_case)]:
+        monkeypatch.setattr(main.domain, name, fn)
+    return written
+
+
+def test_chi_tiet_case_doc_duoc_bang_id_that(domain_that):
+    # Trước đây id dạng UUID luôn 404 vì chỉ tra trong dữ liệu tạm.
+    r = client.get(f"/api/ops/alerts/{DECISION_ID}/detail")
+    assert r.status_code == 200
+    body = r.json()
+    assert "thiết bị mới" in body["transaction"]["channel"]
+    assert body["transaction"]["content"] == "Nop tien xac minh"
+    assert body["customerProfile"]["segment"] == "Cao tuổi"
+    assert body["model"]["interveneThreshold"] == 75
+
+
+def test_dong_thoi_gian_doc_duoc_bang_id_that(domain_that):
+    body = client.get(f"/api/ops/alerts/{DECISION_ID}/timeline").json()
+    labels = [s["label"] for s in body]
+    assert any("Mở case CASE-2026-0007" in l for l in labels)
+    assert any("phản hồi" in l for l in labels)
+    assert body[-1]["done"] is False
+
+
+def test_quyet_dinh_duoc_ghi_xuong_ca_quyet_dinh_lan_case(domain_that):
+    r = client.post(f"/api/ops/alerts/{DECISION_ID}/decision",
+                    json={"decision": "confirmed", "note": "đã gọi khách xác minh"})
+    assert r.status_code == 200
+    # Ghi vào risk_decision để vòng đời quyết định khép lại...
+    assert domain_that["action"]["action_taken"] == "cancel"
+    # ...và đóng case, việc này khiến action-feedback sinh feedback nguồn ops.
+    assert domain_that["case"] == {"case_id": "CASE-2026-0007", "status": "CLOSED_FRAUD",
+                                   "note": "đã gọi khách xác minh"}
+
+
+def test_phien_lam_viec_bao_dung_service_nao_chet(domain_that, monkeypatch):
+    async def health(base):
+        return "risk-scoring" in base
+    monkeypatch.setattr(main.domain, "health", health)
+    body = client.get("/api/ops/session").json()
+    tones = {row["label"]: row["tone"] for row in body["systemStatus"]}
+    assert tones["Risk Engine"] == "ok"
+    assert tones["Tri thức lừa đảo"] == "danger"
+    # Nhãn giờ không còn là chuỗi cứng "Thứ Ba, 15/09/2026 · 09:41".
+    assert body["nowLabel"] != catalog.OPS_SESSION.now_label
+
+
+# ---- Chat phát thẳng từ agent -------------------------------------------------
+#
+# Trước đây gateway chờ trọn lần xử lý `mode=sync` rồi mới cắt câu trả lời thành
+# token phát lại, nên khách nhìn màn hình trắng suốt thời gian mô hình chạy.
+
+def _gia_lap_agent_stream(monkeypatch, pieces, busy=False):
+    """Thay domain.agent_stream bằng một dòng chảy dựng sẵn, ghi lại tham số."""
+    ghi_nhan: dict = {}
+
+    async def fake(question, agent_id=None, kind="copilot", customer_id=None, session_key=None):
+        ghi_nhan.update(question=question, kind=kind, session_key=session_key)
+        if busy:
+            raise main.domain.AgentBusy()
+        for piece in pieces:
+            yield piece
+
+    monkeypatch.setattr(main.domain, "agent_stream", fake)
+    return ghi_nhan
+
+
+def test_chat_phat_thang_tung_mau_cua_agent(monkeypatch):
+    ghi_nhan = _gia_lap_agent_stream(monkeypatch, ["Tháng này ", "bạn chi ", "12.460.000 ₫."])
+    r = client.post("/api/copilot/chat", json={"message": "Tháng này tôi tiêu vào đâu?"})
+    tokens, thay_done, _ = _doc_token(r.text)
+    assert thay_done
+    # Mỗi mẩu của agent ra một sự kiện riêng: chữ tới trình duyệt dần dần chứ
+    # không dồn một cục sau khi mô hình chạy xong.
+    assert "".join(tokens) == "Tháng này bạn chi 12.460.000 ₫."
+    assert len(tokens) == 3
+
+
+def test_chat_go_markdown_ngay_trong_dong_chay(monkeypatch):
+    _gia_lap_agent_stream(monkeypatch, ["Bạn chi **12.4", "60.000 ₫** tháng này.\n", "| Nhóm | Tiền |\n", "Hết."])
+    r = client.post("/api/copilot/chat", json={"message": "chi tiêu"})
+    tokens, _, _ = _doc_token(r.text)
+    noi_dung = "".join(tokens)
+    # FE render văn bản thuần: không được để lọt dấu ** hay dòng bảng markdown.
+    assert "**" not in noi_dung
+    assert "|" not in noi_dung
+    assert "12.460.000 ₫" in noi_dung
+
+
+def test_chat_gui_kem_khoa_hoi_thoai(monkeypatch):
+    ghi_nhan = _gia_lap_agent_stream(monkeypatch, ["xong"])
+    client.post("/api/copilot/chat", json={"message": "còn tháng trước thì sao?"})
+    # Thiếu khoá này thì mỗi câu hỏi mở một hội thoại mới và trợ lý không nhớ gì.
+    assert ghi_nhan["session_key"] == main.domain.copilot_session_key()
+    assert ghi_nhan["kind"] == "copilot"
+
+
+def test_chat_hoi_don_thi_noi_thanh_loi(monkeypatch):
+    _gia_lap_agent_stream(monkeypatch, [], busy=True)
+    r = client.post("/api/copilot/chat", json={"message": "câu thứ hai"})
+    tokens, thay_done, _ = _doc_token(r.text)
+    noi_dung = "".join(tokens)
+    # 409 run_in_progress không được nuốt thành im lặng rơi về kịch bản.
+    assert "đợi một chút" in noi_dung
+    assert thay_done
+
+
+def test_chat_agent_khong_phat_gi_thi_roi_ve_kich_ban(monkeypatch):
+    _gia_lap_agent_stream(monkeypatch, [])
+    r = client.post("/api/copilot/chat", json={"message": "thời tiết hôm nay thế nào"})
+    tokens, thay_done, _ = _doc_token(r.text)
+    assert "".join(tokens) == catalog.FALLBACK_REPLY
+    assert thay_done
+
+
+def test_chat_van_dinh_bang_sau_phan_chu(monkeypatch):
+    _gia_lap_agent_stream(monkeypatch, ["Đây là chi tiêu của bạn."])
+    r = client.post("/api/copilot/chat", json={"message": "Tổng hợp chi tiêu tháng này của tôi"})
+    dong = [l for l in r.text.split("\n") if l.startswith("data:")]
+    co_bang = [i for i, l in enumerate(dong) if '"table"' in l]
+    co_token = [i for i, l in enumerate(dong) if '"token"' in l]
+    if co_bang:
+        # Thứ tự cũ phải giữ: hết chữ mới tới bảng, rồi mới tới [DONE].
+        assert max(co_token) < min(co_bang)
