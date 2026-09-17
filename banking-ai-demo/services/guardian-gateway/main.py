@@ -1675,6 +1675,48 @@ def _khop_nguoi_nhan(ten: str, danh_ba: list[TransferBeneficiary]) -> list[Trans
     return ra
 
 
+# Đơn vị tiền nói miệng → số nhân. "củ" là tiếng lóng của triệu.
+_DON_VI_TIEN = {
+    "k": 1_000, "nghin": 1_000, "ngan": 1_000, "ngàn": 1_000, "nghìn": 1_000,
+    "tr": 1_000_000, "trieu": 1_000_000, "triệu": 1_000_000, "cu": 1_000_000, "củ": 1_000_000,
+    "ty": 1_000_000_000, "tỷ": 1_000_000_000, "tỉ": 1_000_000_000,
+}
+# "2tr5" = 2,5 triệu (chữ số đuôi là phần thập phân của đơn vị).
+_TIEN_DUOI = re.compile(
+    r"(\d+(?:[.,]\d+)?)\s*(nghìn|nghin|ngàn|ngan|triệu|trieu|tỷ|tỉ|ty|tr|củ|cu|k)\s*(\d)?\s*(rưỡi|ruoi)?",
+    re.IGNORECASE)
+_TIEN_TRAN = re.compile(r"(\d[\d.,\s]{2,})")
+
+
+def _tien_tu_chu(text: str) -> int | None:
+    """"2 triệu rưỡi" → 2500000. Tính bằng CODE chứ không để mô hình tự nhân.
+
+    Mô hình nhỏ làm sai số học tiếng Việt một cách khó lường: qwen3.6-flash trả
+    "3 triệu rưỡi" = 4.500.000 và "20 triệu rưỡi" = 30.000.000. Sai một chữ số ở
+    ô số tiền là khách chuyển nhầm tiền thật, nên phần này phải tất định.
+    """
+    if not text:
+        return None
+    t = text.strip().lower()
+    m = _TIEN_DUOI.search(t)
+    if m:
+        so = float(m.group(1).replace(".", "").replace(",", "."))
+        nhan = _DON_VI_TIEN.get(m.group(2).lower(), 1)
+        tong = so * nhan
+        if m.group(3):          # "2tr5" → cộng 5/10 đơn vị
+            tong += int(m.group(3)) * nhan / 10
+        if m.group(4):          # "rưỡi" → cộng nửa đơn vị
+            tong += nhan / 2
+        return int(round(tong)) or None
+    m = _TIEN_TRAN.search(t)
+    if m:
+        chi_so = re.sub(r"\D", "", m.group(1))
+        if chi_so:
+            gia_tri = int(chi_so)
+            return gia_tri if gia_tri > 0 else None
+    return None
+
+
 def _doc_json_agent(raw: str) -> dict | None:
     """Bóc object JSON trong câu trả lời agent.
 
@@ -1723,9 +1765,15 @@ async def chat_banking_parse(payload: ChatBankingRequest) -> ChatBankingDraft:
     y_dinh = got.get("intent")
     if y_dinh not in {"transfer", "list_beneficiaries", "other"}:
         y_dinh = "transfer" if (got.get("amount") or got.get("recipient")) else "other"
-    so_tien = got.get("amount")
-    if not isinstance(so_tien, int) or so_tien <= 0:
-        so_tien = None
+    # SỐ TIỀN TÍNH BẰNG CODE, không lấy số của mô hình.
+    # qwen3.6-flash trả "3 triệu rưỡi" = 4.500.000 và "20 triệu rưỡi" =
+    # 30.000.000 — sai một chữ số ở đây là khách chuyển nhầm tiền thật. Ưu tiên
+    # đọc thẳng từ câu gốc; chỉ khi câu không có dạng số nào nhận ra được mới
+    # dùng con số mô hình đưa, và vẫn phải là số nguyên dương.
+    so_tien = _tien_tu_chu(payload.message)
+    if so_tien is None:
+        goi_y = got.get("amount")
+        so_tien = goi_y if isinstance(goi_y, int) and goi_y > 0 else None
     nguoi_nhan = got.get("recipient") if isinstance(got.get("recipient"), str) else None
     return ChatBankingDraft(
         intent=y_dinh, amount=so_tien, recipient=nguoi_nhan,

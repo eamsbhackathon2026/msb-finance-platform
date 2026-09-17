@@ -1725,3 +1725,31 @@ def test_agent_chua_cau_hinh_thi_tra_fallback():
 def test_so_tien_am_hoac_khong_phai_so_bi_bo():
     """Mô hình trả rác thì không được dựng thẻ soạn lệnh với số tiền vô nghĩa."""
     assert main._doc_json_agent('{"amount": -5, "recipient": null, "intent": "transfer"}')["amount"] == -5
+
+
+@pytest.mark.parametrize("cau, mong_doi", [
+    ("2 triệu rưỡi", 2_500_000),
+    ("3 trieu ruoi", 3_500_000),
+    ("20 triệu rưỡi", 20_500_000),
+    ("2tr5", 2_500_000),
+    ("1tr2", 1_200_000),
+    ("500k", 500_000),
+    ("1,5 triệu", 1_500_000),
+    ("2 tỷ", 2_000_000_000),
+    ("300 nghìn", 300_000),
+    ("2 củ", 2_000_000),
+    ("gửi 2 triệu rưỡi nhé", 2_500_000),
+    ("không có số nào", None),
+])
+def test_doc_so_tien_noi_mieng(cau, mong_doi):
+    """Số tiền phải do CODE tính. qwen3.6-flash từng trả "3 triệu rưỡi" =
+    4.500.000 và "20 triệu rưỡi" = 30.000.000 — sai một chữ số ở ô số tiền là
+    khách chuyển nhầm tiền thật."""
+    assert main._tien_tu_chu(cau) == mong_doi
+
+
+def test_don_vi_dai_phai_khop_truoc_don_vi_ngan():
+    """"tr" đứng trước "triệu" trong regex sẽ khớp "tr" rồi bỏ lại "iệu rưỡi",
+    làm mất phần "rưỡi" — lỗi này đã xảy ra thật."""
+    assert main._tien_tu_chu("2 triệu rưỡi") == 2_500_000
+    assert main._tien_tu_chu("2 trieu") == 2_000_000
