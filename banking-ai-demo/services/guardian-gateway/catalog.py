@@ -326,11 +326,11 @@ DEMO_LOGIN_USER = LoginUser(
 # ============ DANH BẠ NGƯỜI THỤ HƯỞNG (bản tạm khi domain lỗi) ============
 
 TRANSFER_BENEFICIARIES = [
-    TransferBeneficiary(id="b1", name="MAI VAN S***", bank="VCB", account="3028 ****",
+    TransferBeneficiary(id="b1", name="MAI VAN SON", bank="VCB", account="3028 155 471",
                         relationship="FAMILY", trusted=True),
-    TransferBeneficiary(id="b2", name="VIETTEL T***", bank="MSB", account="8097 ****",
+    TransferBeneficiary(id="b2", name="VIETTEL TELECOM", bank="MSB", account="8097 336 025",
                         relationship="MERCHANT", trusted=True),
-    TransferBeneficiary(id="b3", name="NGUYEN VAN T***", bank="ACB", account="5270 ****",
+    TransferBeneficiary(id="b3", name="NGUYEN VAN TUAN", bank="ACB", account="5270 118 264",
                         relationship="UNKNOWN", trusted=False),
 ]
 

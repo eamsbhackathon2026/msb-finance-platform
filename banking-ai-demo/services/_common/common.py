@@ -271,9 +271,14 @@ def mask_customer_row(row: dict) -> dict:
     }
 
 
-def mask_beneficiary_row(row: dict) -> dict:
-    """Chỉ `*_masked` được ra ngoài; beneficiary_account_no / beneficiary_name thì không."""
-    return {
+def mask_beneficiary_row(row: dict, include_full: bool = False) -> dict:
+    """Mặc định chỉ `*_masked` được ra ngoài; beneficiary_account_no /
+    beneficiary_name thì không (đường dữ liệu đưa vào LLM/agent).
+
+    include_full=True trả kèm `name` + `account_no` đầy đủ — CHỈ dùng cho màn
+    danh bạ trên app khách hàng (khách xem danh bạ của chính mình), tuyệt đối
+    không bật ở các đường gọi phục vụ ngữ cảnh agent."""
+    out = {
         "beneficiary_id": row["beneficiary_id"],
         "customer_id": row.get("customer_id"),
         "bank_code": row.get("beneficiary_bank_code"),
@@ -291,6 +296,10 @@ def mask_beneficiary_row(row: dict) -> dict:
         "status": row.get("beneficiary_status"),
         "is_new": row.get("beneficiary_first_seen_at") is None,
     }
+    if include_full:
+        out["name"] = row.get("beneficiary_name")
+        out["account_no"] = row.get("beneficiary_account_no")
+    return out
 
 
 # ---------------------------------------------------------------------------

@@ -477,6 +477,7 @@ def recompute_baseline(
 def list_beneficiaries(
     customer_id: int,
     status: str | None = Query(None, description="ACTIVE | BLOCKED | SUSPECTED"),
+    include_full: bool = Query(False, description="Trả kèm tên + số TK đầy đủ — chỉ cho màn danh bạ UI, không dùng cho ngữ cảnh agent"),
 ):
     _customer_or_404(customer_id)
     sql = "SELECT * FROM beneficiary WHERE customer_id = %s"
@@ -489,7 +490,7 @@ def list_beneficiaries(
     return {
         "customer_id": customer_id,
         "count": len(rows),
-        "beneficiaries": [mask_beneficiary_row(r) for r in rows],
+        "beneficiaries": [mask_beneficiary_row(r, include_full=include_full) for r in rows],
     }
 
 

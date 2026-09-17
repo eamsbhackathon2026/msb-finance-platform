@@ -874,16 +874,17 @@ async def _scamshield_verdict(bank_code: str, account_no: str, amount: int, note
 @app.get("/api/transfer/beneficiaries", response_model=list[TransferBeneficiary], tags=["risk"],
          summary="Danh bạ người thụ hưởng đã lưu (favorite)")
 async def transfer_beneficiaries() -> list[TransferBeneficiary]:
-    data = await domain.beneficiaries(domain.DEMO_CUSTOMER_ID)
+    # Danh bạ của chính chủ trên app: hiện tên + số TK đầy đủ, không che.
+    data = await domain.beneficiaries(domain.DEMO_CUSTOMER_ID, include_full=True)
     rows = (data or {}).get("beneficiaries") if isinstance(data, dict) else data
     if not rows:
         return catalog.TRANSFER_BENEFICIARIES
     return [
         TransferBeneficiary(
             id=str(b.get("beneficiary_id")),
-            name=b.get("name_masked") or "Người nhận",
+            name=b.get("name") or b.get("name_masked") or "Người nhận",
             bank=b.get("bank_code") or "",
-            account=b.get("account_masked") or "",
+            account=b.get("account_no") or b.get("account_masked") or "",
             relationship=b.get("relationship") or "UNKNOWN",
             trusted=(not b.get("is_new", True)) and b.get("status") == "ACTIVE",
         )
@@ -910,7 +911,8 @@ async def transfer_precheck(payload: TransferPrecheckRequest) -> TransferPrechec
     """
     resolve = await domain.resolve_beneficiary(
         domain.DEMO_CUSTOMER_ID, payload.bank_code, payload.account_no) or {}
-    masked = resolve.get("account_masked") or payload.account_no
+    # FE gửi sẵn số TK đầy đủ; ưu tiên nó để màn xác nhận/verdict không bị che.
+    masked = payload.account_no or resolve.get("account_masked") or ""
     name = payload.holder_name or masked
     if _is_trusted(resolve):
         return TransferPrecheckResponse(
@@ -924,7 +926,7 @@ async def transfer_precheck(payload: TransferPrecheckRequest) -> TransferPrechec
     return TransferPrecheckResponse(
         requires_review=True, trusted=False, is_new=bool(signals.is_new),
         beneficiary_name=name, beneficiary_bank=payload.bank_code,
-        beneficiary_account=signals.account_masked, verdict=verdict,
+        beneficiary_account=payload.account_no or signals.account_masked, verdict=verdict,
     )
 
 

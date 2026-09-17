@@ -130,8 +130,11 @@ async def portfolio(customer_id: int) -> dict | None:
     return await _get(CUSTOMER_PROFILE_URL, f"/customers/{customer_id}/portfolio")
 
 
-async def beneficiaries(customer_id: int) -> dict | None:
-    return await _get(CUSTOMER_PROFILE_URL, f"/customers/{customer_id}/beneficiaries")
+async def beneficiaries(customer_id: int, include_full: bool = False) -> dict | None:
+    # include_full chỉ dành cho màn danh bạ UI; các đường build ngữ cảnh agent
+    # giữ mặc định masked.
+    suffix = "?include_full=true" if include_full else ""
+    return await _get(CUSTOMER_PROFILE_URL, f"/customers/{customer_id}/beneficiaries{suffix}")
 
 
 async def account_events(customer_id: int) -> dict | None:
