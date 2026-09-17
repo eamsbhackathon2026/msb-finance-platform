@@ -240,7 +240,7 @@ def test_info_phan_anh_dung_cau_hinh_domain():
     body = client.get("/info").json()
     # conftest tắt DOMAIN_ENABLED nên /info phải báo đúng như vậy.
     assert body["integrated_with_domain_services"] is False
-    assert len(body["endpoints"]) == 22
+    assert len(body["endpoints"]) == 23
 
 
 def test_openapi_phuc_vu_dung_cac_endpoint_fe_goi():
@@ -253,6 +253,7 @@ def test_openapi_phuc_vu_dung_cac_endpoint_fe_goi():
         "/api/copilot/intro",
         "/api/copilot/quarters",
         "/api/copilot/months",
+        "/api/copilot/month",
         "/api/copilot/chat",
         "/api/transfer/pending",
         "/api/transfer/action",
@@ -731,3 +732,39 @@ def test_strip_markdown_bo_bang_va_dam_giu_chu():
 def test_strip_markdown_van_ban_thuan_giu_nguyen():
     plain = "Tháng 9 bạn chi 2.465.000 ₫, giảm 62% so tháng 8.\n- Ăn uống giảm mạnh."
     assert main._strip_markdown_for_plain(plain) == plain
+
+
+# ---- Một tháng cụ thể (tháng 6) — không được nhầm sang tháng hiện tại --------
+
+def test_copilot_month_endpoint():
+    r = client.get("/api/copilot/month", params={"period": "202606"})
+    assert r.status_code == 200
+    b = r.json()
+    assert b["period"] == "202606" and "Tháng 6" in b["label"]
+    assert b["byCategory"]
+    assert client.get("/api/copilot/month", params={"period": "6"}).status_code == 422
+    assert client.get("/api/copilot/month", params={"period": "202001"}).status_code == 404
+
+
+def test_chat_hoi_thang_6_dinh_bang_thang_6_khong_phai_thang_nay():
+    # Lỗi đã gặp: hỏi tháng 6, bảng lại là tháng 9 (tháng hiện tại). Bảng phải
+    # đúng tháng được hỏi.
+    r = client.post("/api/copilot/chat", json={"message": "thống kê cho tôi chi tiêu tháng 6"})
+    _, table, chart = _doc_events(r.text)
+    assert table is not None and chart is not None
+    assert "Tháng 6" in table["title"], f"bảng sai tháng: {table['title']}"
+    assert "Tháng 9" not in table["title"]
+
+
+def test_resolve_period():
+    assert main._resolve_period(6, 2026) == "202606"
+    # không cho năm: lấy lần gần nhất tháng đó đã qua (đuôi phải là số tháng)
+    assert main._resolve_period(6, None).endswith("06")
+    assert len(main._resolve_period(6, None)) == 6
+
+
+def test_so_sanh_6_thang_van_ra_bang_nhieu_thang():
+    # "6 tháng gần đây" là SO SÁNH, không phải "tháng 6"
+    r = client.post("/api/copilot/chat", json={"message": "xem chi tiêu 6 tháng gần đây"})
+    _, table, _ = _doc_events(r.text)
+    assert table is not None and "So sánh" in table["title"]

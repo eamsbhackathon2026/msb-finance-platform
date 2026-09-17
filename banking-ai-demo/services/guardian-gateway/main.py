@@ -60,6 +60,7 @@ from models import (
     LoginRequest,
     LoginResponse,
     MonthlyReport,
+    MonthSummary,
     OkResponse,
     OpsDashboard,
     OpsMetrics,
@@ -283,8 +284,11 @@ async def copilot_overview() -> CopilotOverview:
 _SPEND_RE = re.compile(r"chi tiêu|tiêu|chi |tổng hợp|thống kê|nhóm|phân bổ|báo cáo|xem|show", re.IGNORECASE)
 _QUARTER_RE = re.compile(r"quý|quarter", re.IGNORECASE)
 _MONTH_RE = re.compile(r"tháng", re.IGNORECASE)
-# So sánh nhiều tháng: "so với tháng 8", "so sánh các tháng", "mấy tháng gần đây".
-_COMPARE_RE = re.compile(r"so sánh|so với|các tháng|mấy tháng|nhiều tháng|từng tháng|những tháng|vài tháng", re.IGNORECASE)
+# So sánh nhiều tháng: "so với tháng 8", "so sánh các tháng", "6 tháng gần đây".
+_COMPARE_RE = re.compile(r"so sánh|so với|các tháng|mấy tháng|nhiều tháng|từng tháng|những tháng|vài tháng|\d+\s*tháng", re.IGNORECASE)
+# Một tháng cụ thể: "tháng 6", "tháng 6/2026" — SỐ đứng NGAY SAU chữ "tháng"
+# (khác "6 tháng" = số lượng tháng, đã bắt ở _COMPARE_RE).
+_SPECIFIC_MONTH_RE = re.compile(r"tháng\s*(1[0-2]|0?[1-9])(?:\s*[/-]\s*(\d{4}))?", re.IGNORECASE)
 
 
 def _strip_markdown_for_plain(text: str) -> str:
@@ -365,20 +369,64 @@ def _months_compare_visual(report: MonthlyReport) -> tuple[ChatTable | None, Cha
     return table, chart
 
 
+def _month_visual(m: MonthSummary) -> tuple[ChatTable | None, ChatChart | None]:
+    """Bảng theo nhóm cho ĐÚNG một tháng cụ thể (vd tháng 6), không phải tháng nay."""
+    cats = sorted(m.by_category, key=lambda c: c.amount, reverse=True)
+    if not cats:
+        return None, None
+    table = ChatTable(
+        title=f"Chi tiêu {m.label} theo nhóm",
+        rows=[ChatTableRow(
+            label=c.label_vi, amount=c.amount, pct=c.pct,
+            trend_pct=round(c.delta_vs_prev_pct) if c.delta_vs_prev_pct is not None else None,
+        ) for c in cats],
+        total_label="Tổng chi", total_amount=m.expense,
+    )
+    chart = ChatChart(type="bar", title=f"Chi tiêu {m.label}",
+                      data=[ChatChartPoint(label=c.label_vi, value=c.amount) for c in cats])
+    return table, chart
+
+
+def _resolve_period(month: int, year: int | None) -> str:
+    """(tháng, năm?) → "YYYYMM". Không cho năm thì lấy lần gần nhất tháng đó đã
+    qua: tháng 6 hỏi vào tháng 9/2026 nghĩa là 202606; tháng 11 nghĩa là 202511."""
+    now = datetime.now(timezone(timedelta(hours=7)))
+    if not year:
+        year = now.year if month <= now.month else now.year - 1
+    return f"{year:04d}{month:02d}"
+
+
+async def _month_report(period: str) -> MonthSummary | None:
+    """Lấy đúng một tháng từ dữ liệu so sánh (đủ 12 tháng gần nhất)."""
+    report = await copilot_months(months=12)
+    for m in report.months:
+        if m.period == period:
+            return m
+    return None
+
+
 async def _spending_visual(question: str) -> tuple[ChatTable | None, ChatChart | None]:
     """Bảng + biểu đồ số liệu thật cho câu hỏi chi tiêu, hoặc (None, None).
 
     Dùng lại đúng các endpoint copilot_months/quarters/overview nên số ở bảng
     khớp từng đồng với màn hình và với điều agent nói — một nguồn số duy nhất.
 
-    Thứ tự xét: SO SÁNH tháng trước (bảng nhiều tháng) → quý (bảng theo nhóm) →
-    một tháng (bảng theo nhóm). So sánh xét trước vì "so với tháng 8" cũng khớp
-    _MONTH_RE, mà ý là so nhiều tháng chứ không phải xem một tháng.
+    Thứ tự xét (quan trọng — sai thứ tự là gắn nhầm bảng):
+    1. SO SÁNH nhiều tháng ("so với tháng 8", "6 tháng gần đây") → bảng nhiều tháng.
+    2. MỘT THÁNG CỤ THỂ ("tháng 6", "tháng 6/2026") → bảng đúng tháng đó. Phải xét
+       TRƯỚC nhánh "tháng chung", nếu không "tháng 6" rơi vào bảng tháng hiện tại.
+    3. Quý → bảng theo nhóm của quý.
+    4. "tháng" chung ("tháng này") → bảng tháng hiện tại.
     """
     if not _SPEND_RE.search(question):
         return None, None
     if _COMPARE_RE.search(question) and _MONTH_RE.search(question):
         return _months_compare_visual(await copilot_months(months=6))
+    mm = _SPECIFIC_MONTH_RE.search(question)
+    if mm:
+        period = _resolve_period(int(mm.group(1)), int(mm.group(2)) if mm.group(2) else None)
+        m = await _month_report(period)
+        return _month_visual(m) if m else (None, None)
     if _QUARTER_RE.search(question):
         return _quarter_visual(await copilot_quarters(quarters=8))
     if _MONTH_RE.search(question):
@@ -775,6 +823,23 @@ async def copilot_quarters(quarters: int = 8) -> QuarterlyReport:
     return mapped
 
 
+@app.get("/api/copilot/month", response_model=MonthSummary, tags=["copilot"],
+         summary="Chi tiêu của ĐÚNG một tháng cụ thể (period = YYYYMM)")
+async def copilot_month(period: str) -> MonthSummary:
+    """Một tháng cụ thể theo nhóm — cho câu hỏi "chi tiêu tháng 6".
+
+    period là YYYYMM (vd 202606 = tháng 6/2026). Cùng nguồn với tool agent
+    `month-detail`: agent hỏi tháng nào thì lấy đúng tháng đó, và màn chat đính
+    bảng đúng tháng đó — hết cảnh hỏi tháng 6 mà hiện bảng tháng 9.
+    """
+    if not re.fullmatch(r"\d{6}", period or ""):
+        raise HTTPException(status_code=422, detail="period phải dạng YYYYMM, ví dụ 202606")
+    m = await _month_report(period)
+    if m is None:
+        raise HTTPException(status_code=404, detail=f"Chưa có dữ liệu chi tiêu cho tháng {period}")
+    return m
+
+
 @app.get("/api/copilot/months", response_model=MonthlyReport, tags=["copilot"],
          summary="So sánh chi tiêu giữa các tháng gần nhất")
 async def copilot_months(months: int = 6) -> MonthlyReport:
@@ -829,6 +894,7 @@ async def info() -> dict:
             "GET /api/copilot/intro",
             "GET /api/copilot/quarters",
             "GET /api/copilot/months",
+            "GET /api/copilot/month",
             "POST /api/copilot/chat",
             "GET /api/transfer/pending",
             "POST /api/risk/assess",
