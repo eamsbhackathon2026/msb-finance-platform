@@ -457,11 +457,17 @@ def _trung_vi(xs: list[int]) -> int:
 def _saving_capacity(months: list[MonthSummary]) -> tuple[int, int, int]:
     """(tiền dư điển hình, thu nhập điển hình, số tháng dùng để tính).
 
-    Lấy TRUNG VỊ chứ không lấy trung bình, và bỏ tháng đang chạy: dữ liệu thật
-    có một tháng nhận khoản tiền rất lớn (hơn 500 triệu), trung bình sẽ thành
-    "để dành được 88 triệu/tháng" — sai hoàn toàn so với nhịp sống thường.
+    Lấy TRUNG VỊ chứ không lấy trung bình: dữ liệu thật có một tháng nhận khoản
+    tiền hơn 500 triệu, trung bình sẽ thành "để dành được 88 triệu/tháng" — sai
+    hoàn toàn so với nhịp sống thường.
+
+    Bỏ hai loại tháng không đại diện cho một chu kỳ sống:
+    - Tháng đang chạy: chưa đủ ngày nên chưa đủ chi.
+    - Tháng không ghi nhận đồng thu nhập nào: đó là tháng nằm ở mép cửa sổ dữ
+      liệu (bắt đầu từ giữa tháng, chưa kịp có kỳ lương), tính vào sẽ thành một
+      tháng "âm 4,6 triệu" bịa ra, kéo mức để dành xuống gần một nửa.
     """
-    xong = [m for m in months if m.period != _current_period()]
+    xong = [m for m in months if m.period != _current_period() and m.income > 0]
     if not xong:
         return 0, 0, 0
     return _trung_vi([m.net for m in xong]), _trung_vi([m.income for m in xong]), len(xong)

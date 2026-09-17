@@ -939,3 +939,16 @@ def test_ke_hoach_chi_tieu_thang_6_van_ra_bang_thang_6():
     _, table, _ = _doc_events(r.text)
     assert table is not None
     assert "Tháng 6" in table["title"] and table["rowHeader"] == "Nhóm"
+
+
+def test_bo_thang_mep_cua_so_khong_co_thu_nhap():
+    """Tháng đầu cửa sổ dữ liệu bắt đầu từ giữa tháng nên chưa có kỳ lương:
+    income = 0, net âm sâu. Tính vào thì mức để dành tụt gần một nửa (1,0 triệu
+    → 623 nghìn) và lộ trình dài thêm 24 năm — phải loại."""
+    months = [_thang("202603", 0, 4_588_000), _thang("202604", 7_600_000, 7_372_000),
+              _thang("202605", 7_600_000, 6_582_000), _thang("202606", 7_600_000, 5_354_000),
+              _thang("202607", 7_600_000, 7_715_000), _thang("202608", 7_600_000, 6_545_000)]
+    kha_nang, thu_nhap, so_thang = main._saving_capacity(months)
+    assert so_thang == 5, "tháng không có thu nhập không phải một chu kỳ sống"
+    assert kha_nang == 1_018_000
+    assert thu_nhap == 7_600_000
