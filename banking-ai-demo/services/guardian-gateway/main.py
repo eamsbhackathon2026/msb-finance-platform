@@ -258,7 +258,7 @@ def _scenario_id_in(text: str) -> str | None:
 
 async def _precheck_for(amount: int) -> dict | None:
     """Dựng đầu vào cho engine từ hồ sơ khách và fraud case, rồi gọi precheck."""
-    pf = await domain.portfolio(domain.DEMO_CUSTOMER_ID)
+    pf = await domain.portfolio(domain.current_customer_id())
     accounts = (pf or {}).get("accounts") or []
     if not accounts:
         return None
@@ -267,7 +267,7 @@ async def _precheck_for(amount: int) -> dict | None:
     memo = series[0].get("memo") if series else None
     ben = catalog.MAIN_BENEFICIARY
     return await domain.precheck({
-        "customer_id": domain.DEMO_CUSTOMER_ID,
+        "customer_id": domain.current_customer_id(),
         "account_id": accounts[0]["account_id"],
         "amount": amount,
         "beneficiary_bank_code": ben.bank_name[:3].upper(),
@@ -281,10 +281,10 @@ async def _precheck_for(amount: int) -> dict | None:
          response_model_exclude_none=True,
          summary="Tổng quan chi tiêu tháng cho màn Financial Copilot")
 async def copilot_overview() -> CopilotOverview:
-    monthly = await domain.monthly_summary(domain.DEMO_CUSTOMER_ID)
+    monthly = await domain.monthly_summary(domain.current_customer_id())
     if not monthly:
         return catalog.COPILOT_OVERVIEW
-    ins = await domain.insights(domain.DEMO_CUSTOMER_ID)
+    ins = await domain.insights(domain.current_customer_id())
     mapped = mappers.map_overview(monthly, ins)
     if mapped is None:
         # Gọi được nhưng không có kỳ nào — vẫn là suy giảm, phải đánh dấu.
@@ -943,7 +943,7 @@ async def ops_alerts() -> list[ScamAlert]:
     if ctx is None:
         return [_alert_by_id(a.id) for a in catalog.OPS_ALERTS]
     rows, names, statuses = ctx
-    known = ((await domain.beneficiaries(domain.DEMO_CUSTOMER_ID)) or {}).get("beneficiaries") or []
+    known = ((await domain.beneficiaries(domain.current_customer_id())) or {}).get("beneficiaries") or []
     by_decision = await _scenario_names()
     return [
         mappers.map_alert(
@@ -993,10 +993,10 @@ async def ops_decision(alert_id: str, payload: DecisionRequest) -> OkResponse:
 @app.get("/api/home", response_model=HomeContent, tags=["session"],
          summary="Nội dung động của màn Home và màn đăng nhập")
 async def home_content() -> HomeContent:
-    cust = await domain.customer(domain.DEMO_CUSTOMER_ID)
+    cust = await domain.customer(domain.current_customer_id())
     if not cust:
         return catalog.HOME_CONTENT
-    ins = await domain.insights(domain.DEMO_CUSTOMER_ID)
+    ins = await domain.insights(domain.current_customer_id())
     return mappers.map_home(cust, ins, datetime.now(timezone(timedelta(hours=7))))
 
 
@@ -1022,10 +1022,18 @@ async def auth_login(payload: LoginRequest) -> LoginResponse:
 
     if result is None:
         domain.mark_degraded()
+        # identity chết → không biết khách nào: về khách demo để luồng không gãy.
+        domain.set_session_customer(None)
         return LoginResponse(authenticated=True, source="degraded", user=catalog.DEMO_LOGIN_USER)
 
     if result.get("authenticated"):
-        return LoginResponse(authenticated=True, source="domain", user=result.get("user"))
+        user = result.get("user") or {}
+        # Ghi nhớ khách của PHIÊN: từ đây /api/session/customer, /api/home,
+        # /api/transfer/beneficiaries... đọc đúng dữ liệu của người vừa đăng
+        # nhập (vd kh100001 → BEN của 100001), không còn neo cứng khách demo.
+        cid = user.get("customer_id")
+        domain.set_session_customer(int(cid) if cid else None)
+        return LoginResponse(authenticated=True, source="domain", user=user)
 
     return LoginResponse(authenticated=False, source="domain", reason=result.get("reason", "invalid_credentials"))
 
@@ -1033,12 +1041,12 @@ async def auth_login(payload: LoginRequest) -> LoginResponse:
 @app.get("/api/session/customer", response_model=Customer, tags=["session"],
          summary="Khách hàng của phiên hiện tại")
 async def session_customer() -> Customer:
-    # Chưa có đăng nhập nên khách hàng của phiên là DEMO_CUSTOMER_ID. Khi có xác
-    # thực thì đọc id từ token, phần còn lại của hàm giữ nguyên.
-    cust = await domain.customer(domain.DEMO_CUSTOMER_ID)
+    # Khách của phiên = người đăng nhập gần nhất (domain.set_session_customer
+    # đặt trong auth_login); chưa đăng nhập thì là DEMO_CUSTOMER_ID.
+    cust = await domain.customer(domain.current_customer_id())
     if not cust:
         return catalog.CUSTOMER
-    pf = await domain.portfolio(domain.DEMO_CUSTOMER_ID)
+    pf = await domain.portfolio(domain.current_customer_id())
     return mappers.map_customer(cust, pf)
 
 
@@ -1085,7 +1093,7 @@ async def risk_explain() -> RiskExplain:
 
     # Dòng thời gian: sự kiện tài khoản ngay trước giao dịch chính là bằng chứng
     # mà yếu tố recent_context dựa vào, nên đưa đúng chúng lên màn hình.
-    events = await domain.account_events(domain.DEMO_CUSTOMER_ID)
+    events = await domain.account_events(domain.current_customer_id())
     timeline = mappers.map_event_timeline((events or {}).get("events") or [], amount)
 
     similar = catalog.SIMILAR_SCENARIO
@@ -1108,7 +1116,7 @@ async def safety_center() -> SafetyCenter:
     case_rows = await domain.cases(limit=50)
     if case_rows is not None:
         mine = [c for c in (case_rows.get("cases") or [])
-                if int(c.get("customer_id") or 0) == domain.DEMO_CUSTOMER_ID]
+                if int(c.get("customer_id") or 0) == domain.current_customer_id()]
         history = mappers.map_safety_history(mine)
         if history:
             blocked = sum(1 for h in history if h.status == "blocked")
@@ -1178,7 +1186,7 @@ def _is_trusted(resolve: dict) -> bool:
 
 async def _collect_signals(bank_code: str, account_no: str, amount: int, note: str) -> ScamShieldSignals:
     """Gom tín hiệu gian lận: hồ sơ người nhận + đối chiếu playbook lừa đảo."""
-    resolve = await domain.resolve_beneficiary(domain.DEMO_CUSTOMER_ID, bank_code, account_no) or {}
+    resolve = await domain.resolve_beneficiary(domain.current_customer_id(), bank_code, account_no) or {}
     match = await domain.scam_match({
         "persona": "SENIOR", "memo": note or "", "amount": amount,
         "is_new_beneficiary": bool(resolve.get("is_new", True)),
@@ -1267,7 +1275,7 @@ async def _scamshield_verdict(bank_code: str, account_no: str, amount: int, note
          summary="Danh bạ người thụ hưởng đã lưu (favorite)")
 async def transfer_beneficiaries() -> list[TransferBeneficiary]:
     # Danh bạ của chính chủ trên app: hiện tên + số TK đầy đủ, không che.
-    data = await domain.beneficiaries(domain.DEMO_CUSTOMER_ID, include_full=True)
+    data = await domain.beneficiaries(domain.current_customer_id(), include_full=True)
     rows = (data or {}).get("beneficiaries") if isinstance(data, dict) else data
     if not rows:
         return catalog.TRANSFER_BENEFICIARIES
@@ -1290,7 +1298,7 @@ async def transfer_beneficiaries() -> list[TransferBeneficiary]:
 async def transfer_execute(payload: TransferExecuteRequest) -> TransferExecuteResponse:
     """FE gọi sau khi khách nhập đúng PIN. Ghi bản ghi OUT/POSTED để màn Lịch sử
     giao dịch truy vấn lại được (bảng transaction_history, cửa sổ 3 tháng)."""
-    cust_id = domain.DEMO_CUSTOMER_ID
+    cust_id = domain.current_customer_id()
     pf = await domain.portfolio(cust_id)
     accounts = (pf or {}).get("accounts") or []
     if not accounts:
@@ -1325,7 +1333,7 @@ async def transfer_execute(payload: TransferExecuteRequest) -> TransferExecuteRe
 @app.get("/api/transfer/history", response_model=list[TransferHistoryItem], tags=["risk"],
          summary="Lịch sử chuyển tiền (FT, chiều OUT) trong 3 tháng gần nhất")
 async def transfer_history() -> list[TransferHistoryItem]:
-    cust_id = domain.DEMO_CUSTOMER_ID
+    cust_id = domain.current_customer_id()
     date_from = (datetime.now(timezone(timedelta(hours=7))) - timedelta(days=90)).strftime("%Y%m%d")
     data = await domain.transactions(cust_id, date_from=date_from, direction="OUT")
     rows = (data or {}).get("transactions") or []
@@ -1382,7 +1390,7 @@ async def transfer_precheck(payload: TransferPrecheckRequest) -> TransferPrechec
       trả verdict để FE hiện màn cảnh báo.
     """
     resolve = await domain.resolve_beneficiary(
-        domain.DEMO_CUSTOMER_ID, payload.bank_code, payload.account_no) or {}
+        domain.current_customer_id(), payload.bank_code, payload.account_no) or {}
     # FE gửi sẵn số TK đầy đủ; ưu tiên nó để màn xác nhận/verdict không bị che.
     masked = payload.account_no or resolve.get("account_masked") or ""
     name = payload.holder_name or masked
@@ -1452,7 +1460,7 @@ async def copilot_quarters(quarters: int = 8) -> QuarterlyReport:
     một tool khi khách hỏi về xu hướng chi tiêu. Một nguồn số liệu duy nhất nên
     hai bên không bao giờ nói hai con số khác nhau.
     """
-    payload = await domain.quarterly_summary(domain.DEMO_CUSTOMER_ID, quarters)
+    payload = await domain.quarterly_summary(domain.current_customer_id(), quarters)
     mapped = mappers.map_quarterly(payload) if payload else None
     if mapped is None:
         if payload is not None:
@@ -1487,7 +1495,7 @@ async def copilot_months(months: int = 6) -> MonthlyReport:
     với tháng 8 thế nào" thì agent gọi tool này, còn màn chat dựng bảng so sánh
     từ đúng dữ liệu ấy. Một nguồn số, hai bên không lệch.
     """
-    payload = await domain.monthly_comparison(domain.DEMO_CUSTOMER_ID, months)
+    payload = await domain.monthly_comparison(domain.current_customer_id(), months)
     mapped = mappers.map_monthly(payload) if payload else None
     if mapped is None:
         if payload is not None:
@@ -1555,7 +1563,7 @@ async def savings_options(amount: int, months: int, limit: int = 5) -> SavingsOp
 @app.get("/api/copilot/intro", response_model=CopilotIntro, tags=["copilot"],
          summary="Lời chào, câu hỏi gợi ý và nhãn tháng của màn Copilot")
 async def copilot_intro() -> CopilotIntro:
-    monthly = await domain.monthly_summary(domain.DEMO_CUSTOMER_ID)
+    monthly = await domain.monthly_summary(domain.current_customer_id())
     overview = mappers.map_overview(monthly, None) if monthly else None
     if overview is None:
         return catalog.COPILOT_INTRO

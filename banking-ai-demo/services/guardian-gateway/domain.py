@@ -48,6 +48,23 @@ DOMAIN_ENABLED = os.getenv("DOMAIN_ENABLED", "true").lower() != "false"
 DEMO_CUSTOMER_ID = int(os.getenv("DEMO_CUSTOMER_ID", "100008"))
 DEMO_FRAUD_CASE_ID = os.getenv("DEMO_FRAUD_CASE_ID", "F01")
 
+# Khách hàng của PHIÊN hiện tại — đặt sau mỗi lần đăng nhập thành công qua
+# identity-service. Gateway chưa có token/cookie và app demo chạy một người
+# dùng một lúc, nên nhớ ở mức module là đủ; trước đây mọi endpoint neo cứng
+# DEMO_CUSTOMER_ID nên đăng nhập kh100001 vẫn thấy danh bạ của 100008 — đây
+# chính là lỗi "BEN trả về không đúng khách". Chưa đăng nhập hoặc đăng nhập
+# degraded (identity chết) thì vẫn rơi về DEMO_CUSTOMER_ID để demo không gãy.
+_session_customer_id: int | None = None
+
+
+def set_session_customer(customer_id: int | None) -> None:
+    global _session_customer_id
+    _session_customer_id = customer_id
+
+
+def current_customer_id() -> int:
+    return _session_customer_id or DEMO_CUSTOMER_ID
+
 # Trạng thái của request hiện tại.
 #
 # Phải là một dict SỬA TẠI CHỖ chứ không phải hai ContextVar[bool]. Middleware
