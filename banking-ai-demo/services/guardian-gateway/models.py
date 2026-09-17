@@ -283,6 +283,16 @@ class ChatTable(Contract):
     # Nhãn cột đầu: "Nhóm" khi mỗi dòng là một nhóm chi tiêu, "Tháng" khi bảng
     # so sánh các tháng. FE viết hoa khi hiển thị.
     row_header: str = "Nhóm"
+    # Nhãn ba cột còn lại. Mặc định giữ nguyên bảng chi tiêu; bảng tư vấn (kế
+    # hoạch tiết kiệm) đổi thành "Cần/tháng" và "% thu nhập".
+    amount_header: str = "Số tiền"
+    pct_header: str = "%"
+    # None → FE bỏ hẳn cột Δ: bảng kịch bản tiết kiệm không có "kỳ trước" để so,
+    # để nguyên sẽ là một cột toàn dấu "—".
+    trend_header: str | None = "Δ kỳ trước"
+    # Chú thích dưới bảng — nói rõ con số suy ra từ đâu (vd trung vị tiền dư mấy
+    # tháng), để người đọc kiểm chứng được thay vì phải tin.
+    footnote: str | None = None
 
 
 # ---- Màn Home / Copilot -------------------------------------------------------

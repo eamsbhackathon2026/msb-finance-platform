@@ -413,32 +413,197 @@ async def _month_report(period: str) -> MonthSummary | None:
     return None
 
 
+# ---- Tư vấn mục tiêu: kế hoạch tiết kiệm -------------------------------------
+
+# Câu hỏi tư vấn tích lũy: "kế hoạch tiết kiệm mua ô tô 500 triệu".
+_GOAL_RE = re.compile(
+    r"kế hoạch|tiết kiệm|tích l[uũ]y|dành dụm|để dành|mục tiêu|đủ tiền|"
+    r"mua\s+(?:xe|ô\s?tô|oto|nhà|đất|căn hộ)",
+    re.IGNORECASE,
+)
+# Số tiền mục tiêu: "500 triệu", "500tr", "1,5 tỷ". Tiếng Việt dùng dấu phẩy cho
+# phần thập phân và dấu chấm cho hàng nghìn, nên đọc theo quy ước đó.
+_AMOUNT_RE = re.compile(r"(\d+(?:[.,]\d+)?)\s*(tỷ|tỉ|triệu|tr)\b", re.IGNORECASE)
+_DON_VI = {"tỷ": 1_000_000_000, "tỉ": 1_000_000_000, "triệu": 1_000_000, "tr": 1_000_000}
+# Các mốc đem ra so — đủ ngắn để thấy sức ép, đủ dài để thấy lối ra.
+_MOC_LO_TRINH = ((12, "1 năm"), (24, "2 năm"), (36, "3 năm"), (60, "5 năm"))
+
+
+def _goal_amount(question: str) -> int | None:
+    """Số tiền mục tiêu trong câu hỏi, hoặc None.
+
+    Bỏ qua số dưới 10 triệu: đó thường là một khoản chi lẻ ("ăn uống 5 triệu")
+    chứ không phải mục tiêu tích lũy, gắn bảng lộ trình vào sẽ lạc đề.
+    """
+    m = _AMOUNT_RE.search(question)
+    if not m:
+        return None
+    so = float(m.group(1).replace(".", "").replace(",", "."))
+    tien = int(so * _DON_VI[m.group(2).lower()])
+    return tien if tien >= 10_000_000 else None
+
+
+def _current_period() -> str:
+    now = datetime.now(timezone(timedelta(hours=7)))
+    return f"{now.year:04d}{now.month:02d}"
+
+
+def _trung_vi(xs: list[int]) -> int:
+    xs = sorted(xs)
+    giua = len(xs) // 2
+    return xs[giua] if len(xs) % 2 else (xs[giua - 1] + xs[giua]) // 2
+
+
+def _saving_capacity(months: list[MonthSummary]) -> tuple[int, int, int]:
+    """(tiền dư điển hình, thu nhập điển hình, số tháng dùng để tính).
+
+    Lấy TRUNG VỊ chứ không lấy trung bình, và bỏ tháng đang chạy: dữ liệu thật
+    có một tháng nhận khoản tiền rất lớn (hơn 500 triệu), trung bình sẽ thành
+    "để dành được 88 triệu/tháng" — sai hoàn toàn so với nhịp sống thường.
+    """
+    xong = [m for m in months if m.period != _current_period()]
+    if not xong:
+        return 0, 0, 0
+    return _trung_vi([m.net for m in xong]), _trung_vi([m.income for m in xong]), len(xong)
+
+
+def _tien_gon(n: int) -> str:
+    """Số tiền dạng gọn cho câu chú thích: 471321000 → "471,3 triệu"."""
+    for don_vi, ten in ((1_000_000_000, "tỷ"), (1_000_000, "triệu")):
+        if abs(n) >= don_vi:
+            # Bỏ ",0" thừa: "500 triệu" đọc gọn hơn "500,0 triệu".
+            return f"{n / don_vi:.1f}".rstrip("0").rstrip(".").replace(".", ",") + f" {ten}"
+    return f"{n:,}".replace(",", ".") + " ₫"
+
+
+def _savings_plan_visual(
+    target: int, balance: int, months: list[MonthSummary],
+) -> tuple[ChatTable | None, ChatChart | None]:
+    """Bảng "mỗi tháng phải để dành bao nhiêu" theo từng lộ trình.
+
+    Dòng tổng mới là chỗ quan trọng nhất: mức khách THỰC SỰ để dành được. Thiếu
+    nó thì lộ trình "7,9 triệu/tháng" trông rất hợp lý, trong khi cả tháng khách
+    chỉ thu về 7,6 triệu — tức là bất khả thi, và đó đúng là lời khuyên hỏng mà
+    câu trả lời toàn chữ đang đưa ra.
+    """
+    con_thieu = target - balance
+    if con_thieu <= 0:  # đã đủ tiền, không còn gì để lập lộ trình
+        return None, None
+    kha_nang, thu_nhap, so_thang = _saving_capacity(months)
+    rows = [
+        ChatTableRow(
+            label=ten,
+            amount=round(con_thieu / n),
+            pct=round(con_thieu * 100 / n / thu_nhap) if thu_nhap else 0,
+        )
+        for n, ten in _MOC_LO_TRINH
+    ]
+
+    chu_thich = f"Số dư {_tien_gon(balance)}, còn thiếu {_tien_gon(con_thieu)}."
+    if kha_nang > 0:
+        nam = con_thieu / kha_nang / 12
+        chu_thich += (
+            f" Mức để dành thực tế là trung vị tiền dư {so_thang} tháng đã trọn"
+            f" (thu nhập khoảng {_tien_gon(thu_nhap)}/tháng) — giữ nhịp này cần"
+            f" khoảng {nam:.0f} năm."
+        )
+    else:
+        chu_thich += f" {so_thang} tháng gần nhất chi gần hết thu, chưa có tiền dư để tích lũy."
+
+    table = ChatTable(
+        title=f"Lộ trình tiết kiệm cho mục tiêu {_tien_gon(target)}",
+        rows=rows,
+        total_label="Thực tế để dành được/tháng",
+        total_amount=max(kha_nang, 0),
+        row_header="Lộ trình",
+        amount_header="Cần/tháng",
+        pct_header="% thu nhập",
+        trend_header=None,  # kịch bản tương lai không có "kỳ trước" để so
+        footnote=chu_thich,
+    )
+    diem = [ChatChartPoint(label=ten, value=round(con_thieu / n)) for n, ten in _MOC_LO_TRINH]
+    if kha_nang > 0:
+        # Cột cuối là mức thật — đặt cạnh các cột lộ trình thì khoảng cách giữa
+        # "cần" và "có" hiện ra ngay, không cần đọc chữ.
+        diem.append(ChatChartPoint(label="Thực tế", value=kha_nang))
+    chart = ChatChart(type="bar", title="Cần để dành mỗi tháng theo lộ trình", data=diem)
+    return table, chart
+
+
+def _surplus_visual(months: list[MonthSummary]) -> tuple[ChatTable | None, ChatChart | None]:
+    """Bảng tiền dư từng tháng — nền cho lời khuyên tích lũy khi chưa nêu mục tiêu."""
+    xong = [m for m in months if m.period != _current_period()]
+    if len(xong) < 2:
+        return None, None
+    rows = [
+        ChatTableRow(
+            label=m.label.replace("Tháng ", "T"),
+            amount=m.net,
+            pct=round(m.net * 100 / m.income) if m.income else 0,
+        )
+        for m in xong
+    ]
+    kha_nang, thu_nhap, so_thang = _saving_capacity(months)
+    table = ChatTable(
+        title=f"Tiền dư {len(xong)} tháng gần nhất",
+        rows=rows,
+        total_label="Dư điển hình/tháng",
+        total_amount=kha_nang,
+        row_header="Tháng",
+        amount_header="Thu − chi",
+        pct_header="% thu nhập",
+        trend_header=None,
+        footnote=(
+            f"Thu nhập khoảng {_tien_gon(thu_nhap)}/tháng. Dư điển hình là trung vị"
+            f" {so_thang} tháng đã trọn, không tính tháng đang chạy."
+        ),
+    )
+    chart = ChatChart(
+        type="bar", title="Tiền dư mỗi tháng",
+        data=[ChatChartPoint(label=r.label, value=max(r.amount, 0)) for r in rows],
+    )
+    return table, chart
+
+
 async def _spending_visual(question: str) -> tuple[ChatTable | None, ChatChart | None]:
-    """Bảng + biểu đồ số liệu thật cho câu hỏi chi tiêu, hoặc (None, None).
+    """Bảng + biểu đồ số liệu thật cho câu hỏi, hoặc (None, None).
 
     Dùng lại đúng các endpoint copilot_months/quarters/overview nên số ở bảng
     khớp từng đồng với màn hình và với điều agent nói — một nguồn số duy nhất.
 
     Thứ tự xét (quan trọng — sai thứ tự là gắn nhầm bảng):
-    1. SO SÁNH nhiều tháng ("so với tháng 8", "6 tháng gần đây") → bảng nhiều tháng.
-    2. MỘT THÁNG CỤ THỂ ("tháng 6", "tháng 6/2026") → bảng đúng tháng đó. Phải xét
+    1. TƯ VẤN có số tiền mục tiêu ("mua ô tô 500 triệu") → bảng lộ trình tiết
+       kiệm. Phải xét TRƯỚC cổng _SPEND_RE vì câu hỏi tư vấn thường không nhắc
+       chữ "chi tiêu" nào.
+    2. SO SÁNH nhiều tháng ("so với tháng 8", "6 tháng gần đây") → bảng nhiều tháng.
+    3. MỘT THÁNG CỤ THỂ ("tháng 6", "tháng 6/2026") → bảng đúng tháng đó. Phải xét
        TRƯỚC nhánh "tháng chung", nếu không "tháng 6" rơi vào bảng tháng hiện tại.
-    3. Quý → bảng theo nhóm của quý.
-    4. "tháng" chung ("tháng này") → bảng tháng hiện tại.
+    4. Quý → bảng theo nhóm của quý.
+    5. "tháng" chung ("tháng này") → bảng tháng hiện tại.
+    6. TƯ VẤN không nêu số tiền ("nên tiết kiệm thế nào") → bảng tiền dư. Xét
+       SAU các nhánh tháng để "kế hoạch chi tiêu tháng 6" vẫn ra bảng tháng 6.
     """
-    if not _SPEND_RE.search(question):
-        return None, None
-    if _COMPARE_RE.search(question) and _MONTH_RE.search(question):
-        return _months_compare_visual(await copilot_months(months=6))
-    mm = _SPECIFIC_MONTH_RE.search(question)
-    if mm:
-        period = _resolve_period(int(mm.group(1)), int(mm.group(2)) if mm.group(2) else None)
-        m = await _month_report(period)
-        return _month_visual(m) if m else (None, None)
-    if _QUARTER_RE.search(question):
-        return _quarter_visual(await copilot_quarters(quarters=8))
-    if _MONTH_RE.search(question):
-        return _overview_visual(await copilot_overview())
+    tu_van = _GOAL_RE.search(question) is not None
+    if tu_van:
+        muc_tieu = _goal_amount(question)
+        if muc_tieu:
+            report = await copilot_months(months=12)
+            khach = await session_customer()
+            return _savings_plan_visual(muc_tieu, khach.balance, report.months)
+    if _SPEND_RE.search(question):
+        if _COMPARE_RE.search(question) and _MONTH_RE.search(question):
+            return _months_compare_visual(await copilot_months(months=6))
+        mm = _SPECIFIC_MONTH_RE.search(question)
+        if mm:
+            period = _resolve_period(int(mm.group(1)), int(mm.group(2)) if mm.group(2) else None)
+            m = await _month_report(period)
+            return _month_visual(m) if m else (None, None)
+        if _QUARTER_RE.search(question):
+            return _quarter_visual(await copilot_quarters(quarters=8))
+        if _MONTH_RE.search(question):
+            return _overview_visual(await copilot_overview())
+    if tu_van:
+        return _surplus_visual((await copilot_months(months=6)).months)
     return None, None
 
 

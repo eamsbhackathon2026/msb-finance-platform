@@ -201,9 +201,9 @@ def test_chat_tra_dung_dinh_dang_sse():
 def test_ghep_token_lai_ra_dung_cau_tra_loi():
     # Tách theo (\s+) và giữ nguyên khoảng trắng: ghép lại phải khớp từng ký tự,
     # nếu không câu trả lời hiện ra sẽ dính chữ.
-    r = client.post("/api/copilot/chat", json={"message": "Tôi có thể tiết kiệm bao nhiêu?"})
+    r = client.post("/api/copilot/chat", json={"message": "dự báo số dư cuối tháng"})
     tokens, _, _ = _doc_token(r.text)
-    assert "".join(tokens) == catalog.SCRIPTED_REPLIES[1][1]
+    assert "".join(tokens) == catalog.SCRIPTED_REPLIES[2][1]
 
 
 def test_cau_hoi_la_roi_ve_cau_tra_loi_mac_dinh():
@@ -369,7 +369,7 @@ def test_chat_ve_chi_tieu_kem_bieu_do():
 
 
 def test_chat_khac_khong_kem_bieu_do():
-    r = client.post("/api/copilot/chat", json={"message": "Tôi có thể tiết kiệm bao nhiêu?"})
+    r = client.post("/api/copilot/chat", json={"message": "thời tiết hôm nay thế nào"})
     _, _, chart = _doc_token(r.text)
     assert chart is None
 
@@ -602,7 +602,10 @@ def test_chat_chi_tieu_thang_dinh_kem_bang_va_bieu_do():
     assert table is not None, "câu hỏi chi tiêu tháng phải kèm bảng"
     assert chart is not None and chart["type"] == "bar"
     # Hợp đồng bảng khớp FE
-    assert set(table) == {"title", "rows", "totalLabel", "totalAmount", "rowHeader"}
+    assert set(table) == {"title", "rows", "totalLabel", "totalAmount", "rowHeader",
+                          "amountHeader", "pctHeader", "trendHeader", "footnote"}
+    # Bảng chi tiêu giữ nguyên nhãn mặc định và VẪN có cột Δ.
+    assert table["trendHeader"] == "Δ kỳ trước"
     assert table["rows"] and set(table["rows"][0]) >= {"label", "amount", "pct"}
     # Số trong bảng cộng đúng bằng tổng, và bằng dữ liệu biểu đồ (một nguồn số).
     assert sum(row["amount"] for row in table["rows"]) == table["totalAmount"]
@@ -620,9 +623,9 @@ def test_chat_chi_tieu_quy_dinh_kem_bang():
 
 
 def test_chat_cau_hoi_khong_phai_chi_tieu_thi_khong_co_bang():
-    r = client.post("/api/copilot/chat", json={"message": "Tôi có thể tiết kiệm bao nhiêu?"})
+    r = client.post("/api/copilot/chat", json={"message": "thời tiết hôm nay thế nào"})
     _, table, _ = _doc_events(r.text)
-    assert table is None, "câu hỏi tiết kiệm không nên kèm bảng chi tiêu"
+    assert table is None, "câu ngoài tài chính không nên kèm bảng"
 
 
 def test_chat_trend_none_giu_nguyen_khong_thanh_khong():
@@ -789,11 +792,11 @@ def test_agent_loi_cau_chi_tieu_khong_doc_kich_ban_thang_9():
 
 
 def test_agent_loi_cau_khong_chi_tieu_van_dung_kich_ban():
-    # Câu KHÔNG có bảng (tiết kiệm) vẫn dùng kịch bản như cũ — không đổi.
-    r = client.post("/api/copilot/chat", json={"message": "Tôi có thể tiết kiệm bao nhiêu?"})
+    # Câu KHÔNG có bảng (dự báo số dư) vẫn dùng kịch bản như cũ — không đổi.
+    r = client.post("/api/copilot/chat", json={"message": "dự báo số dư cuối tháng"})
     tokens, table, _ = _doc_events(r.text)
     assert table is None
-    assert "tiết kiệm" in "".join(tokens).lower()
+    assert "số dư" in "".join(tokens).lower()
 
 
 # ---- Luồng chuyển tiền: favorite (bỏ Scam Shield) vs stk mới (agent) ----------
@@ -841,3 +844,98 @@ def test_fallback_verdict_stk_bi_nghi_la_danger():
     v = main._fallback_verdict(s)
     assert v.level == "danger"
     assert any("báo cáo" in r for r in v.reasons)
+
+
+# ---- Tư vấn: lộ trình tiết kiệm cho mục tiêu lớn ------------------------------
+
+def _thang(period: str, income: int, expense: int):
+    from models import MonthSummary
+    return MonthSummary(period=period, label=f"Tháng {int(period[4:])}/{period[:4]}",
+                        year=int(period[:4]), month=int(period[4:]), income=income,
+                        expense=expense, net=income - expense, count=40, by_category=[])
+
+
+@pytest.mark.parametrize("cau, mong_doi", [
+    ("kế hoạch mua ô tô khoảng 500 triệu", 500_000_000),
+    ("tôi muốn mua nhà 1,5 tỷ", 1_500_000_000),
+    ("để dành 800tr mua đất", 800_000_000),
+    ("mục tiêu 2 tỉ", 2_000_000_000),
+    # Số nhỏ là khoản chi lẻ, không phải mục tiêu tích lũy.
+    ("tháng này ăn uống hết 5 triệu", None),
+    ("kế hoạch tiết kiệm của tôi thế nào", None),
+])
+def test_doc_so_tien_muc_tieu(cau, mong_doi):
+    assert main._goal_amount(cau) == mong_doi
+
+
+def test_kha_nang_de_danh_khong_bi_thang_bat_thuong_keo_lech():
+    """Tháng 9 có khoản tiền về hơn 500 triệu. Trung bình sẽ ra ~88 triệu/tháng —
+    sai hoàn toàn; trung vị phải bám nhịp thật (~1 triệu)."""
+    months = [_thang("202604", 7_600_000, 7_372_000), _thang("202605", 7_600_000, 6_582_000),
+              _thang("202606", 7_600_000, 5_354_000), _thang("202607", 7_600_000, 7_715_000),
+              _thang("202608", 7_600_000, 6_545_000), _thang("202609", 527_600_000, 2_465_000)]
+    kha_nang, thu_nhap, so_thang = main._saving_capacity(months)
+    trung_binh = sum(m.net for m in months) // len(months)
+    assert kha_nang == 1_018_000
+    assert kha_nang < trung_binh / 50, "trung vị phải miễn nhiễm với tháng bất thường"
+    assert thu_nhap == 7_600_000
+    assert so_thang == 5, "tháng đang chạy chưa đủ ngày nên bị loại"
+
+
+def test_lo_trinh_tiet_kiem_vach_ro_muc_bat_kha_thi():
+    """Điểm mấu chốt: lộ trình 5 năm đòi 7,9 triệu/tháng trong khi thu nhập chỉ
+    7,6 triệu — bảng phải nói ra điều đó bằng cột "% thu nhập" > 100%."""
+    months = [_thang("202604", 7_600_000, 7_372_000), _thang("202605", 7_600_000, 6_582_000),
+              _thang("202606", 7_600_000, 5_354_000), _thang("202607", 7_600_000, 7_715_000),
+              _thang("202608", 7_600_000, 6_545_000)]
+    table, chart = main._savings_plan_visual(500_000_000, 28_679_000, months)
+    assert table is not None and chart is not None
+    assert [r.label for r in table.rows] == ["1 năm", "2 năm", "3 năm", "5 năm"]
+    con_thieu = 500_000_000 - 28_679_000
+    assert table.rows[3].amount == round(con_thieu / 60)
+    assert table.rows[3].pct > 100, "5 năm vẫn vượt thu nhập → phải lộ ra"
+    # Dòng tổng là mức để dành THẬT, nhỏ hơn hẳn mọi lộ trình.
+    assert table.total_amount == 1_018_000
+    assert all(r.amount > table.total_amount for r in table.rows)
+    assert table.trend_header is None, "kịch bản tương lai không có kỳ trước để so"
+    assert table.row_header == "Lộ trình" and table.pct_header == "% thu nhập"
+    assert "còn thiếu" in table.footnote and "năm" in table.footnote
+    # Cột cuối biểu đồ là mức thật, đặt cạnh các lộ trình để thấy khoảng cách.
+    assert chart.data[-1].label == "Thực tế" and chart.data[-1].value == 1_018_000
+
+
+def test_da_du_tien_thi_khong_ve_lo_trinh():
+    months = [_thang("202604", 7_600_000, 7_000_000), _thang("202605", 7_600_000, 7_000_000)]
+    assert main._savings_plan_visual(20_000_000, 50_000_000, months) == (None, None)
+
+
+def test_chat_hoi_ke_hoach_mua_xe_dinh_kem_bang_lo_trinh():
+    r = client.post("/api/copilot/chat", json={
+        "message": "tôi đang có kế hoạch mua xe ô tô khoảng 500 triệu, "
+                   "bạn đề xuất kế hoạch tiết kiệm dựa trên chi tiêu của tôi không"})
+    assert r.status_code == 200
+    tokens, table, chart = _doc_events(r.text)
+    assert table is not None, "câu tư vấn mục tiêu phải kèm bảng lộ trình"
+    assert table["rowHeader"] == "Lộ trình" and table["amountHeader"] == "Cần/tháng"
+    assert table["trendHeader"] is None and table["footnote"]
+    assert len(table["rows"]) == 4
+    assert chart is not None and chart["data"][-1]["label"] == "Thực tế"
+    # Không đọc kịch bản "dư 6,5 triệu" nữa — nó mâu thuẫn với số thật trong bảng.
+    assert "6.500.000" not in "".join(tokens)
+
+
+def test_chat_tu_van_khong_neu_so_tien_thi_ve_bang_tien_du():
+    r = client.post("/api/copilot/chat", json={"message": "tôi nên tiết kiệm thế nào"})
+    _, table, chart = _doc_events(r.text)
+    assert table is not None and table["rowHeader"] == "Tháng"
+    assert table["amountHeader"] == "Thu − chi"
+    assert chart is not None
+
+
+def test_ke_hoach_chi_tieu_thang_6_van_ra_bang_thang_6():
+    """Bảo vệ thứ tự xét: câu có chữ "kế hoạch" nhưng hỏi một tháng cụ thể thì
+    vẫn phải ra bảng tháng đó, không bị nhánh tư vấn cướp mất."""
+    r = client.post("/api/copilot/chat", json={"message": "kế hoạch chi tiêu tháng 6 của tôi"})
+    _, table, _ = _doc_events(r.text)
+    assert table is not None
+    assert "Tháng 6" in table["title"] and table["rowHeader"] == "Nhóm"
