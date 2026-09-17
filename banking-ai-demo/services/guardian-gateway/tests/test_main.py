@@ -768,3 +768,24 @@ def test_so_sanh_6_thang_van_ra_bang_nhieu_thang():
     r = client.post("/api/copilot/chat", json={"message": "xem chi tiêu 6 tháng gần đây"})
     _, table, _ = _doc_events(r.text)
     assert table is not None and "So sánh" in table["title"]
+
+
+def test_agent_loi_cau_chi_tieu_khong_doc_kich_ban_thang_9():
+    # Lỗi đã gặp: agent lỗi/timeout → chữ kịch bản viết cứng tháng 9
+    # ("12.460.000 ₫", "GrabFood") hiện KÈM bảng tháng 7 → mâu thuẫn. Khi câu
+    # hỏi đã có bảng số thật, chữ phải bám tiêu đề bảng, không đọc kịch bản.
+    # (Trong test agent chưa cấu hình nên from_agent=None — đúng như agent lỗi.)
+    r = client.post("/api/copilot/chat", json={"message": "thống kê chi tiêu tháng 7"})
+    tokens, table, _ = _doc_events(r.text)
+    txt = "".join(tokens)
+    assert table is not None and "Tháng 7" in table["title"]
+    assert "12.460.000" not in txt and "GrabFood" not in txt  # không đọc kịch bản
+    assert "Tháng 7" in txt                                    # chữ khớp bảng
+
+
+def test_agent_loi_cau_khong_chi_tieu_van_dung_kich_ban():
+    # Câu KHÔNG có bảng (tiết kiệm) vẫn dùng kịch bản như cũ — không đổi.
+    r = client.post("/api/copilot/chat", json={"message": "Tôi có thể tiết kiệm bao nhiêu?"})
+    tokens, table, _ = _doc_events(r.text)
+    assert table is None
+    assert "tiết kiệm" in "".join(tokens).lower()

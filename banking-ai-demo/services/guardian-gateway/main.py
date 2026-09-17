@@ -442,26 +442,31 @@ async def copilot_chat(payload: ChatRequest) -> StreamingResponse:
     Định dạng phải khớp đúng bộ parse bên FE: mỗi dòng `data: {"token": "..."}`,
     kết thúc bằng `data: [DONE]`. FE bỏ qua dòng không bắt đầu bằng `data:`.
     """
-    # agent-service trả lời nếu đã được cấu hình. Nền tảng agent có xác thực
-    # riêng và cần một agent tạo sẵn trong đó; phần thiết lập ấy thuộc phạm vi
-    # người khác nên gateway chỉ gọi, không tự tạo. Chưa cấu hình hoặc gọi hỏng
-    # thì dùng kịch bản trả lời có sẵn.
+    # Lấy bảng + biểu đồ số liệu THẬT cho câu hỏi chi tiêu TRƯỚC, để biết câu này
+    # có bảng hay không (và để middleware kịp đóng dấu X-Guardian-Data-Source
+    # theo các lời gọi domain này trước khi trả StreamingResponse).
+    table, data_chart = await _spending_visual(payload.message)
+
+    # agent-service trả lời nếu đã cấu hình. Chưa cấu hình hoặc gọi hỏng thì rơi
+    # về câu dẫn — nhưng KHÔNG bao giờ đọc kịch bản viết cứng (tháng 9) khi câu
+    # hỏi đã có bảng số thật kèm theo, vì kịch bản sẽ mâu thuẫn với bảng (hỏi
+    # tháng 7, kịch bản lại nói tháng 9). Lúc đó lấy câu dẫn thẳng từ tiêu đề
+    # bảng để chữ và bảng luôn khớp nhau.
     reply, chart = catalog.FALLBACK_REPLY, None
     from_agent = await domain.agent_answer(payload.message)
     if from_agent:
         # Agent trả bảng markdown (đẹp ở admin-web); gỡ markdown cho FE văn bản
         # thuần — bảng số đã có bản riêng do gateway đính bên dưới.
         reply = _strip_markdown_for_plain(from_agent) or catalog.FALLBACK_REPLY
+    elif table is not None:
+        reply = f"{table.title}:"
     else:
         for pattern, text, attached in catalog.SCRIPTED_REPLIES:
             if re.search(pattern, payload.message, re.IGNORECASE):
                 reply, chart = text, attached
                 break
 
-    # Đính bảng + biểu đồ số liệu THẬT cho câu hỏi chi tiêu. Chart số thật ghi đè
-    # chart kịch bản tĩnh nếu có. Phải lấy TRƯỚC khi trả StreamingResponse để
-    # middleware kịp đóng dấu X-Guardian-Data-Source theo các lời gọi domain này.
-    table, data_chart = await _spending_visual(payload.message)
+    # Chart số thật ghi đè chart kịch bản tĩnh (nếu có).
     if data_chart is not None:
         chart = data_chart
 
