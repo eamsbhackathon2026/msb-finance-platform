@@ -462,6 +462,19 @@ def agent_tools():
 # ---------------------------------------------------------------------------
 # Vòng đời quyết định
 # ---------------------------------------------------------------------------
+def _require_customer_and_account(customer_id: int, account_id: int) -> None:
+    """404 khi khách hoặc tài khoản không tồn tại.
+
+    Hai khóa ngoại `risk_decision_customer_id_fkey` và
+    `risk_decision_account_id_fkey` là thứ chặn cuối cùng; để chúng nổ ra thì
+    thông điệp lỗi là của Postgres chứ không phải của nghiệp vụ.
+    """
+    if query_one("SELECT 1 AS x FROM customer WHERE customer_id = %s", (customer_id,)) is None:
+        raise HTTPException(404, f"customer {customer_id} không tồn tại")
+    if query_one("SELECT 1 AS x FROM account WHERE account_id = %s", (account_id,)) is None:
+        raise HTTPException(404, f"account {account_id} không tồn tại")
+
+
 @app.post("/transfer/precheck", tags=["transfer"])
 def precheck(req: PrecheckRequest):
     """Bước 1 — chấm điểm một lệnh chuyển trước khi tiền rời tài khoản.
@@ -470,6 +483,12 @@ def precheck(req: PrecheckRequest):
     chấm 6 yếu tố, đối chiếu playbook lừa đảo, ghi một dòng risk_decision rồi trả về
     điểm, mức độ, câu hỏi cần hỏi khách và khuyến cáo.
     """
+    # Khách hoặc tài khoản không tồn tại thì dừng NGAY, đừng để Postgres từ chối
+    # lúc INSERT: khóa ngoại vỡ thành ForeignKeyViolation không ai bắt, endpoint
+    # trả 500 và người gọi tưởng nền tảng hỏng. Các endpoint khác của service này
+    # đã trả 404 cho dữ liệu không tồn tại; chỗ này phải giống.
+    _require_customer_and_account(req.customer_id, req.account_id)
+
     when = datetime.fromisoformat(req.tx_time) if req.tx_time else now_vn()
     if when.tzinfo is None:
         when = when.replace(tzinfo=now_vn().tzinfo)

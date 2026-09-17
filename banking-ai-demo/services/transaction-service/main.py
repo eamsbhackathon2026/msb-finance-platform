@@ -17,7 +17,7 @@ from __future__ import annotations
 import statistics
 from collections import defaultdict
 from datetime import datetime, timedelta
-from typing import Literal
+from typing import Annotated, Literal
 
 from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel, Field
@@ -544,8 +544,15 @@ def monthly_comparison(
 
 
 @app.get("/transactions/{customer_id}/cashflow-forecast", tags=["transaction"])
-def cashflow_forecast(customer_id: int, horizon: int = Query(3, ge=1, le=12)):
+def cashflow_forecast(customer_id: int, horizon: Annotated[int, Query(ge=1, le=12)] = 3):
     """Dự báo net theo trung bình có trọng số: 3 tháng gần nhất nặng hơn các tháng cũ.
+
+    `horizon` khai bằng Annotated để GIÁ TRỊ MẶC ĐỊNH là số 3 thật. Viết
+    `horizon: int = Query(3, ...)` thì mặc định là một đối tượng Query của
+    FastAPI — qua HTTP không sao vì FastAPI thay nó, nhưng gọi thẳng hàm này từ
+    trong Python (generate_recommendations vẫn gọi) thì `range(horizon)` nổ
+    TypeError và endpoint trả 500 với mọi khách hàng.
+
 
     Chỉ lấy các tháng có dữ liệu trọn vẹn. Tháng đầu cửa sổ thường bị cắt giữa chừng
     và tháng hiện tại thì chưa hết, nên nếu tính cả hai vào trung bình thì một khách
