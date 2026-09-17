@@ -768,6 +768,8 @@ async def _spending_visual(question: str) -> tuple[ChatTable | None, ChatChart |
     1. TƯ VẤN có số tiền mục tiêu ("mua ô tô 500 triệu") → bảng lộ trình tiết
        kiệm. Phải xét TRƯỚC cổng _SPEND_RE vì câu hỏi tư vấn thường không nhắc
        chữ "chi tiêu" nào.
+       Câu hỏi về VAY hoặc GỬI một gói cụ thể thì KHÔNG đi nhánh này — đó là
+       chuyện chọn sản phẩm, do _product_visual lo.
     2. SO SÁNH nhiều tháng ("so với tháng 8", "6 tháng gần đây") → bảng nhiều
        tháng. Trừ khi câu nhắc "nhóm": "so sánh các nhóm tháng này" là so các
        nhóm TRONG một tháng, đưa bảng nhiều tháng vào là lạc đề.
@@ -778,7 +780,12 @@ async def _spending_visual(question: str) -> tuple[ChatTable | None, ChatChart |
     6. TƯ VẤN không nêu số tiền ("nên tiết kiệm thế nào") → bảng tiền dư. Xét
        SAU các nhánh tháng để "kế hoạch chi tiêu tháng 6" vẫn ra bảng tháng 6.
     """
-    tu_van = _GOAL_RE.search(question) is not None
+    # "vay 500 triệu mua ô tô" cũng khớp _GOAL_RE (có "mua ô tô" + số tiền),
+    # nhưng khách đang muốn ĐI VAY chứ không phải tích cóp — gắn bảng lộ trình
+    # tiết kiệm vào là khuyên ngược hẳn điều họ hỏi. Tương tự "gửi tiết kiệm
+    # 100 triệu 12 tháng" là chọn gói gửi, không phải lập kế hoạch tích lũy.
+    san_pham = _LOAN_RE.search(question) or _DEPOSIT_RE.search(question)
+    tu_van = _GOAL_RE.search(question) is not None and not san_pham
     if tu_van:
         muc_tieu = _goal_amount(question)
         if muc_tieu:

@@ -1120,3 +1120,24 @@ def test_bieu_lai_rong_thi_khong_dung_bang():
 def test_cau_hoi_khong_lien_quan_san_pham_thi_khong_co_bang():
     import asyncio
     assert asyncio.run(main._product_visual("chi tiêu tháng này thế nào")) is None
+
+
+def test_cau_di_vay_khong_gan_bang_lo_trinh_tiet_kiem():
+    """"vay 500 triệu mua ô tô" khớp cả "mua ô tô" lẫn số tiền nên trước đây rơi
+    vào bảng lộ trình TIẾT KIỆM — khuyên ngược hẳn điều khách hỏi."""
+    import asyncio
+    t, _ = asyncio.run(main._spending_visual("tôi muốn vay 500 triệu mua ô tô trong 5 năm"))
+    assert t is None, "câu đi vay không được gắn bảng tích lũy"
+
+
+def test_cau_gui_goi_tiet_kiem_khong_gan_bang_lo_trinh():
+    import asyncio
+    t, _ = asyncio.run(main._spending_visual("gửi tiết kiệm 100 triệu trong 12 tháng thì gói nào lợi"))
+    assert t is None
+
+
+def test_ke_hoach_tich_luy_van_ra_bang_lo_trinh():
+    """Chốt chặn hai chiều: câu tích lũy thật vẫn phải ra bảng lộ trình."""
+    import asyncio
+    t, _ = asyncio.run(main._spending_visual("kế hoạch tiết kiệm mua ô tô 500 triệu"))
+    assert t is not None and "Lộ trình" in t.title
