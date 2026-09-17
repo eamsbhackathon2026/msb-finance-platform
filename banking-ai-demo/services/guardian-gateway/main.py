@@ -97,6 +97,8 @@ from models import (
     TransferActionRequest,
     TransferActionResponse,
     TransferBeneficiary,
+    OpenDepositRequest,
+    OpenDepositResponse,
     TransferExecuteRequest,
     TransferExecuteResponse,
     TransferHistoryItem,
@@ -1482,6 +1484,11 @@ async def transfer_execute(payload: TransferExecuteRequest) -> TransferExecuteRe
     if not accounts:
         return TransferExecuteResponse(ok=False)
     resolve = await domain.resolve_beneficiary(cust_id, payload.bank_code, payload.account_no) or {}
+    account_id = int(accounts[0]["account_id"])
+    # HẠCH TOÁN THẬT: ghi nợ (DEBIT) tài khoản nguồn trước khi ghi bút toán —
+    # số dư working_balance giảm đúng số tiền chuyển. Service hạch toán lỗi thì
+    # vẫn ghi bản ghi (degraded, balance_after trống) để demo không bị chặn.
+    posting = await domain.account_posting(account_id, "DEBIT", payload.amount)
     # Tên người nhận không có cột riêng trong transaction_history: nhét vào đầu
     # description theo dạng "→ TÊN: nội dung" để history bóc lại được với stk
     # ngoài danh bạ (danh bạ FE local không trùng danh bạ DB).
@@ -1489,9 +1496,10 @@ async def transfer_execute(payload: TransferExecuteRequest) -> TransferExecuteRe
     desc = f"→{payload.holder_name}: {note}" if payload.holder_name else note
     created = await domain.create_transaction({
         "customer_id": cust_id,
-        "account_id": int(accounts[0]["account_id"]),
+        "account_id": account_id,
         "direction": "OUT",
         "amount": payload.amount,
+        "balance_after": (posting or {}).get("balance_after"),
         "beneficiary_id": resolve.get("beneficiary_id"),
         "beneficiary_bank_code": payload.bank_code,
         # Cột vốn chứa bản masked; màn lịch sử cần số đầy đủ nên lưu full —
@@ -2027,6 +2035,61 @@ async def copilot_months(months: int = 6) -> MonthlyReport:
     return mapped
 
 
+@app.post("/api/invest/open", response_model=OpenDepositResponse, tags=["copilot"],
+          response_model_exclude_none=True,
+          summary="Mở tiền gửi: hạch toán ghi nợ TK nguồn + tạo sổ + ghi bút toán")
+async def invest_open(payload: OpenDepositRequest) -> OpenDepositResponse:
+    """Mở tiền gửi có hạch toán thật: (1) DEBIT tài khoản thanh toán nguồn,
+    (2) tạo bản ghi deposit (CREDIT vào sổ), (3) ghi bút toán OUT/INVESTMENT
+    vào transaction_history. Tạo sổ hỏng thì CREDIT hoàn tiền lại nguồn."""
+    cust_id = domain.current_customer_id()
+    pf = await domain.portfolio(cust_id)
+    accounts = (pf or {}).get("accounts") or []
+    if not accounts:
+        return OpenDepositResponse(ok=False)
+    account_id = int(accounts[0]["account_id"])
+    posting = await domain.account_posting(account_id, "DEBIT", payload.amount)
+    if posting is None:
+        # Không đủ số dư (409) hoặc service hạch toán lỗi — không mở sổ.
+        return OpenDepositResponse(ok=False)
+    dep = await domain.create_deposit(cust_id, {
+        "amount": payload.amount,
+        "term_months": payload.months,
+        "rate": payload.rate,
+        "linked_account_id": account_id,
+    })
+    if dep is None:
+        # Sổ không tạo được: hoàn tiền để hai vế nợ/có cân nhau.
+        await domain.account_posting(account_id, "CREDIT", payload.amount)
+        return OpenDepositResponse(ok=False)
+    deposit_no = f"2000{int(dep.get('deposit_id') or 0):07d}"
+    await domain.create_transaction({
+        "customer_id": cust_id,
+        "account_id": account_id,
+        "direction": "OUT",
+        "amount": payload.amount,
+        "balance_after": posting.get("balance_after"),
+        "beneficiary_bank_code": "MSB",
+        "beneficiary_account_masked": deposit_no,
+        "transaction_type": "FT",
+        "category": "INVESTMENT",
+        "transaction_description": f"Mo tien gui lai suat dac biet ky han {payload.months} thang",
+        "channel": "MOBILE",
+        "status": "POSTED",
+    })
+
+    def _iso(d: str | None) -> str | None:
+        return f"{d[0:4]}-{d[4:6]}-{d[6:8]}" if d and len(d) == 8 else None
+
+    return OpenDepositResponse(
+        ok=True,
+        deposit_no=deposit_no,
+        start_date=_iso(dep.get("start_date")),
+        maturity_date=_iso(dep.get("maturity_date")),
+        balance_after=int(posting.get("balance_after") or 0),
+    )
+
+
 @app.get("/api/invest/rates", response_model=InvestRates, tags=["copilot"],
          summary="Biểu lãi suất tiết kiệm — product × interest_rate × interest_rate_term")
 async def invest_rates() -> InvestRates:
@@ -2123,6 +2186,7 @@ async def info() -> dict:
             "GET /api/copilot/month",
             "POST /api/copilot/chat",
             "GET /api/invest/rates",
+            "POST /api/invest/open",
             "GET /api/transfer/pending",
             "POST /api/risk/assess",
             "GET /api/risk/explain",

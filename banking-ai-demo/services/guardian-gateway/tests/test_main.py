@@ -240,7 +240,7 @@ def test_info_phan_anh_dung_cau_hinh_domain():
     body = client.get("/info").json()
     # conftest tắt DOMAIN_ENABLED nên /info phải báo đúng như vậy.
     assert body["integrated_with_domain_services"] is False
-    assert len(body["endpoints"]) == 34
+    assert len(body["endpoints"]) == 35
 
 
 def test_openapi_phuc_vu_dung_cac_endpoint_fe_goi():
@@ -256,6 +256,7 @@ def test_openapi_phuc_vu_dung_cac_endpoint_fe_goi():
         "/api/copilot/month",
         "/api/copilot/chat",
         "/api/invest/rates",
+        "/api/invest/open",
         "/api/transfer/intervene",
         "/api/transfer/intervene/{decision_id}",
         "/api/products/rates",

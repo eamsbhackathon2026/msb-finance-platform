@@ -12,6 +12,7 @@ full_name, legal_id, phone_no, email, street hay date_of_birth ở dạng thô.
 """
 from __future__ import annotations
 
+import calendar
 import os
 from datetime import timedelta
 from typing import Literal
@@ -282,6 +283,89 @@ def get_accounts(customer_id: int):
         "customer_id": customer_id,
         "count": len(rows),
         "accounts": [_account_payload(r) for r in rows],
+    }
+
+
+class AccountPostingRequest(BaseModel):
+    direction: Literal["DEBIT", "CREDIT"]
+    amount: float = Field(gt=0)
+    description: str | None = None
+
+
+@app.post("/accounts/{account_id}/postings", tags=["customer"])
+def post_account_posting(account_id: int, req: AccountPostingRequest):
+    """Hạch toán một bút toán lên tài khoản thanh toán: DEBIT trừ, CREDIT cộng
+    working_balance. DEBIT vượt số dư khả dụng → 409, không ghi gì cả."""
+    row = query_one("SELECT working_balance FROM account WHERE account_id = %s", (account_id,))
+    if row is None:
+        raise HTTPException(404, f"account {account_id} không tồn tại")
+    balance = float(num(row.get("working_balance")))
+    amount = float(req.amount)
+    if req.direction == "DEBIT" and balance < amount:
+        raise HTTPException(409, "Số dư khả dụng không đủ để ghi nợ")
+    new_balance = balance - amount if req.direction == "DEBIT" else balance + amount
+    updated = execute_returning(
+        "UPDATE account SET working_balance = %s WHERE account_id = %s RETURNING account_id, working_balance",
+        (str(int(new_balance)), account_id),
+    )
+    return {
+        "account_id": account_id,
+        "direction": req.direction,
+        "amount": amount,
+        "balance_after": float(num(updated["working_balance"])) if updated else new_balance,
+    }
+
+
+def _add_months_yyyymmdd(start, months: int) -> str:
+    """Cộng kỳ hạn tháng theo kiểu ngân hàng: giữ ngày, lùi về cuối tháng nếu thiếu."""
+    m = start.month - 1 + months
+    y = start.year + m // 12
+    m = m % 12 + 1
+    day = min(start.day, calendar.monthrange(y, m)[1])
+    return f"{y:04d}{m:02d}{day:02d}"
+
+
+class DepositCreateRequest(BaseModel):
+    amount: float = Field(gt=0)
+    term_months: int = Field(gt=0)
+    rate: float = Field(ge=0)
+    linked_account_id: int | None = None
+    rollover: Literal["PRINCIPAL", "PRINCIPAL_INTEREST", "NONE"] = "PRINCIPAL"
+
+
+@app.post("/customers/{customer_id}/deposits", tags=["customer"], status_code=201)
+def create_deposit(customer_id: int, req: DepositCreateRequest):
+    """Mở sổ tiền gửi mới (kênh MOBILE). Gateway chịu trách nhiệm ghi nợ tài
+    khoản nguồn TRƯỚC khi gọi; ở đây chỉ ghi bản ghi deposit."""
+    _customer_or_404(customer_id)
+    row = query_one("SELECT COALESCE(max(deposit_id), 0) + 1 AS nid FROM deposit")
+    deposit_id = int(row["nid"]) if row else 1
+    now = now_vn()
+    start_date = now.strftime("%Y%m%d")
+    maturity_date = _add_months_yyyymmdd(now, req.term_months)
+    linked = str(req.linked_account_id) if req.linked_account_id else None
+    execute_returning(
+        """
+        INSERT INTO deposit (
+          deposit_id, customer_id, currency, amount, interest, interest_margin,
+          term, rollover, channel, start_date, maturity_date, linked_account_id,
+          product_group, payin_account, payout_account
+        ) VALUES (%s,%s,'VND',%s,%s,'0',%s,%s,'MOBILE',%s,%s,%s,'DEPOSIT_ONLINE',%s,%s)
+        RETURNING *
+        """,
+        (
+            deposit_id, customer_id, str(int(req.amount)), str(req.rate),
+            str(req.term_months), req.rollover, start_date, maturity_date,
+            req.linked_account_id, linked, linked,
+        ),
+    )
+    return {
+        "deposit_id": deposit_id,
+        "amount": float(req.amount),
+        "rate": req.rate,
+        "term_months": req.term_months,
+        "start_date": start_date,
+        "maturity_date": maturity_date,
     }
 
 

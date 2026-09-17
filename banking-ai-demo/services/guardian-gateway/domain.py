@@ -193,6 +193,18 @@ async def account_events(customer_id: int) -> dict | None:
     return await _get(CUSTOMER_PROFILE_URL, f"/customers/{customer_id}/events")
 
 
+async def account_posting(account_id: int, direction: str, amount: int) -> dict | None:
+    """Hạch toán ghi nợ (DEBIT) / ghi có (CREDIT) tài khoản thanh toán.
+    Trả None khi service lỗi HOẶC ghi nợ vượt số dư (profile trả 409)."""
+    return await _post(CUSTOMER_PROFILE_URL, f"/accounts/{account_id}/postings",
+                       {"direction": direction, "amount": amount})
+
+
+async def create_deposit(customer_id: int, payload: dict) -> dict | None:
+    """Mở sổ tiền gửi qua customer-profile-service (đã ghi nợ TK nguồn trước)."""
+    return await _post(CUSTOMER_PROFILE_URL, f"/customers/{customer_id}/deposits", payload)
+
+
 async def resolve_beneficiary(customer_id: int, bank_code: str, account_no: str) -> dict | None:
     """Tra một số tài khoản người nhận: quen hay mới, tuổi tài khoản, quan hệ,
     trạng thái (SUSPECTED?). Đây là tín hiệu để quyết định có cần Scam Shield."""

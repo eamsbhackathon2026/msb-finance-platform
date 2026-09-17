@@ -533,6 +533,21 @@ class TransferExecuteResponse(Contract):
     transaction_id: int | None = None
 
 
+class OpenDepositRequest(Contract):
+    """Lệnh mở tiền gửi từ app — gateway hạch toán ghi nợ TK nguồn + tạo sổ."""
+    amount: int
+    months: int
+    rate: float
+
+
+class OpenDepositResponse(Contract):
+    ok: bool
+    deposit_no: str | None = None
+    start_date: str | None = None
+    maturity_date: str | None = None
+    balance_after: int | None = None
+
+
 class TransferHistoryItem(Contract):
     """Một dòng của bảng lịch sử chuyển tiền (màn Lịch sử giao dịch trên app)."""
     id: str
