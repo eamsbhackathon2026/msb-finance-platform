@@ -197,6 +197,23 @@ async def savings_rates() -> dict | None:
     return await _get(TRANSACTION_URL, "/products/savings/rates")
 
 
+async def product_rates(product_group: str = "SAVINGS") -> dict | None:
+    """Biểu lãi suất theo (sản phẩm × kỳ hạn) — SAVINGS hoặc LOAN."""
+    return await _get(TRANSACTION_URL, "/products/rates", {"product_group": product_group})
+
+
+async def loan_options(amount: int, months: int, limit: int = 5) -> dict | None:
+    """Các gói vay cho (số tiền, kỳ hạn) kèm tiền trả hàng tháng do service tính."""
+    return await _get(TRANSACTION_URL, "/products/loan-options",
+                      {"amount": amount, "months": months, "limit": limit})
+
+
+async def savings_options(amount: int, months: int, limit: int = 5) -> dict | None:
+    """Các gói tiết kiệm cho (số tiền, kỳ hạn) kèm lãi dự kiến do service tính."""
+    return await _get(TRANSACTION_URL, "/products/savings-options",
+                      {"amount": amount, "months": months, "limit": limit})
+
+
 async def recommendations(customer_id: int) -> dict | None:
     return await _get(TRANSACTION_URL, f"/customers/{customer_id}/recommendations")
 

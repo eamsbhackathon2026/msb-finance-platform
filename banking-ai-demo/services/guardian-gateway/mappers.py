@@ -523,14 +523,14 @@ def map_invest_rates(raw: dict) -> InvestRates:
     để vẽ bảng biểu lãi suất và biểu đồ so sánh cùng kỳ hạn mà không phải tự gộp.
     """
     rates = raw.get("rates") or []
-    product_names: dict[int, str] = {}
+    product_names: dict[str, str] = {}
     terms: dict[str, RateTerm] = {}
     cells: dict[str, list[RateCell]] = {}
     for r in rates:
-        pid = int(r["product_id"])
+        pid = str(r["product_id"])
         product_names.setdefault(pid, r["product_name"])
         code = r["term_code"]
-        terms.setdefault(code, RateTerm(code=code, months=int(r["term_months"]), label=r["term_label"]))
+        terms.setdefault(code, RateTerm(code=code, months=float(r["term_months"]), label=r["term_label"]))
         cells.setdefault(code, []).append(RateCell(product_id=pid, rate_pct=float(r["rate_pct"])))
     return InvestRates(
         as_of=str(raw.get("as_of") or ""),

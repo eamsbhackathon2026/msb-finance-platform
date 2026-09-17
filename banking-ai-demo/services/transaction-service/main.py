@@ -875,47 +875,197 @@ def list_products(
     return {"count": len(rows), "products": rows}
 
 
-@app.get("/products/savings/rates", tags=["product"])
-def savings_rates(product_group: str = Query("SAVINGS", description="Nhóm sản phẩm cần tra biểu lãi suất")):
-    """Biểu lãi suất HIỆN TẠI của sản phẩm tiết kiệm: product × interest_rate × interest_rate_term.
+def _rate_matrix(product_group: str) -> dict:
+    """Biểu lãi suất hiện hành của một nhóm sản phẩm (SAVINGS hoặc LOAN).
 
-    interest_rate lưu theo đợt hiệu lực (effective_from), nên "hiện tại" là đợt
-    mới nhất chưa vượt ngày hôm nay của từng cặp (sản phẩm, kỳ hạn) — KHÔNG phải
-    MAX toàn bảng: hai sản phẩm có thể điều chỉnh lãi vào hai ngày khác nhau.
+    Đọc view v_interest_rate — nó đã lọc sẵn rate_status = ACTIVE và nối
+    product × interest_rate × interest_rate_term. Lưu ý con số lãi nằm ở
+    interest_rate_term.rate theo interest_code, KHÔNG phải trên interest_rate:
+    một sản phẩm có một biểu lãi, mỗi kỳ hạn một dòng.
+
+    term_months là NUMERIC vì có kỳ hạn ngắn hơn tháng ("1 tuần" = 0.25), nên
+    giữ float — ép int sẽ biến 1 tuần thành 0 và đụng với "không kỳ hạn".
     """
-    terms = query(
-        "SELECT term_code, term_months, term_label FROM interest_rate_term ORDER BY term_months"
-    )
     rows = query(
         """
-        SELECT p.product_id, p.product_name, t.term_code, t.term_months, t.term_label,
-               r.rate_pct, r.effective_from
-        FROM interest_rate r
-        JOIN product p ON p.product_id = r.product_id
-        JOIN interest_rate_term t ON t.term_code = r.term_code
-        WHERE p.product_group = %s AND p.product_status = 'ACTIVE'
-          AND r.effective_from = (
-              SELECT MAX(r2.effective_from) FROM interest_rate r2
-              WHERE r2.product_id = r.product_id AND r2.term_code = r.term_code
-                AND r2.effective_from <= CURRENT_DATE)
-        ORDER BY t.term_months, p.product_id
+        SELECT product_id, product_name, term_code, term_label, term_months,
+               rate, seq, effective_from
+        FROM v_interest_rate
+        WHERE product_group = %s
+        ORDER BY seq, term_months, product_id
         """,
         (product_group.upper(),),
     )
-    out = [
+    products: list[dict] = []
+    terms: list[dict] = []
+    seen_p: set[str] = set()
+    seen_t: set[str] = set()
+    for r in rows:
+        pid = str(r["product_id"])
+        if pid not in seen_p:
+            seen_p.add(pid)
+            products.append({"product_id": pid, "product_name": r["product_name"]})
+        code = str(r["term_code"])
+        if code not in seen_t:
+            seen_t.add(code)
+            terms.append({
+                "term_code": code,
+                "term_label": r["term_label"],
+                "term_months": float(num(r["term_months"])),
+                "seq": int(r["seq"]),
+            })
+    terms.sort(key=lambda t: (t["seq"], t["term_months"]))
+    rates = [
         {
-            "product_id": r["product_id"],
+            "product_id": str(r["product_id"]),
             "product_name": r["product_name"],
-            "term_code": r["term_code"],
-            "term_months": int(r["term_months"]),
+            "term_code": str(r["term_code"]),
             "term_label": r["term_label"],
-            "rate_pct": float(num(r["rate_pct"])),
-            "effective_from": str(r["effective_from"]),
+            "term_months": float(num(r["term_months"])),
+            "rate_pct": float(num(r["rate"])),
         }
         for r in rows
     ]
-    as_of = max((r["effective_from"] for r in out), default=None)
-    return {"count": len(out), "as_of": as_of, "terms": terms, "rates": out}
+    as_of = max((str(r["effective_from"]) for r in rows), default=None)
+    return {
+        "count": len(rates), "as_of": as_of, "product_group": product_group.upper(),
+        "products": products, "terms": terms, "rates": rates,
+    }
+
+
+@app.get("/products/rates", tags=["product"])
+def product_rates(
+    product_group: str = Query("SAVINGS", description="SAVINGS | LOAN — nhóm cần tra biểu lãi suất"),
+):
+    """Biểu lãi suất theo (sản phẩm × kỳ hạn) cho cả tiết kiệm lẫn vay."""
+    return _rate_matrix(product_group)
+
+
+@app.get("/products/savings/rates", tags=["product"])
+def savings_rates(
+    product_group: str = Query("SAVINGS", description="Nhóm sản phẩm cần tra biểu lãi suất"),
+):
+    """Giữ nguyên đường dẫn cũ cho màn Biểu lãi suất; nội dung do _rate_matrix dựng."""
+    return _rate_matrix(product_group)
+
+
+def _pick_term(terms: list[dict], months: float) -> dict | None:
+    """Kỳ hạn niêm yết khớp nhất với số tháng khách muốn.
+
+    Lấy kỳ hạn ngắn nhất mà vẫn ĐỦ DÀI cho nhu cầu — vay 30 tháng thì áp lãi kỳ
+    36 tháng chứ không phải 12, vì kỳ hạn dài luôn có lãi cao hơn và lấy kỳ ngắn
+    sẽ báo một mức trả góp rẻ hơn thực tế. Nhu cầu vượt mọi kỳ thì dùng kỳ dài nhất.
+    """
+    du_dai = [t for t in terms if t["term_months"] >= months]
+    if du_dai:
+        return min(du_dai, key=lambda t: t["term_months"])
+    return max(terms, key=lambda t: t["term_months"]) if terms else None
+
+
+def _monthly_payment(principal: float, annual_pct: float, months: int) -> float:
+    """Tiền trả hàng tháng theo dư nợ giảm dần, trả góp đều (annuity)."""
+    r = annual_pct / 100 / 12
+    if r <= 0:
+        return principal / months
+    return principal * r / (1 - (1 + r) ** -months)
+
+
+@app.get("/products/loan-options", tags=["product"])
+def loan_options(
+    amount: int = Query(..., gt=0, description="Số tiền muốn vay (VND)"),
+    months: int = Query(..., ge=1, le=360, description="Số tháng muốn vay"),
+    limit: int = Query(5, ge=1, le=20),
+):
+    """Các gói vay khả dụng cho (số tiền, kỳ hạn), kèm tiền trả hàng tháng.
+
+    Tiền trả hàng tháng và tổng lãi do SERVICE tính bằng công thức trả góp đều —
+    LLM chỉ diễn giải lại. Để LLM tự tính khoản vay là cách nhanh nhất có một
+    con số sai trên màn hình mà không ai kiểm chứng được.
+    """
+    matrix = _rate_matrix("LOAN")
+    theo_sp: dict[str, list[dict]] = {}
+    for r in matrix["rates"]:
+        theo_sp.setdefault(r["product_id"], []).append(r)
+
+    out = []
+    for pid, ky_han in theo_sp.items():
+        t = _pick_term(ky_han, months)
+        if not t:
+            continue
+        rate = t["rate_pct"]
+        tra_thang = _monthly_payment(amount, rate, months)
+        tong_tra = tra_thang * months
+        out.append({
+            "product_id": pid,
+            "product_name": t["product_name"],
+            "term_code": t["term_code"],
+            "term_label": t["term_label"],
+            "rate_pct": rate,
+            "monthly_payment": round(tra_thang),
+            "total_payment": round(tong_tra),
+            "total_interest": round(tong_tra - amount),
+        })
+    out.sort(key=lambda o: o["rate_pct"])
+    return {
+        "amount": amount, "months": months, "as_of": matrix["as_of"],
+        "count": len(out[:limit]), "options": out[:limit],
+    }
+
+
+@app.get("/products/savings-options", tags=["product"])
+def savings_options(
+    amount: int = Query(..., gt=0, description="Số tiền muốn gửi (VND)"),
+    months: int = Query(..., ge=1, le=120, description="Số tháng muốn gửi"),
+    limit: int = Query(5, ge=1, le=20),
+):
+    """Các gói tiết kiệm cho (số tiền, kỳ hạn), kèm tiền lãi dự kiến khi đáo hạn.
+
+    Tiết kiệm có kỳ hạn trả lãi đơn trên số ngày gửi thực tế, nên lãi = gốc ×
+    lãi suất năm × số tháng / 12. Số do service tính, LLM không tự nhân chia.
+    """
+    matrix = _rate_matrix("SAVINGS")
+    theo_sp: dict[str, list[dict]] = {}
+    for r in matrix["rates"]:
+        theo_sp.setdefault(r["product_id"], []).append(r)
+
+    out = []
+    for pid, ky_han in theo_sp.items():
+        # Gửi tiết kiệm thì lấy kỳ hạn dài nhất KHÔNG vượt thời gian khách gửi:
+        # gửi 6 tháng mà áp lãi kỳ 12 tháng là hứa mức lãi khách không được nhận.
+        vua_du = [t for t in ky_han if t["term_months"] <= months]
+        t = max(vua_du, key=lambda x: x["term_months"]) if vua_du else None
+        if not t:
+            continue
+        rate = t["rate_pct"]
+        lai = amount * rate / 100 * months / 12
+        out.append({
+            "product_id": pid,
+            "product_name": t["product_name"],
+            "term_code": t["term_code"],
+            "term_label": t["term_label"],
+            "rate_pct": rate,
+            "interest_amount": round(lai),
+            "maturity_amount": round(amount + lai),
+        })
+    out.sort(key=lambda o: o["rate_pct"], reverse=True)
+    return {
+        "amount": amount, "months": months, "as_of": matrix["as_of"],
+        "count": len(out[:limit]), "options": out[:limit],
+    }
+
+
+def _best_rate(product_id: str, months: int = 12) -> float:
+    """Lãi suất niêm yết của sản phẩm ở kỳ hạn gần nhất với `months`."""
+    row = query_one(
+        """
+        SELECT rate FROM v_interest_rate
+        WHERE product_id = %s
+        ORDER BY ABS(term_months - %s), term_months DESC
+        LIMIT 1
+        """,
+        (product_id, months),
+    )
+    return float(num(row["rate"])) if row else 0.0
 
 
 @app.get("/customers/{customer_id}/recommendations", tags=["product"])
@@ -976,11 +1126,11 @@ def generate_recommendations(customer_id: int, limit: int = Query(3, ge=1, le=5)
 
     out = []
     for p in products:
-        rate = float(num(p.get("product_interest"), 0)) if p.get("product_interest") else 0.0
-        if rate == 0.0:
-            # product_interest là chuỗi hiển thị (vd "5.2%/năm") → tách phần số
-            digits = "".join(ch for ch in str(p.get("product_interest") or "") if ch.isdigit() or ch == ".")
-            rate = float(digits) if digits.replace(".", "", 1).isdigit() else 4.5
+        # product_interest là MÃ biểu lãi ("RB.TK.LSCN.INT"), không phải con số:
+        # tách chữ số ra khỏi mã sẽ cho ra rác. Lãi thật nằm ở interest_rate_term.
+        rate = _best_rate(str(p["product_id"]), 12)
+        if rate <= 0:
+            continue  # sản phẩm chưa có biểu lãi thì không hứa lợi ích
         annual = round(surplus * 12 * rate / 100)
         row = execute_returning(
             """
@@ -1122,6 +1272,33 @@ AGENT_TOOLS = [
         "GET", "/products",
         params={"product_group": "SAVINGS|INVESTMENT|CARD|INSURANCE|LOAN", "status": "ACTIVE"},
         returns="Danh sách sản phẩm.",
+    ),
+    tool(
+        "get_product_rates",
+        "Biểu lãi suất hiện hành theo (sản phẩm × kỳ hạn). product_group=SAVINGS cho "
+        "gói tiết kiệm, =LOAN cho gói vay. Dùng khi khách hỏi 'lãi suất gửi/vay bao nhiêu'.",
+        "GET", "/products/rates",
+        params={"product_group": "SAVINGS|LOAN"},
+        returns="products[], terms[] và rates[] (mỗi dòng một cặp sản phẩm-kỳ hạn) kèm as_of.",
+    ),
+    tool(
+        "compare_loan_options",
+        "So sánh các gói VAY cho một số tiền và số tháng cụ thể, kèm tiền trả hàng "
+        "tháng, tổng lãi và tổng phải trả. Dùng khi khách hỏi 'muốn vay X trong Y "
+        "tháng thì gói nào'. Tiền trả hàng tháng do service tính theo dư nợ giảm "
+        "dần — chép nguyên, KHÔNG tự tính lại.",
+        "GET", "/products/loan-options",
+        params={"amount": "int, số tiền vay (VND)", "months": "int, số tháng", "limit": "int, mặc định 5"},
+        returns="options[] xếp theo lãi suất tăng dần, kèm monthly_payment và total_interest.",
+    ),
+    tool(
+        "compare_savings_options",
+        "So sánh các gói TIẾT KIỆM cho một số tiền và số tháng gửi, kèm tiền lãi dự "
+        "kiến khi đáo hạn. Dùng khi khách hỏi 'gửi X trong Y tháng thì gói nào lợi "
+        "nhất'. Số lãi do service tính — chép nguyên, KHÔNG tự tính lại.",
+        "GET", "/products/savings-options",
+        params={"amount": "int, số tiền gửi (VND)", "months": "int, số tháng", "limit": "int, mặc định 5"},
+        returns="options[] xếp theo lãi suất giảm dần, kèm interest_amount và maturity_amount.",
     ),
     tool(
         "generate_recommendations",

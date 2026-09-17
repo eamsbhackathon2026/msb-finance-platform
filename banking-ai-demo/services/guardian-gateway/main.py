@@ -71,8 +71,12 @@ from models import (
     PendingTransfer,
     ProtectionToggleRequest,
     QuarterlyReport,
+    LoanOption,
+    LoanOptions,
     RiskAssessment,
     RiskExplain,
+    SavingsOption,
+    SavingsOptions,
     SafetyCenter,
     ScamAlert,
     ScamShieldSignals,
@@ -644,6 +648,116 @@ def _surplus_visual(months: list[MonthSummary]) -> tuple[ChatTable | None, ChatC
     return table, chart
 
 
+# ---- Tư vấn gói sản phẩm: vay / gửi tiết kiệm --------------------------------
+
+_LOAN_RE = re.compile(r"\bvay\b|khoản vay|cho vay|trả góp|lãi vay|mua trả góp", re.IGNORECASE)
+_DEPOSIT_RE = re.compile(r"gửi tiết kiệm|gửi tiền|sổ tiết kiệm|gói tiết kiệm|đáo hạn", re.IGNORECASE)
+_RATE_RE = re.compile(r"lãi suất|biểu lãi|lãi bao nhiêu|kỳ hạn", re.IGNORECASE)
+# "5 năm", "12 tháng" — SỐ đứng TRƯỚC đơn vị, khác "tháng 6" là mốc thời gian.
+_TERM_RE = re.compile(r"(\d+)\s*(năm|tháng)", re.IGNORECASE)
+
+
+def _goal_months(question: str) -> int | None:
+    """Kỳ hạn khách nói, quy về số tháng: "5 năm" → 60, "12 tháng" → 12."""
+    m = _TERM_RE.search(question)
+    if not m:
+        return None
+    so = int(m.group(1))
+    thang = so * 12 if m.group(2).lower() == "năm" else so
+    return thang if 1 <= thang <= 360 else None
+
+
+def _tien(n: int) -> str:
+    """Tiền kiểu Việt Nam: 10476513 → "10.476.513 ₫"."""
+    return f"{n:,}".replace(",", ".") + " ₫"
+
+
+def _pct(x: float) -> str:
+    return f"{x:.1f}".replace(".", ",") + "%"
+
+
+def _loan_grid(raw: dict) -> ChatGrid:
+    """Bảng so sánh gói vay. Số trả góp lấy nguyên từ domain, gateway không tính lại."""
+    return ChatGrid(
+        title=f"Vay {_tien_gon(raw['amount'])} trong {raw['months']} tháng",
+        columns=[
+            ChatGridColumn(label="Gói vay"),
+            ChatGridColumn(label="Lãi suất", align="right"),
+            ChatGridColumn(label="Trả/tháng", align="right"),
+            ChatGridColumn(label="Tổng lãi", align="right"),
+        ],
+        rows=[
+            [o["product_name"], _pct(o["rate_pct"]), _tien(o["monthly_payment"]), _tien(o["total_interest"])]
+            for o in raw["options"]
+        ],
+    )
+
+
+def _savings_grid(raw: dict) -> ChatGrid:
+    return ChatGrid(
+        title=f"Gửi {_tien_gon(raw['amount'])} trong {raw['months']} tháng",
+        columns=[
+            ChatGridColumn(label="Gói tiết kiệm"),
+            ChatGridColumn(label="Lãi suất", align="right"),
+            ChatGridColumn(label="Lãi nhận", align="right"),
+            ChatGridColumn(label="Đáo hạn", align="right"),
+        ],
+        rows=[
+            [o["product_name"], _pct(o["rate_pct"]), _tien(o["interest_amount"]), _tien(o["maturity_amount"])]
+            for o in raw["options"]
+        ],
+    )
+
+
+def _rate_grid(raw: dict, title: str) -> ChatGrid | None:
+    """Biểu lãi suất: mỗi dòng một kỳ hạn, mỗi cột một sản phẩm."""
+    sp = raw.get("products") or []
+    terms = raw.get("terms") or []
+    if not sp or not terms:
+        return None
+    tra = {(r["product_id"], r["term_code"]): r["rate_pct"] for r in raw["rates"]}
+    return ChatGrid(
+        title=title,
+        columns=[ChatGridColumn(label="Kỳ hạn")]
+                + [ChatGridColumn(label=p["product_name"], align="right") for p in sp],
+        rows=[
+            [t["term_label"]] + [
+                _pct(tra[(p["product_id"], t["term_code"])]) if (p["product_id"], t["term_code"]) in tra else "—"
+                for p in sp
+            ]
+            for t in terms
+        ],
+    )
+
+
+async def _product_visual(question: str) -> ChatGrid | None:
+    """Bảng sản phẩm do GATEWAY dựng từ biểu lãi thật, hoặc None.
+
+    Cùng lý do với bảng chi tiêu: lãi suất và tiền trả góp là thứ khách mang đi
+    quyết định vay/gửi thật, nên không để LLM tự chép số. Có số tiền + kỳ hạn thì
+    ra bảng so sánh đã quy đổi; chỉ hỏi suông lãi suất thì ra biểu lãi.
+    """
+    vay = _LOAN_RE.search(question) is not None
+    gui = _DEPOSIT_RE.search(question) is not None
+    if not (vay or gui or _RATE_RE.search(question)):
+        return None
+    so_tien = _goal_amount(question)
+    so_thang = _goal_months(question)
+    if vay:
+        if so_tien and so_thang:
+            raw = await domain.loan_options(so_tien, so_thang)
+            return _loan_grid(raw) if raw and raw.get("options") else None
+        raw = await domain.product_rates("LOAN")
+        return _rate_grid(raw, "Lãi suất vay theo kỳ hạn") if raw and raw.get("rates") else None
+    if gui or _RATE_RE.search(question):
+        if so_tien and so_thang:
+            raw = await domain.savings_options(so_tien, so_thang)
+            return _savings_grid(raw) if raw and raw.get("options") else None
+        raw = await domain.product_rates("SAVINGS")
+        return _rate_grid(raw, "Lãi suất tiết kiệm theo kỳ hạn") if raw and raw.get("rates") else None
+    return None
+
+
 async def _spending_visual(question: str) -> tuple[ChatTable | None, ChatChart | None]:
     """Bảng + biểu đồ số liệu thật cho câu hỏi, hoặc (None, None).
 
@@ -700,6 +814,10 @@ async def copilot_chat(payload: ChatRequest) -> StreamingResponse:
     # có bảng hay không (và để middleware kịp đóng dấu X-Guardian-Data-Source
     # theo các lời gọi domain này trước khi trả StreamingResponse).
     table, data_chart = await _spending_visual(payload.message)
+    # Bảng sản phẩm (lãi vay / lãi gửi) cũng do gateway dựng từ biểu lãi thật.
+    # Chỉ xét khi câu hỏi không rơi vào bảng chi tiêu nào, để một câu không bao
+    # giờ kèm hai bảng nói về hai chuyện khác nhau.
+    grid_gw = await _product_visual(payload.message) if table is None else None
 
     # agent-service trả lời nếu đã cấu hình. Chưa cấu hình hoặc gọi hỏng thì rơi
     # về câu dẫn — nhưng KHÔNG bao giờ đọc kịch bản viết cứng (tháng 9) khi câu
@@ -713,18 +831,25 @@ async def copilot_chat(payload: ChatRequest) -> StreamingResponse:
         # Agent trả bảng markdown (đẹp ở admin-web); gỡ markdown cho FE văn bản
         # thuần — bảng số đã có bản riêng do gateway đính bên dưới.
         reply = _strip_markdown_for_plain(from_agent) or catalog.FALLBACK_REPLY
-        if table is None:
+        if table is None and grid_gw is None:
             # Câu này gateway không tự dựng được bảng chuẩn → chuyển thể bảng
             # markdown của agent. Nhờ nhánh này, câu hỏi tài chính nào agent kẻ
             # bảng được thì người dùng cũng thấy bảng, không cần thêm luật.
             grids = _parse_markdown_grids(from_agent)
     elif table is not None:
         reply = f"{table.title}:"
+    elif grid_gw is not None:
+        reply = f"{grid_gw.title}:"
     else:
         for pattern, text, attached in catalog.SCRIPTED_REPLIES:
             if re.search(pattern, payload.message, re.IGNORECASE):
                 reply, chart = text, attached
                 break
+
+    # Bảng sản phẩm của gateway thay cho mọi bảng agent tự kẻ: số lãi và tiền
+    # trả góp phải là số của biểu lãi, không phải số LLM chép lại.
+    if grid_gw is not None:
+        grids = [grid_gw]
 
     # Chart số thật ghi đè chart kịch bản tĩnh (nếu có).
     if data_chart is not None:
@@ -1377,6 +1502,47 @@ async def invest_rates() -> InvestRates:
     if not raw or not raw.get("rates"):
         return catalog.INVEST_RATES
     return mappers.map_invest_rates(raw)
+
+
+@app.get("/api/products/rates", response_model=InvestRates, tags=["copilot"],
+         summary="Biểu lãi suất theo nhóm sản phẩm (SAVINGS hoặc LOAN)")
+async def product_rates(group: str = "SAVINGS") -> InvestRates:
+    """Cùng bảng với /api/invest/rates nhưng chọn được nhóm — LOAN để tra lãi vay."""
+    raw = await domain.product_rates(group.upper())
+    if not raw or not raw.get("rates"):
+        if group.upper() == "SAVINGS":
+            return catalog.INVEST_RATES
+        raise HTTPException(503, "chưa lấy được biểu lãi suất nhóm này")
+    return mappers.map_invest_rates(raw)
+
+
+@app.get("/api/products/loan-options", response_model=LoanOptions, tags=["copilot"],
+         summary="Gói vay phù hợp cho một số tiền và kỳ hạn")
+async def loan_options(amount: int, months: int, limit: int = 5) -> LoanOptions:
+    """Tiền trả hàng tháng do transaction-service tính theo dư nợ giảm dần.
+
+    Gateway không tự tính lại: một con số trả góp sai trên màn hình là thứ khách
+    mang đi quyết định vay thật.
+    """
+    raw = await domain.loan_options(amount, months, limit)
+    if not raw or not raw.get("options"):
+        raise HTTPException(503, "chưa lấy được biểu lãi vay")
+    return LoanOptions(
+        amount=raw["amount"], months=raw["months"], as_of=str(raw.get("as_of") or ""),
+        options=[LoanOption(**o) for o in raw["options"]],
+    )
+
+
+@app.get("/api/products/savings-options", response_model=SavingsOptions, tags=["copilot"],
+         summary="Gói tiết kiệm phù hợp cho một số tiền và kỳ hạn gửi")
+async def savings_options(amount: int, months: int, limit: int = 5) -> SavingsOptions:
+    raw = await domain.savings_options(amount, months, limit)
+    if not raw or not raw.get("options"):
+        raise HTTPException(503, "chưa lấy được biểu lãi tiết kiệm")
+    return SavingsOptions(
+        amount=raw["amount"], months=raw["months"], as_of=str(raw.get("as_of") or ""),
+        options=[SavingsOption(**o) for o in raw["options"]],
+    )
 
 
 @app.get("/api/copilot/intro", response_model=CopilotIntro, tags=["copilot"],

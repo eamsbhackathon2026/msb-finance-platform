@@ -640,27 +640,31 @@ MONTHLY_REPORT = MonthlyReport(
 # Khớp đợt hiệu lực 2026-09-01 trong db/seed.sql — DB chết thì màn Biểu lãi suất
 # vẫn hiển thị đúng con số mà DB sẽ trả.
 
+# Biểu lãi suất tạm khi transaction-service chết — chụp từ chính dữ liệu thật
+# (bảng product × interest_rate × interest_rate_term) nên tên gói và mức lãi
+# đúng danh mục MSB, không phải sản phẩm bịa. Mã sản phẩm lõi là chuỗi.
 _RATE_PRODUCTS = [
-    RateProduct(id=1, name="Tiết kiệm Măng Non 6 tháng"),
-    RateProduct(id=2, name="Tiết kiệm Online 12 tháng"),
-    RateProduct(id=3, name="Tiết kiệm Linh hoạt không kỳ hạn"),
-    RateProduct(id=4, name="Tiết kiệm Tích lũy An nhàn"),
-    RateProduct(id=7, name="Tài khoản Thanh toán Chuẩn"),
+    RateProduct(id="RB.PW.TGTK", name="TIET KIEM RUT GOC TUNG PHAN"),
+    RateProduct(id="RB.TK.DKSL", name="TIET KIEM DINH KY SINH LOI"),
+    RateProduct(id="RB.TK.LSCN", name="TIET KIEM LAI SUAT CAO NHAT"),
+    RateProduct(id="RB.TK.MANGNON", name="TIET KIEM MANG NON"),
+    RateProduct(id="RB.TK.ONGVANG", name="TIET KIEM ONG VANG"),
+    RateProduct(id="RB.TK.UPFRONT", name="TIET KIEM TRA LAI NGAY"),
 ]
+# (mã kỳ hạn, số tháng, nhãn, [(mã sản phẩm, lãi %/năm)])
+_RATE_TABLE: list[tuple[str, float, str, list[tuple[str, float]]]] = [
+    ("1W", 0.25, "1 tuần", [("RB.PW.TGTK", 0.5), ("RB.TK.DKSL", 0.5), ("RB.TK.LSCN", 0.5), ("RB.TK.MANGNON", 0.5), ("RB.TK.ONGVANG", 0.5), ("RB.TK.UPFRONT", 0.5)]),
+    ("1M", 1.0, "1 tháng", [("RB.PW.TGTK", 3.4), ("RB.TK.DKSL", 3.7), ("RB.TK.LSCN", 4.1), ("RB.TK.MANGNON", 3.8), ("RB.TK.ONGVANG", 3.9), ("RB.TK.UPFRONT", 3.5)]),
+    ("3M", 3.0, "3 tháng", [("RB.PW.TGTK", 3.7), ("RB.TK.DKSL", 4.0), ("RB.TK.LSCN", 4.4), ("RB.TK.MANGNON", 4.1), ("RB.TK.ONGVANG", 4.2), ("RB.TK.UPFRONT", 3.8)]),
+    ("6M", 6.0, "6 tháng", [("RB.PW.TGTK", 4.5), ("RB.TK.DKSL", 4.8), ("RB.TK.LSCN", 5.2), ("RB.TK.MANGNON", 4.9), ("RB.TK.ONGVANG", 5.0), ("RB.TK.UPFRONT", 4.6)]),
+    ("12M", 12.0, "12 tháng", [("RB.PW.TGTK", 5.2), ("RB.TK.DKSL", 5.5), ("RB.TK.LSCN", 5.9), ("RB.TK.MANGNON", 5.6), ("RB.TK.ONGVANG", 5.7), ("RB.TK.UPFRONT", 5.3)]),
+    ("36M", 36.0, "36 tháng", [("RB.PW.TGTK", 5.5), ("RB.TK.DKSL", 5.8), ("RB.TK.LSCN", 6.2), ("RB.TK.MANGNON", 5.9), ("RB.TK.ONGVANG", 6.0), ("RB.TK.UPFRONT", 5.6)]),
+]
+_RATE_AS_OF = "2026-09-17"
 
-_RATE_TABLE: list[tuple[str, int, str, list[tuple[int, float]]]] = [
-    ("KKH", 0,  "Không kỳ hạn", [(3, 0.5), (7, 0.1)]),
-    ("T01", 1,  "1 tháng",      [(1, 3.6), (2, 3.9)]),
-    ("T03", 3,  "3 tháng",      [(1, 3.9), (2, 4.2), (4, 4.0)]),
-    ("T06", 6,  "6 tháng",      [(1, 5.2), (2, 5.5), (4, 5.3)]),
-    ("T09", 9,  "9 tháng",      [(1, 5.3), (2, 5.7), (4, 5.6)]),
-    ("T12", 12, "12 tháng",     [(1, 5.5), (2, 5.8), (4, 6.1)]),
-    ("T18", 18, "18 tháng",     [(1, 5.6), (2, 6.0), (4, 6.2)]),
-    ("T24", 24, "24 tháng",     [(1, 5.6), (2, 6.1), (4, 6.3)]),
-]
 
 INVEST_RATES = InvestRates(
-    as_of="2026-09-01",
+    as_of=_RATE_AS_OF,
     products=_RATE_PRODUCTS,
     rows=[
         RateRow(

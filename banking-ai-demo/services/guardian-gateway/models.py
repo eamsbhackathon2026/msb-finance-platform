@@ -312,6 +312,9 @@ class ChatGrid(Contract):
     KHÔNG dùng thay ChatTable ở những câu gateway tự dựng được bảng chuẩn —
     chỗ nào có ChatTable thì ưu tiên ChatTable.
     """
+    # Gateway tự dựng bảng sản phẩm thì có tiêu đề; bảng bóc từ markdown agent
+    # thì không (phần chữ ngay trên đã giới thiệu rồi).
+    title: str | None = None
     columns: list[ChatGridColumn]
     rows: list[list[str]]
 
@@ -567,24 +570,61 @@ class MonthlyReport(Contract):
 # ---- Màn Biểu lãi suất (Khám phá sản phẩm → Biểu lãi suất) --------------------
 
 class RateTerm(Contract):
-    code: str        # KKH | T01 | T03 ... — khớp interest_rate_term.term_code
-    months: int      # 0 = không kỳ hạn; FE dùng để xếp trục kỳ hạn
+    code: str        # KKH | 1W | 1M | 3M ... — khớp interest_rate_term.term_code
+    # float vì có kỳ hạn ngắn hơn tháng ("1 tuần" = 0.25); ép int sẽ biến 1 tuần
+    # thành 0 và đụng với "không kỳ hạn".
+    months: float
     label: str
 
 
 class RateProduct(Contract):
-    id: int
+    # Mã sản phẩm lõi là chuỗi ("RB.TK.LSCN"), không phải số.
+    id: str
     name: str
 
 
 class RateCell(Contract):
-    product_id: int
+    product_id: str
     rate_pct: float  # %/năm — đợt hiệu lực mới nhất của cặp (sản phẩm, kỳ hạn)
 
 
 class RateRow(Contract):
     term: RateTerm
     rates: list[RateCell]
+
+
+class LoanOption(Contract):
+    """Một gói vay đã quy ra tiền trả hàng tháng cho đúng khoản khách hỏi."""
+    product_id: str
+    product_name: str
+    term_label: str
+    rate_pct: float
+    monthly_payment: int          # trả góp đều, dư nợ giảm dần — service tính
+    total_interest: int
+    total_payment: int
+
+
+class LoanOptions(Contract):
+    amount: int
+    months: int
+    as_of: str
+    options: list[LoanOption]     # xếp theo lãi suất tăng dần
+
+
+class SavingsOption(Contract):
+    product_id: str
+    product_name: str
+    term_label: str
+    rate_pct: float
+    interest_amount: int          # lãi khi đáo hạn — service tính
+    maturity_amount: int
+
+
+class SavingsOptions(Contract):
+    amount: int
+    months: int
+    as_of: str
+    options: list[SavingsOption]  # xếp theo lãi suất giảm dần
 
 
 class InvestRates(Contract):

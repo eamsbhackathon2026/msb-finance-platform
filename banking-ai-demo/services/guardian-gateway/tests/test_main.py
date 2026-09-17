@@ -256,6 +256,9 @@ def test_openapi_phuc_vu_dung_cac_endpoint_fe_goi():
         "/api/copilot/month",
         "/api/copilot/chat",
         "/api/invest/rates",
+        "/api/products/rates",
+        "/api/products/loan-options",
+        "/api/products/savings-options",
         "/api/transfer/pending",
         "/api/transfer/action",
         "/api/transfer/beneficiaries",
@@ -279,23 +282,27 @@ def test_openapi_phuc_vu_dung_cac_endpoint_fe_goi():
 
 
 def test_invest_rates_tra_bieu_lai_suat_theo_ky_han():
-    """Biểu lãi suất: nhóm theo kỳ hạn, xếp tăng dần, con số khớp đợt 2026-09-01.
+    """Biểu lãi suất: nhóm theo kỳ hạn, xếp tăng dần, khớp danh mục MSB thật.
 
-    conftest tắt DOMAIN_ENABLED nên đây là dữ liệu catalog — catalog được chép
-    đúng từ db/seed.sql, vì vậy test này cũng là chốt chống lệch giữa fallback
-    và dữ liệu thật."""
+    conftest tắt DOMAIN_ENABLED nên đây là dữ liệu catalog — catalog được chụp
+    từ chính bảng product × interest_rate × interest_rate_term, vì vậy test này
+    cũng là chốt chống lệch giữa fallback và dữ liệu thật."""
     body = client.get("/api/invest/rates").json()
-    assert body["asOf"] == "2026-09-01"
-    assert {p["id"] for p in body["products"]} == {1, 2, 3, 4, 7}
+    assert body["asOf"] == "2026-09-17"
+    # Mã sản phẩm lõi là CHUỖI ("RB.TK.LSCN"), không phải số tự tăng.
+    assert {p["id"] for p in body["products"]} == {
+        "RB.PW.TGTK", "RB.TK.DKSL", "RB.TK.LSCN",
+        "RB.TK.MANGNON", "RB.TK.ONGVANG", "RB.TK.UPFRONT",
+    }
 
     months = [r["term"]["months"] for r in body["rows"]]
     assert months == sorted(months)
+    # Kỳ hạn ngắn hơn tháng phải giữ được phần thập phân, không bị ép về 0.
+    assert 0.25 in months
 
     rows = {r["term"]["code"]: r for r in body["rows"]}
-    t12 = {c["productId"]: c["ratePct"] for c in rows["T12"]["rates"]}
-    assert t12 == {1: 5.5, 2: 5.8, 4: 6.1}
-    kkh = {c["productId"]: c["ratePct"] for c in rows["KKH"]["rates"]}
-    assert kkh == {3: 0.5, 7: 0.1}
+    t12 = {c["productId"]: c["ratePct"] for c in rows["12M"]["rates"]}
+    assert t12["RB.TK.LSCN"] == 5.9 and t12["RB.PW.TGTK"] == 5.2
 
 
 # ---- Các endpoint gộp theo màn hình ------------------------------------------
@@ -1036,3 +1043,80 @@ def test_so_sanh_cac_nhom_trong_thang_khong_ra_bang_so_thang():
     assert table is not None
     assert table["rowHeader"] == "Nhóm", "phải là bảng theo nhóm, không phải theo tháng"
     assert "so sánh" not in table["title"].lower()
+
+
+# ---- Tư vấn gói sản phẩm: vay / gửi tiết kiệm --------------------------------
+
+@pytest.mark.parametrize("cau, mong_doi", [
+    ("vay 500 triệu trong 5 năm", 60),
+    ("gửi tiết kiệm 100 triệu 12 tháng", 12),
+    ("vay mua nhà 2 tỷ kỳ hạn 20 năm", 240),
+    ("chi tiêu tháng 6 thế nào", None),      # "tháng 6" là mốc, không phải kỳ hạn
+    ("vay 300 triệu", None),                  # chưa nói kỳ hạn
+])
+def test_doc_ky_han(cau, mong_doi):
+    assert main._goal_months(cau) == mong_doi
+
+
+def test_ky_han_qua_dai_bi_bo_qua():
+    assert main._goal_months("gửi 50 năm") is None  # > 360 tháng
+
+
+_LOAN_RAW = {
+    "amount": 500_000_000, "months": 60, "as_of": "2026-09-17",
+    "options": [
+        {"product_id": "RLNNNGHIEP", "product_name": "RB-Cho vay nong nghiep",
+         "term_code": "5Y", "term_label": "5 năm", "rate_pct": 9.4,
+         "monthly_payment": 10_476_513, "total_payment": 628_590_772, "total_interest": 128_590_772},
+        {"product_id": "RLNOTO", "product_name": "RB-Cho vay mua o to",
+         "term_code": "5Y", "term_label": "5 năm", "rate_pct": 9.7,
+         "monthly_payment": 10_549_867, "total_payment": 632_992_010, "total_interest": 132_992_010},
+    ],
+}
+
+
+def test_bang_goi_vay_giu_nguyen_so_cua_domain():
+    g = main._loan_grid(_LOAN_RAW)
+    assert g.title == "Vay 500 triệu trong 60 tháng"
+    assert [c.label for c in g.columns] == ["Gói vay", "Lãi suất", "Trả/tháng", "Tổng lãi"]
+    assert [c.align for c in g.columns] == ["left", "right", "right", "right"]
+    # Lãi suất phải giữ phần thập phân: 9,4% khác hẳn 9%.
+    assert g.rows[0] == ["RB-Cho vay nong nghiep", "9,4%", "10.476.513 ₫", "128.590.772 ₫"]
+
+
+def test_bang_goi_tiet_kiem():
+    raw = {"amount": 100_000_000, "months": 12, "as_of": "2026-09-17", "options": [
+        {"product_id": "RB.TK.LSCN", "product_name": "TIET KIEM LAI SUAT CAO NHAT",
+         "term_code": "12M", "term_label": "12 tháng", "rate_pct": 5.9,
+         "interest_amount": 5_900_000, "maturity_amount": 105_900_000}]}
+    g = main._savings_grid(raw)
+    assert g.title == "Gửi 100 triệu trong 12 tháng"
+    assert g.rows[0] == ["TIET KIEM LAI SUAT CAO NHAT", "5,9%", "5.900.000 ₫", "105.900.000 ₫"]
+
+
+def test_bieu_lai_suat_thanh_bang_ky_han_x_san_pham():
+    raw = {
+        "products": [{"product_id": "A", "product_name": "Gói A"},
+                     {"product_id": "B", "product_name": "Gói B"}],
+        "terms": [{"term_code": "6M", "term_label": "6 tháng", "term_months": 6.0, "seq": 1},
+                  {"term_code": "12M", "term_label": "12 tháng", "term_months": 12.0, "seq": 2}],
+        "rates": [
+            {"product_id": "A", "term_code": "6M", "rate_pct": 4.5},
+            {"product_id": "B", "term_code": "6M", "rate_pct": 5.0},
+            {"product_id": "A", "term_code": "12M", "rate_pct": 5.2},
+        ],
+    }
+    g = main._rate_grid(raw, "Lãi suất tiết kiệm theo kỳ hạn")
+    assert [c.label for c in g.columns] == ["Kỳ hạn", "Gói A", "Gói B"]
+    assert g.rows[0] == ["6 tháng", "4,5%", "5,0%"]
+    # Ô thiếu phải là "—", không được để trống hay tụt cột.
+    assert g.rows[1] == ["12 tháng", "5,2%", "—"]
+
+
+def test_bieu_lai_rong_thi_khong_dung_bang():
+    assert main._rate_grid({"products": [], "terms": [], "rates": []}, "x") is None
+
+
+def test_cau_hoi_khong_lien_quan_san_pham_thi_khong_co_bang():
+    import asyncio
+    assert asyncio.run(main._product_visual("chi tiêu tháng này thế nào")) is None
