@@ -798,3 +798,15 @@ class InvestRates(Contract):
     as_of: str                    # Ngày hiệu lực mới nhất trong biểu — hiển thị "Áp dụng từ ..."
     products: list[RateProduct]
     rows: list[RateRow]           # Mỗi dòng một kỳ hạn, để FE vẽ bảng + biểu đồ so sánh cùng kỳ hạn
+
+
+# ---- Màn Financial Copilot: thông báo dưới nhóm chi tiêu ----------------------
+
+class CopilotNotification(Contract):
+    id: str
+    # saving = sổ tiết kiệm đến hạn (CTA mở biểu lãi suất chọn sản phẩm mới)
+    # card   = sao kê thẻ chưa thanh toán   ·   loan = đến kỳ trả nợ khoản vay
+    kind: Literal["saving", "card", "loan"]
+    title: str
+    body: str
+    cta_label: str | None = None

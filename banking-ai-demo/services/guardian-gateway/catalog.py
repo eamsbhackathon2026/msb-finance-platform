@@ -17,6 +17,7 @@ from models import (
     Beneficiary,
     BudgetSummary,
     CaseTimelineStep,
+    CopilotNotification,
     InvestRates,
     RateCell,
     RateProduct,
@@ -786,3 +787,42 @@ OPS_AUDIT = OpsAuditLog(
                    latency_ms=760, decision_id=None),
     ],
 )
+
+
+# ============ THÔNG BÁO DƯỚI NHÓM CHI TIÊU (Financial Copilot) ============
+# Sổ tiết kiệm khớp deposit 7009 của khách demo (770tr, product 2); lãi 6,3%/năm
+# khớp biểu lãi suất hiện hành (Tích lũy An nhàn, 24 tháng). Thẻ và khoản vay là
+# nội dung demo — DB chưa có sao kê thẻ/lịch trả nợ để tính thật.
+
+COPILOT_NOTIFICATIONS = [
+    CopilotNotification(
+        id="noti-saving",
+        kind="saving",
+        title="Sổ tiết kiệm 770.000.000 ₫ đến hạn hôm nay",
+        body=(
+            "Sổ Tiết kiệm Online 12 tháng tất toán trong hôm nay. Chọn ngay sản phẩm "
+            "tái gửi tối ưu — lãi suất hiện tới 6,3%/năm cho kỳ hạn dài."
+        ),
+        cta_label="Chọn sản phẩm tiết kiệm tối ưu",
+    ),
+    CopilotNotification(
+        id="noti-card",
+        kind="card",
+        title="Sao kê thẻ tín dụng chưa thanh toán",
+        body=(
+            "Thẻ MSB Visa Platinum còn 12.460.000 ₫ chưa thanh toán, hạn chót 25/09. "
+            "Thanh toán đúng hạn để không phát sinh lãi và phí phạt."
+        ),
+        cta_label="Thanh toán ngay",
+    ),
+    CopilotNotification(
+        id="noti-loan",
+        kind="loan",
+        title="Đến kỳ trả nợ khoản vay",
+        body=(
+            "Kỳ trả nợ tháng 9 của khoản vay tiêu dùng đến hạn ngày 20/09: 5.200.000 ₫ "
+            "(gốc + lãi). Đảm bảo tài khoản đủ số dư để hệ thống tự trích nợ."
+        ),
+        cta_label="Xem khoản vay",
+    ),
+]

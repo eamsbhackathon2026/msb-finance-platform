@@ -56,6 +56,7 @@ from models import (
     ChatTable,
     ChatTableRow,
     CopilotIntro,
+    CopilotNotification,
     CopilotOverview,
     Customer,
     DecisionRequest,
@@ -2151,6 +2152,28 @@ async def savings_options(amount: int, months: int, limit: int = 5) -> SavingsOp
     )
 
 
+@app.get("/api/copilot/notifications", response_model=list[CopilotNotification], tags=["copilot"],
+         response_model_exclude_none=True,
+         summary="Nhắc việc tài chính dưới nhóm chi tiêu: sổ đến hạn, sao kê thẻ, kỳ trả nợ")
+async def copilot_notifications() -> list[CopilotNotification]:
+    """Ba nhắc việc trên màn Financial Copilot, ngay dưới nhóm chi tiêu.
+
+    Sổ tiết kiệm lấy SỐ THẬT từ portfolio của khách trong phiên khi domain sống
+    (số tiền của sổ gần đáo hạn nhất); thẻ và khoản vay giữ nội dung demo trong
+    catalog vì DB chưa có sao kê thẻ/lịch trả nợ để tính. CTA của mục sổ tiết
+    kiệm dẫn sang màn Biểu lãi suất để khách chọn sản phẩm tái gửi tối ưu."""
+    items = [n.model_copy() for n in catalog.COPILOT_NOTIFICATIONS]
+    pf = await domain.portfolio(domain.current_customer_id())
+    deposits = (pf or {}).get("deposits") or []
+    if deposits:
+        nearest = min(deposits, key=lambda d: str(d.get("maturity_date") or "9999-12-31"))
+        amount = int(float(nearest.get("amount") or 0))
+        if amount > 0:
+            vnd = f"{amount:,.0f}".replace(",", ".") + " ₫"
+            items[0].title = f"Sổ tiết kiệm {vnd} đến hạn hôm nay"
+    return items
+
+
 @app.get("/api/copilot/intro", response_model=CopilotIntro, tags=["copilot"],
          summary="Lời chào, câu hỏi gợi ý và nhãn tháng của màn Copilot")
 async def copilot_intro() -> CopilotIntro:
@@ -2186,6 +2209,7 @@ async def info() -> dict:
             "GET /api/session/customer",
             "GET /api/copilot/overview",
             "GET /api/copilot/intro",
+            "GET /api/copilot/notifications",
             "GET /api/copilot/quarters",
             "GET /api/copilot/months",
             "GET /api/copilot/month",

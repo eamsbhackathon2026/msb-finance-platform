@@ -240,7 +240,7 @@ def test_info_phan_anh_dung_cau_hinh_domain():
     body = client.get("/info").json()
     # conftest tắt DOMAIN_ENABLED nên /info phải báo đúng như vậy.
     assert body["integrated_with_domain_services"] is False
-    assert len(body["endpoints"]) == 35
+    assert len(body["endpoints"]) == 36
 
 
 def test_openapi_phuc_vu_dung_cac_endpoint_fe_goi():
@@ -251,6 +251,7 @@ def test_openapi_phuc_vu_dung_cac_endpoint_fe_goi():
         "/api/session/customer",
         "/api/copilot/overview",
         "/api/copilot/intro",
+        "/api/copilot/notifications",
         "/api/copilot/quarters",
         "/api/copilot/months",
         "/api/copilot/month",
@@ -287,6 +288,19 @@ def test_openapi_phuc_vu_dung_cac_endpoint_fe_goi():
         "/api/ops/alerts/{alert_id}/timeline",
         "/api/ops/alerts/{alert_id}/decision",
     }
+
+
+def test_copilot_notifications_du_3_nhac_viec():
+    """Màn Copilot có đúng 3 nhắc việc dưới nhóm chi tiêu, theo thứ tự
+    sổ đến hạn → sao kê thẻ → kỳ trả nợ; mục sổ tiết kiệm phải có CTA
+    (FE dẫn sang màn Biểu lãi suất để chọn sản phẩm tái gửi)."""
+    r = client.get("/api/copilot/notifications")
+    assert r.status_code == 200
+    body = r.json()
+    assert [n["kind"] for n in body] == ["saving", "card", "loan"]
+    for n in body:
+        assert {"id", "kind", "title", "body"} <= set(n)
+    assert body[0]["ctaLabel"]
 
 
 def test_invest_rates_tra_bieu_lai_suat_theo_ky_han():
