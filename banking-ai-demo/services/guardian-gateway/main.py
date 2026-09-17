@@ -37,7 +37,7 @@ import re
 from datetime import datetime, timedelta, timezone
 from typing import AsyncIterator
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 
 import catalog
@@ -156,6 +156,10 @@ async def stamp_data_source(request: Request, call_next):
     thật' với 'gateway đã lặng lẽ rơi về dữ liệu tạm' ngoài việc đọc log.
     """
     domain.reset_request_state()
+    # Khách của request này lấy từ cookie đăng nhập — mỗi trình duyệt một khách,
+    # không còn cảnh người này đăng nhập làm đổi dữ liệu của người kia.
+    cid = request.cookies.get("guardian_cid")
+    domain.set_request_customer(int(cid) if cid and cid.isdigit() else None)
     response = await call_next(request)
     response.headers["X-Guardian-Data-Source"] = domain.data_source()
     response.headers["X-Guardian-Service"] = SERVICE_NAME
@@ -1181,7 +1185,7 @@ async def home_content() -> HomeContent:
 @app.post("/api/auth/login", response_model=LoginResponse, tags=["session"],
           response_model_exclude_none=True,
           summary="Đăng nhập khách hàng — xác thực thật qua identity-service")
-async def auth_login(payload: LoginRequest) -> LoginResponse:
+async def auth_login(payload: LoginRequest, response: Response) -> LoginResponse:
     """Xác thực thật tên đăng nhập + mật khẩu.
 
     Trước đây FE chỉ gọi `login()` phía client rồi chuyển màn — không có xác
@@ -1202,15 +1206,21 @@ async def auth_login(payload: LoginRequest) -> LoginResponse:
         domain.mark_degraded()
         # identity chết → không biết khách nào: về khách demo để luồng không gãy.
         domain.set_session_customer(None)
+        response.delete_cookie("guardian_cid")
         return LoginResponse(authenticated=True, source="degraded", user=catalog.DEMO_LOGIN_USER)
 
     if result.get("authenticated"):
         user = result.get("user") or {}
-        # Ghi nhớ khách của PHIÊN: từ đây /api/session/customer, /api/home,
-        # /api/transfer/beneficiaries... đọc đúng dữ liệu của người vừa đăng
-        # nhập (vd kh100001 → BEN của 100001), không còn neo cứng khách demo.
+        # Khách của phiên gắn vào COOKIE theo từng trình duyệt — trước đây chỉ
+        # nhớ vào biến global "ai đăng nhập cuối thắng", nên hai người test song
+        # song làm danh bạ/số dư của nhau nhảy qua lại. Vẫn giữ global làm
+        # fallback cho session cũ chưa có cookie.
         cid = user.get("customer_id")
         domain.set_session_customer(int(cid) if cid else None)
+        if cid:
+            response.set_cookie("guardian_cid", str(int(cid)), max_age=86_400, httponly=True, samesite="lax")
+        else:
+            response.delete_cookie("guardian_cid")
         return LoginResponse(authenticated=True, source="domain", user=user)
 
     return LoginResponse(authenticated=False, source="domain", reason=result.get("reason", "invalid_credentials"))

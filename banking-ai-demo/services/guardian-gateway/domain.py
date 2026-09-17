@@ -67,8 +67,20 @@ def set_session_customer(customer_id: int | None) -> None:
     _session_customer_id = customer_id
 
 
+# Khách của TỪNG REQUEST — middleware đọc cookie guardian_cid rồi đặt vào đây.
+# Biến global ở trên là "ai đăng nhập cuối thắng" cho CẢ process: nhiều người
+# test song song làm danh bạ/số dư nhảy qua lại giữa các khách. Cookie gắn với
+# từng trình duyệt nên mỗi người thấy đúng dữ liệu của mình; thiếu cookie mới
+# rơi về global rồi tới khách demo.
+_request_customer: ContextVar[int | None] = ContextVar("guardian_request_customer", default=None)
+
+
+def set_request_customer(customer_id: int | None) -> None:
+    _request_customer.set(customer_id)
+
+
 def current_customer_id() -> int:
-    return _session_customer_id or DEMO_CUSTOMER_ID
+    return _request_customer.get() or _session_customer_id or DEMO_CUSTOMER_ID
 
 # Trạng thái của request hiện tại.
 #
