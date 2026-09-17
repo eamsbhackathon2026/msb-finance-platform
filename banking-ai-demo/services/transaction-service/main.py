@@ -27,6 +27,7 @@ from common import (
     agent_tools_payload,
     db_health,
     execute_returning,
+    install_db_error_handlers,
     mask_free_text,
     now_vn,
     num,
@@ -93,6 +94,9 @@ app = FastAPI(
     redoc_url="/redoc",
 )
 setup_docs(app, SERVICE_NAME)
+# Lỗi Postgres do id sai của người gọi phải ra 404/409/422 chứ không phải
+# 500, vì trợ lý đọc thẳng thân phản hồi này để quyết bước tiếp theo.
+install_db_error_handlers(app)
 
 
 # ---------------------------------------------------------------------------
@@ -158,6 +162,40 @@ def _tx_payload(row: dict) -> dict:
         "status": row.get("status"),
         "risk_decision_id": row.get("risk_decision_id"),
     }
+
+
+# Khóa ngoại là thứ chặn cuối cùng; để nó vỡ thì thông điệp trả về là của
+# Postgres chứ không phải của nghiệp vụ. Tra trước và nêu đúng thực thể thì trợ
+# lý đọc là biết phải đi tra lại id nào. Cột cho phép NULL chỉ kiểm tra khi có
+# giá trị — không được biến khóa ngoại tùy chọn thành bắt buộc.
+def _require_customer(customer_id: int) -> None:
+    if query_one("SELECT 1 AS x FROM customer WHERE customer_id = %s", (customer_id,)) is None:
+        raise HTTPException(404, f"customer {customer_id} không tồn tại")
+
+
+def _require_account(account_id: int) -> None:
+    if query_one("SELECT 1 AS x FROM account WHERE account_id = %s", (account_id,)) is None:
+        raise HTTPException(404, f"account {account_id} không tồn tại")
+
+
+def _require_beneficiary(beneficiary_id: int | None) -> None:
+    if beneficiary_id is None:
+        return
+    row = query_one(
+        "SELECT 1 AS x FROM beneficiary WHERE beneficiary_id = %s", (beneficiary_id,)
+    )
+    if row is None:
+        raise HTTPException(404, f"beneficiary {beneficiary_id} không tồn tại")
+
+
+def _require_decision(decision_id: str | None) -> None:
+    if decision_id is None:
+        return
+    row = query_one(
+        "SELECT 1 AS x FROM risk_decision WHERE decision_id = %s::uuid", (decision_id,)
+    )
+    if row is None:
+        raise HTTPException(404, f"decision {decision_id} không tồn tại")
 
 
 def _require_transactions(customer_id: int) -> None:
@@ -733,6 +771,11 @@ def baseline_metrics(customer_id: int, window_days: int = Query(90, ge=30, le=36
 @app.post("/transactions", tags=["transaction"], status_code=201)
 def create_transaction(req: TransactionCreate):
     """Ghi nhận giao dịch. Guardian tạo bản ghi PENDING khi quyết định khóa tạm."""
+    _require_customer(req.customer_id)
+    _require_account(req.account_id)
+    _require_beneficiary(req.beneficiary_id)
+    _require_decision(req.risk_decision_id)
+
     tx_id = req.transaction_id
     if tx_id is None:
         row = query_one("SELECT COALESCE(max(transaction_id), 0) + 1 AS nid FROM transaction_history")
@@ -766,6 +809,7 @@ def create_transaction(req: TransactionCreate):
 @app.patch("/transactions/{transaction_id}/status", tags=["transaction"])
 def update_transaction_status(transaction_id: int, req: TransactionStatusUpdate):
     """Guardian dùng để chuyển giao dịch sang PENDING (khóa tạm 24h) hoặc CANCELLED."""
+    _require_decision(req.risk_decision_id)
     row = execute_returning(
         """
         UPDATE transaction_history
@@ -804,6 +848,10 @@ def generate_insights(
 ):
     """Tính và cache insight cho một kỳ. Số liệu do service tính; LLM chỉ viết
     `insight_text` sau đó, không được tự nghĩ ra con số."""
+    # Không có cổng này thì khách không tồn tại sẽ nhận "không có chi tiêu kỳ X"
+    # — nghe như nghiệp vụ bình thường, nên trợ lý đi tiếp thay vì tra lại id.
+    _require_customer(customer_id)
+
     if period is None:
         first = now_vn().replace(day=1)
         period = (first - timedelta(days=1)).strftime("%Y%m")
@@ -1100,6 +1148,10 @@ def generate_recommendations(customer_id: int, limit: int = Query(3, ge=1, le=5)
     phạm vi demo. `estimated_benefit` do service tính từ lãi suất, LLM chỉ được
     diễn giải lại, không được tự đưa ra con số.
     """
+    # Khách không tồn tại mà không chặn ở đây thì kết cục là "Dòng tiền chưa dư",
+    # một câu trả lời nghe hợp lý nhưng sai nguyên nhân.
+    _require_customer(customer_id)
+
     forecast = cashflow_forecast(customer_id)
     surplus = max(0, forecast["avg_monthly_net"])
     if surplus <= 0:

@@ -34,6 +34,7 @@ from common import (
     agent_tools_payload,
     db_health,
     execute_returning,
+    install_db_error_handlers,
     mask_account,
     mask_free_text,
     now_vn,
@@ -116,6 +117,9 @@ app = FastAPI(
     redoc_url="/redoc",
 )
 setup_docs(app, SERVICE_NAME)
+# Lỗi Postgres do id sai của người gọi phải ra 404/409/422 chứ không phải
+# 500, vì trợ lý đọc thẳng thân phản hồi này để quyết bước tiếp theo.
+install_db_error_handlers(app)
 
 
 # ---------------------------------------------------------------------------
@@ -462,6 +466,20 @@ def agent_tools():
 # ---------------------------------------------------------------------------
 # Vòng đời quyết định
 # ---------------------------------------------------------------------------
+def _require_transaction(transaction_id: int | None) -> None:
+    """404 khi giao dịch không tồn tại.
+
+    `risk_decision.transaction_id` là khóa ngoại cho phép NULL, nên chỉ kiểm tra
+    khi người gọi có truyền — không được biến cột tùy chọn thành bắt buộc."""
+    if transaction_id is None:
+        return
+    row = query_one(
+        "SELECT 1 AS x FROM transaction_history WHERE transaction_id = %s", (transaction_id,)
+    )
+    if row is None:
+        raise HTTPException(404, f"transaction {transaction_id} không tồn tại")
+
+
 def _require_customer_and_account(customer_id: int, account_id: int) -> None:
     """404 khi khách hoặc tài khoản không tồn tại.
 
@@ -704,6 +722,7 @@ def take_action(req: ActionRequest):
     )
     if existing is None:
         raise HTTPException(404, f"decision {req.decision_id} không tồn tại")
+    _require_transaction(req.transaction_id)
 
     outcome = req.outcome or {
         "cancel": "prevented",

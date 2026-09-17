@@ -31,6 +31,7 @@ from common import (
     db_health,
     execute,
     execute_returning,
+    install_db_error_handlers,
     mask_free_text,
     mask_phone,
     now_vn,
@@ -97,6 +98,9 @@ app = FastAPI(
     redoc_url="/redoc",
 )
 setup_docs(app, SERVICE_NAME)
+# Lỗi Postgres do id sai của người gọi phải ra 404/409/422 chứ không phải
+# 500, vì trợ lý đọc thẳng thân phản hồi này để quyết bước tiếp theo.
+install_db_error_handlers(app)
 
 
 # ---------------------------------------------------------------------------
@@ -219,6 +223,40 @@ def agent_tools():
 
 
 # ---------------------------------------------------------------------------
+# Cổng kiểm tra tồn tại
+# ---------------------------------------------------------------------------
+# Ghi thẳng rồi để khóa ngoại vỡ thì thông điệp trả về là của Postgres chứ không
+# phải của nghiệp vụ. Tra trước và nêu đúng thực thể thì trợ lý đọc là biết phải
+# đi tra lại id nào. Khóa ngoại cho phép NULL chỉ kiểm tra khi có giá trị — cột
+# tùy chọn không được biến thành bắt buộc.
+def _require_customer(customer_id: int | None) -> None:
+    if customer_id is None:
+        return
+    if query_one("SELECT 1 AS x FROM customer WHERE customer_id = %s", (customer_id,)) is None:
+        raise HTTPException(404, f"customer {customer_id} không tồn tại")
+
+
+def _require_decision(decision_id: str | None) -> None:
+    if decision_id is None:
+        return
+    row = query_one(
+        "SELECT 1 AS x FROM risk_decision WHERE decision_id = %s::uuid", (decision_id,)
+    )
+    if row is None:
+        raise HTTPException(404, f"decision {decision_id} không tồn tại")
+
+
+def _require_scenario(scenario_id: str | None) -> None:
+    if scenario_id is None:
+        return
+    row = query_one(
+        "SELECT 1 AS x FROM scam_scenario WHERE scenario_id = %s", (scenario_id,)
+    )
+    if row is None:
+        raise HTTPException(404, f"kịch bản {scenario_id} không tồn tại")
+
+
+# ---------------------------------------------------------------------------
 # Action (hợp đồng cũ, nay ghi xuống DB)
 # ---------------------------------------------------------------------------
 @app.post("/actions", tags=["action"], status_code=201)
@@ -293,6 +331,10 @@ def create_case(req: CaseCreateRequest):
         existing["decision_id"] = str(existing["decision_id"])
         existing["already_existed"] = True
         return existing
+
+    _require_decision(req.decision_id)
+    _require_customer(req.customer_id)
+    _require_scenario(req.scenario_id)
 
     profile = _peer_get(f"{CUSTOMER_PROFILE_URL}/customers/{req.customer_id}")
     callback = (profile or {}).get("phone_masked")
@@ -384,6 +426,8 @@ def update_case(case_id: str, req: CaseUpdateRequest):
 # ---------------------------------------------------------------------------
 @app.post("/feedback", tags=["feedback"], status_code=201)
 def create_feedback(req: FeedbackRequest):
+    _require_decision(req.decision_id)
+    _require_customer(req.customer_id)
     row = execute_returning(
         """
         INSERT INTO feedback (decision_id, customer_id, label, source, note)
@@ -491,6 +535,8 @@ def apply_feedback(limit: int = Query(50, ge=1, le=200)):
 # ---------------------------------------------------------------------------
 @app.post("/notifications", tags=["notification"], status_code=201)
 def create_notification(req: NotificationRequest):
+    _require_customer(req.customer_id)
+    _require_decision(req.decision_id)
     row = execute_returning(
         """
         INSERT INTO notification (customer_id, decision_id, channel, template_key, payload)
@@ -543,6 +589,8 @@ def update_notification(notification_id: int, req: NotificationStatusRequest):
 def create_llm_trace(req: LlmTraceRequest):
     """Ghi một lượt gọi LLM. `prompt_masked` phải đã mask PII trước khi gửi tới đây —
     service không thể biết chuỗi nào là tên thật nên không mask hộ được."""
+    _require_decision(req.decision_id)
+    _require_customer(req.customer_id)
     row = execute_returning(
         """
         INSERT INTO llm_trace

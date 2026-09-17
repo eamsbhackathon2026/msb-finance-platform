@@ -27,8 +27,37 @@ chỉ và ngày sinh bị loại khỏi mọi response; chỉ bản đã che đ�
 thử `is_fraud` và `fraud_case_id` cũng bị loại. Response an toàn để đưa thẳng vào
 prompt LLM.
 
+**Lỗi phải nói được điều gì đó cho người gọi.** Trợ lý đọc nguyên văn thân phản hồi
+của tool để quyết bước tiếp theo, nên `500 Internal Server Error` không cho nó biết
+là nên tra lại id hay nên dừng. Mọi service đăng ký `install_db_error_handlers(app)`
+từ `common.py`, dịch lỗi Postgres thành mã trạng thái đọc được:
+
+| Lỗi | Trả về | Ví dụ `detail` |
+|---|---|---|
+| Khóa ngoại thiếu bản ghi cha (`23503`) | 404 | `customer 999999 không tồn tại` |
+| Còn bản ghi con tham chiếu (`23503`) | 409 | `không xóa được customer 100008 vì còn bản ghi transaction_history tham chiếu` |
+| Ghi trùng khóa duy nhất (`23505`) | 409 | `guardian_case với decision_id ... đã tồn tại` |
+| Thiếu cột bắt buộc (`23502`) | 422 | `thiếu giá trị bắt buộc cho customer_id` |
+| Sai ràng buộc `CHECK` (`23514`) | 422 | `giá trị không hợp lệ theo ràng buộc ck_user_role` |
+| Sai định dạng, gồm uuid hỏng (`22xxx`) | 422 | `giá trị không đúng định dạng: invalid input syntax for type uuid` |
+| Database không dùng được lúc này (`08xxx` mất kết nối, `53xxx` hết tài nguyên, `57P01/02/03` đang tắt hoặc khởi động) | 503 | `cơ sở dữ liệu tạm thời không truy cập được` |
+
+SQL sai cú pháp thì **vẫn là 500**: đó là bug của service, che đi thì không ai biết mà
+sửa. Giá trị trong thông điệp chỉ được nêu khi cột là cột id — cột khác chỉ nêu tên,
+vì thứ Postgres trả về là dữ liệu người gọi gửi lên và có thể là PII.
+
 **Mỗi service chỉ chạm bảng của chính nó.** Dữ liệu thuộc service khác lấy qua HTTP,
 không truy vấn chéo database.
+
+Có đúng một ngoại lệ: **kiểm tra tồn tại trước khi ghi một khóa ngoại**. Trước khi
+chèn `risk_decision`, `guardian_case` hay `transaction_history`, service tra thẳng
+bảng cha (`customer`, `account`, `risk_decision`, `beneficiary`, `scam_scenario`)
+bằng một câu `SELECT 1`, rồi trả 404 nêu đúng thực thể. Hai lý do: khóa ngoại trong
+schema vốn đã ràng hai bảng với nhau nên sự phụ thuộc là có sẵn, còn hỏi qua HTTP thì
+lúc service kia chết sẽ không phân biệt được "không tồn tại" với "không gọi được" —
+và trả 404 sai sự thật còn tệ hơn cái 500 mà ta đang muốn bỏ. Ngoại lệ này chỉ dành
+cho câu `SELECT 1` kiểm tra tồn tại; đọc dữ liệu nghiệp vụ của service khác vẫn phải
+đi qua HTTP.
 
 ## Sáu service
 

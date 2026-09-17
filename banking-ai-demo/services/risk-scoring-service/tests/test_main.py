@@ -177,3 +177,41 @@ def test_info_cong_bo_trong_so_va_nguong():
     body = client.get("/info").json()
     assert body["factor_caps"] == main.FACTOR_CAPS
     assert set(body["levels"]) == {"pass", "soft_warn", "intervene"}
+
+
+# ---------------------------------------------------------------------------
+# Cổng kiểm tra tồn tại
+# ---------------------------------------------------------------------------
+def test_chot_hanh_dong_voi_giao_dich_khong_ton_tai_thanh_404(monkeypatch):
+    """`risk_decision.transaction_id` là khóa ngoại; để Postgres từ chối thì
+    trợ lý chỉ nhận được 500 và không biết là mình truyền sai số giao dịch."""
+    def _q(sql, params=None, *a, **k):
+        if "SELECT 1 AS x FROM transaction_history" in sql:
+            return None
+        return {"decision_id": "11111111-2222-3333-4444-555555555555"}
+    monkeypatch.setattr(main, "query_one", _q)
+    r = client.post("/transfer/action", json={
+        "decision_id": "11111111-2222-3333-4444-555555555555",
+        "action_taken": "hold", "transaction_id": 999999})
+    assert r.status_code == 404
+    assert r.json()["detail"] == "transaction 999999 không tồn tại"
+
+
+def test_chot_hanh_dong_khong_kem_giao_dich_van_di_qua(monkeypatch):
+    """`transaction_id` cho phép NULL — cổng không được biến nó thành bắt buộc."""
+    goi = {"n": 0}
+
+    def _q(sql, params=None, *a, **k):
+        assert "FROM transaction_history" not in sql
+        goi["n"] += 1
+        return {"decision_id": "11111111-2222-3333-4444-555555555555"}
+    monkeypatch.setattr(main, "query_one", _q)
+    monkeypatch.setattr(main, "execute_returning", lambda *a, **k: {
+        "decision_id": "11111111-2222-3333-4444-555555555555",
+        "action_taken": "cancel", "outcome": "prevented",
+        "score": 80, "level": "intervene"})
+    r = client.post("/transfer/action", json={
+        "decision_id": "11111111-2222-3333-4444-555555555555",
+        "action_taken": "cancel"})
+    assert r.status_code == 200
+    assert goi["n"] >= 1

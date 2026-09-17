@@ -29,6 +29,7 @@ from common import (
     agent_tools_payload,
     db_health,
     execute_returning,
+    install_db_error_handlers,
     now_vn,
     openapi_description,
     query,
@@ -67,6 +68,9 @@ app = FastAPI(
     redoc_url="/redoc",
 )
 setup_docs(app, SERVICE_NAME)
+# Lỗi Postgres do id sai của người gọi phải ra 404/409/422 chứ không phải
+# 500, vì trợ lý đọc thẳng thân phản hồi này để quyết bước tiếp theo.
+install_db_error_handlers(app)
 
 
 # ---------------------------------------------------------------------------

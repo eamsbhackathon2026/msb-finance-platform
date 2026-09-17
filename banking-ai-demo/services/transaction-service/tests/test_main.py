@@ -323,3 +323,78 @@ def test_mc_ty_trong_cong_100_va_xep_hang(monkeypatch):
 def test_mc_agent_tool_dang_ky(monkeypatch):
     names = {t["name"] for t in client.get("/agent/tools").json()["tools"]}
     assert "get_monthly_comparison" in names
+
+
+# ---------------------------------------------------------------------------
+# Cổng kiểm tra tồn tại
+# ---------------------------------------------------------------------------
+# Không có cổng thì id sai của người gọi đi thẳng xuống Postgres, vỡ khóa ngoại
+# và thành 500 — trợ lý đọc chuỗi đó không biết nên tra lại id hay nên dừng.
+def _thieu(bang):
+    """query_one giả cho các cổng: mọi bảng đều có bản ghi, trừ `bang`."""
+    def _q(sql, params=None, *a, **k):
+        if "SELECT 1 AS x FROM" not in sql:
+            return {"nid": 500}
+        return None if f"FROM {bang} " in sql else {"x": 1}
+    return _q
+
+
+def test_ghi_giao_dich_cho_khach_khong_ton_tai_thanh_404(monkeypatch):
+    monkeypatch.setattr(main, "query_one", _thieu("customer"))
+    r = client.post("/transactions", json={
+        "customer_id": 999999, "account_id": 200001, "amount": 5_000_000})
+    assert r.status_code == 404
+    assert r.json()["detail"] == "customer 999999 không tồn tại"
+
+
+def test_ghi_giao_dich_tren_tai_khoan_khong_ton_tai_thanh_404(monkeypatch):
+    monkeypatch.setattr(main, "query_one", _thieu("account"))
+    r = client.post("/transactions", json={
+        "customer_id": 100008, "account_id": 999999, "amount": 5_000_000})
+    assert r.status_code == 404
+    assert r.json()["detail"] == "account 999999 không tồn tại"
+
+
+def test_ghi_giao_dich_voi_nguoi_nhan_khong_ton_tai_thanh_404(monkeypatch):
+    monkeypatch.setattr(main, "query_one", _thieu("beneficiary"))
+    r = client.post("/transactions", json={
+        "customer_id": 100008, "account_id": 200001, "amount": 5_000_000,
+        "beneficiary_id": 999999})
+    assert r.status_code == 404
+
+
+def test_khoa_ngoai_tuy_chon_bo_trong_thi_khong_bi_chan(monkeypatch):
+    """`beneficiary_id` và `risk_decision_id` cho phép NULL — cổng không được
+    biến chúng thành bắt buộc."""
+    monkeypatch.setattr(main, "query_one", _thieu("beneficiary"))
+    monkeypatch.setattr(main, "execute_returning", lambda *a, **k: {
+        "transaction_id": 500, "customer_id": 100008, "amount": "5000000"})
+    r = client.post("/transactions", json={
+        "customer_id": 100008, "account_id": 200001, "amount": 5_000_000})
+    assert r.status_code == 201
+
+
+def test_doi_trang_thai_voi_quyet_dinh_khong_ton_tai_thanh_404(monkeypatch):
+    monkeypatch.setattr(main, "query_one", _thieu("risk_decision"))
+    r = client.patch("/transactions/900001/status", json={
+        "status": "PENDING",
+        "risk_decision_id": "11111111-2222-3333-4444-555555555555"})
+    assert r.status_code == 404
+    assert "decision" in r.json()["detail"]
+
+
+def test_sinh_insight_cho_khach_khong_ton_tai_noi_dung_khach_khong_ton_tai(monkeypatch):
+    """Trước đây trả 'không có chi tiêu kỳ X' — nghe như nghiệp vụ bình thường
+    nên trợ lý đi tiếp thay vì tra lại id."""
+    monkeypatch.setattr(main, "query_one", _thieu("customer"))
+    r = client.post("/customers/999999/insights/generate")
+    assert r.status_code == 404
+    assert r.json()["detail"] == "customer 999999 không tồn tại"
+
+
+def test_sinh_goi_y_cho_khach_khong_ton_tai_noi_dung_khach_khong_ton_tai(monkeypatch):
+    """Trước đây trả 'Dòng tiền chưa dư', một câu đúng hình thức nhưng sai nguyên nhân."""
+    monkeypatch.setattr(main, "query_one", _thieu("customer"))
+    r = client.post("/customers/999999/recommendations/generate")
+    assert r.status_code == 404
+    assert r.json()["detail"] == "customer 999999 không tồn tại"

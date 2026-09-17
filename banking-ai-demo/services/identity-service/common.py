@@ -5,7 +5,8 @@ vào từng service vì Docker build context là `services/<name>` nên không t
 thư mục cha. KHÔNG sửa trực tiếp bản copy trong service.
 
 Gồm 3 nhóm:
-  1. Kết nối PostgreSQL (pool lazy, cast varchar-core sang số).
+  1. Kết nối PostgreSQL (pool lazy, cast varchar-core sang số) và dịch lỗi
+     cơ sở dữ liệu thành mã trạng thái có nghĩa.
   2. Mask PII — schema quy định full_name / legal_id / phone_no / email / street /
      date_of_birth không được ra API cho agent hay vào prompt LLM.
   3. Helper dựng manifest `GET /agent/tools` để agent tự discover endpoint.
@@ -119,6 +120,135 @@ def db_health() -> dict:
         return {"database": "ok"}
     except Exception as exc:  # noqa: BLE001 - trả nguyên nhân cho ops, không raise
         return {"database": "error", "detail": type(exc).__name__ + ": " + str(exc)[:200]}
+
+
+# ---------------------------------------------------------------------------
+# 1b. Lỗi cơ sở dữ liệu → mã trạng thái nói được điều gì đó
+# ---------------------------------------------------------------------------
+# Không có lớp này thì một id sai của người gọi đi thẳng xuống Postgres, vỡ ràng
+# buộc, và FastAPI trả `500 Internal Server Error`. Trợ lý đọc nguyên văn thân
+# phản hồi đó, nên nó không phân biệt được "tra sai id, nên tra lại" với "hệ
+# thống hỏng, nên dừng" — và điều phối sai. Ở đây dịch lỗi của Postgres thành mã
+# trạng thái và một câu tiếng Việt.
+#
+# Nhận diện bằng sqlstate chứ không bằng tên lớp: sqlstate là mã chuẩn của
+# Postgres, còn cây thừa kế của driver thì có thể đổi giữa các phiên bản.
+_KEY_THIEU_CHA = re.compile(
+    r'Key \((?P<cot>[^)]+)\)=\((?P<gia_tri>.*)\) is not present in table "(?P<bang>[^"]+)"', re.S
+)
+_KEY_CON_THAM_CHIEU = re.compile(
+    r'Key \((?P<cot>[^)]+)\)=\((?P<gia_tri>.*)\) is still referenced from table "(?P<bang>[^"]+)"', re.S
+)
+_KEY_TRUNG = re.compile(
+    r'Key \((?P<cot>[^)]+)\)=\((?P<gia_tri>.*)\) already exists', re.S
+)
+
+
+# `legal_id` kết thúc bằng `_id` nhưng là số giấy tờ — schema cấm nó ra API, nên
+# phải loại tay khỏi heuristic bên dưới.
+_COT_ID_NHUNG_LA_PII = {"legal_id"}
+
+
+def _neu_duoc_gia_tri(cot: str, gia_tri: str) -> str | None:
+    """Chỉ nêu giá trị khi mọi cột trong khóa đều là cột id, và không phải PII.
+
+    Giá trị lấy từ thông điệp của Postgres có thể là bất cứ thứ gì người gọi
+    gửi lên. Schema cấm full_name/legal_id/phone_no/email ra API, nên cột không
+    đạt điều kiện thì chỉ nêu tên cột, giấu giá trị."""
+    cot_list = [c.strip() for c in cot.split(",")]
+    la_id = all(
+        (c == "id" or c.endswith("_id")) and c not in _COT_ID_NHUNG_LA_PII
+        for c in cot_list
+    )
+    if la_id and len(gia_tri) <= 80:
+        return gia_tri
+    return None
+
+
+def db_error_status(exc: psycopg.Error) -> tuple[int, str] | None:
+    """(mã trạng thái, câu tiếng Việt) cho lỗi do dữ liệu người gọi gây ra.
+
+    Trả `None` khi lỗi không phải lỗi của người gọi — SQL sai cú pháp chẳng hạn.
+    Chỗ gọi phải để lỗi đó nổ tiếp thành 500, vì đó là bug của service và che nó
+    đi thì không ai biết mà sửa."""
+    state = exc.sqlstate or ""
+    diag = getattr(exc, "diag", None)
+    chi_tiet = (getattr(diag, "message_detail", None) or "") if diag else ""
+    bang = (getattr(diag, "table_name", None) or "") if diag else ""
+    cot = (getattr(diag, "column_name", None) or "") if diag else ""
+    rang_buoc = (getattr(diag, "constraint_name", None) or "") if diag else ""
+
+    if state == "23503":  # foreign_key_violation
+        m = _KEY_THIEU_CHA.search(chi_tiet)
+        if m:
+            gia_tri = _neu_duoc_gia_tri(m.group("cot"), m.group("gia_tri"))
+            if gia_tri:
+                return 404, f"{m.group('bang')} {gia_tri} không tồn tại"
+            return 404, f"{m.group('cot')} tham chiếu tới {m.group('bang')} không tồn tại"
+        m = _KEY_CON_THAM_CHIEU.search(chi_tiet)
+        if m:
+            gia_tri = _neu_duoc_gia_tri(m.group("cot"), m.group("gia_tri"))
+            chu_the = f"{bang} {gia_tri}" if bang and gia_tri else (bang or "bản ghi")
+            return 409, f"không xóa được {chu_the} vì còn bản ghi {m.group('bang')} tham chiếu"
+        return 404, f"tham chiếu tới bản ghi không tồn tại ({rang_buoc or 'khóa ngoại'})"
+
+    if state == "23505":  # unique_violation
+        m = _KEY_TRUNG.search(chi_tiet)
+        if m:
+            gia_tri = _neu_duoc_gia_tri(m.group("cot"), m.group("gia_tri"))
+            mo_ta = f"{m.group('cot')} {gia_tri}" if gia_tri else m.group("cot")
+            return 409, f"{bang or 'bản ghi'} với {mo_ta} đã tồn tại"
+        return 409, f"bản ghi đã tồn tại ({rang_buoc or 'khóa duy nhất'})"
+
+    if state == "23502":  # not_null_violation
+        return 422, f"thiếu giá trị bắt buộc cho {cot or 'một cột'} của {bang or 'bản ghi'}"
+
+    if state == "23514":  # check_violation
+        return 422, f"giá trị không hợp lệ theo ràng buộc {rang_buoc or 'kiểm tra'}"
+
+    if state.startswith("22"):  # data_exception, gồm 22P02 uuid sai định dạng
+        # Khác các nhánh trên, chuỗi này chứa nguyên văn giá trị người gọi gửi lên
+        # chứ không phải một id đã lọc, nên vừa cắt ngắn vừa mask trước khi trả ra.
+        primary = (getattr(diag, "message_primary", None) or str(exc)) if diag else str(exc)
+        primary = mask_free_text(primary.strip()) or ""
+        if len(primary) > 120:
+            primary = primary[:120] + "…"
+        return 422, f"giá trị không đúng định dạng: {primary}"
+
+    # 08xxx mất kết nối; 53xxx hết tài nguyên (hết connection, hết đĩa, hết bộ nhớ);
+    # 57P01/02/03 Postgres đang tắt hoặc đang khởi động. Cả ba nhóm đều là "lát nữa
+    # thử lại", khác hẳn 500 vốn bảo người gọi rằng dừng lại đi.
+    if (
+        state.startswith("08")
+        or state.startswith("53")
+        or state in {"57P01", "57P02", "57P03"}
+        or (not state and isinstance(exc, psycopg.OperationalError))
+    ):
+        # Gồm cả psycopg_pool.PoolTimeout, vốn kế thừa OperationalError.
+        return 503, "cơ sở dữ liệu tạm thời không truy cập được, thử lại sau"
+
+    return None
+
+
+def install_db_error_handlers(app) -> None:
+    """Dịch lỗi Postgres thành 4xx/5xx có nghĩa cho mọi endpoint của service.
+
+    Đây là lưới đỡ chứ không thay cho cổng kiểm tra tại endpoint: cổng cho câu
+    trả lời đúng giọng nghiệp vụ, còn lưới bảo đảm endpoint viết sau này cũng
+    không rơi về 500 trống nghĩa."""
+    from fastapi.responses import JSONResponse
+
+    @app.exception_handler(psycopg.Error)
+    def _loi_co_so_du_lieu(_request, exc: psycopg.Error):
+        ket_qua = db_error_status(exc)
+        if ket_qua is None:
+            raise exc  # bug của service — phải là 500 để còn thấy mà sửa
+        ma, cau = ket_qua
+        # KHÔNG mask lại ở đây: `_ID_RE` thay mọi dãy 9-12 chữ số bằng `***`, nên
+        # nó băm nát chính cái id mà người gọi cần để tra lại — `transaction 800012345
+        # không tồn tại` thành `transaction *** không tồn tại`. Giá trị đi tới đây đã
+        # qua `_neu_duoc_gia_tri`, còn văn bản tự do của server thì mask ngay tại nhánh 22xxx.
+        return JSONResponse(status_code=ma, content={"detail": cau})
 
 
 # ---------------------------------------------------------------------------

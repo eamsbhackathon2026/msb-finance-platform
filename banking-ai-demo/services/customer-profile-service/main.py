@@ -28,6 +28,7 @@ from common import (
     db_health,
     execute,
     execute_returning,
+    install_db_error_handlers,
     mask_beneficiary_row,
     mask_customer_row,
     now_vn,
@@ -93,6 +94,9 @@ app = FastAPI(
     redoc_url="/redoc",
 )
 setup_docs(app, SERVICE_NAME)
+# Lỗi Postgres do id sai của người gọi phải ra 404/409/422 chứ không phải
+# 500, vì trợ lý đọc thẳng thân phản hồi này để quyết bước tiếp theo.
+install_db_error_handlers(app)
 
 
 # ---------------------------------------------------------------------------
@@ -151,6 +155,17 @@ class BaselineUpsertRequest(BaseModel):
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+def _account_or_404(account_id: int | None) -> None:
+    """404 khi tài khoản không tồn tại.
+
+    `account_event.account_id` cho phép NULL (sự kiện cấp khách hàng), nên chỉ
+    kiểm tra khi người gọi có truyền."""
+    if account_id is None:
+        return
+    if query_one("SELECT 1 AS x FROM account WHERE account_id = %s", (account_id,)) is None:
+        raise HTTPException(404, f"account {account_id} không tồn tại")
+
+
 def _customer_or_404(customer_id: int) -> dict:
     row = query_one("SELECT * FROM customer WHERE customer_id = %s", (customer_id,))
     if row is None:
@@ -722,6 +737,7 @@ def list_events(
 @app.post("/customers/{customer_id}/events", tags=["event"], status_code=201)
 def create_event(customer_id: int, req: AccountEventRequest):
     _customer_or_404(customer_id)
+    _account_or_404(req.account_id)
     row = execute_returning(
         """
         INSERT INTO account_event

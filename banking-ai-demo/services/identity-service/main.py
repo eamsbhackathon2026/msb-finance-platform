@@ -38,6 +38,7 @@ from common import (
     agent_tools_payload,
     db_health,
     execute_returning,
+    install_db_error_handlers,
     mask_email,
     mask_name,
     mask_phone,
@@ -100,6 +101,9 @@ app = FastAPI(
     redoc_url="/redoc",
 )
 setup_docs(app, SERVICE_NAME)
+# Lỗi Postgres do id sai của người gọi phải ra 404/409/422 chứ không phải
+# 500, vì trợ lý đọc thẳng thân phản hồi này để quyết bước tiếp theo.
+install_db_error_handlers(app)
 
 # Các giá trị hợp lệ lấy từ CHECK constraint đang có trên database, không phải
 # từ suy đoán. Khai báo lại ở đây để request sai trả 422 kèm danh sách giá trị

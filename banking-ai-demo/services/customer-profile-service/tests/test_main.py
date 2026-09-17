@@ -145,3 +145,30 @@ def test_openapi_co_day_du_metadata():
     assert spec["info"]["description"]
     tags = {t["name"] for t in spec.get("tags", [])}
     assert {"meta", "customer", "baseline", "beneficiary", "event"} <= tags
+
+
+# ---------------------------------------------------------------------------
+# Cổng kiểm tra tồn tại
+# ---------------------------------------------------------------------------
+def test_ghi_su_kien_tren_tai_khoan_khong_ton_tai_thanh_404(monkeypatch):
+    """Khách có thật nhưng tài khoản thì không: trước đây vỡ khóa ngoại thành 500."""
+    def _q(sql, params=None, *a, **k):
+        if "SELECT 1 AS x FROM account" in sql:
+            return None
+        return {"customer_id": 100008}
+    monkeypatch.setattr(main, "query_one", _q)
+    r = client.post("/customers/100008/events", json={
+        "event_type": "NEW_DEVICE_LOGIN", "account_id": 999999})
+    assert r.status_code == 404
+    assert r.json()["detail"] == "account 999999 không tồn tại"
+
+
+def test_ghi_su_kien_cap_khach_hang_khong_can_tai_khoan(monkeypatch):
+    """`account_event.account_id` cho phép NULL với sự kiện cấp khách hàng."""
+    monkeypatch.setattr(main, "query_one", lambda *a, **k: {"customer_id": 100008})
+    monkeypatch.setattr(main, "execute_returning", lambda *a, **k: {
+        "event_id": 1, "customer_id": 100008, "account_id": None,
+        "event_type": "PASSWORD_RESET", "amount": None, "event_time": None,
+        "source_ref": None, "meta": {}})
+    r = client.post("/customers/100008/events", json={"event_type": "PASSWORD_RESET"})
+    assert r.status_code == 201
