@@ -57,11 +57,14 @@ spec:
             # quarterly-spending). Có id này, gateway.agent_answer() gọi
             # POST /v1/agents/{id}/runs và chat dùng LLM thật thay cho kịch bản.
             - name: AGENT_ID
-              value: "01a0aaef-d140-79ce-86ed-bf7cf90b097f"
+              # MSB Copilot Agent trong DB agent_platform dùng chung máy chủ với
+              # 5 service domain (49.213.71.208). Bộ agent cũ nằm ở Postgres
+              # trong cluster, đã ngừng dùng từ 17/09.
+              value: "01a0a9fa-081c-7465-b681-bd8dc90834ec"
             # Agent Scam Shield — kiểm tra dấu hiệu lừa đảo cho stk mới. Điền sau
             # khi tạo agent thứ hai; trống thì precheck rơi về verdict suy từ tín hiệu.
             - name: SCAMSHIELD_AGENT_ID
-              value: "01a0ad7b-c629-7dd8-bb17-daa8e6082cf1"
+              value: ""
           ports:
             - containerPort: 8080
           readinessProbe:
