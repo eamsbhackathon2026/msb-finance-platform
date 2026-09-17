@@ -41,6 +41,10 @@ AGENT_ID = os.getenv("AGENT_ID", "")
 # Agent thứ hai: Scam Shield — kiểm tra dấu hiệu lừa đảo cho lệnh chuyển tới stk
 # mới. Cùng nền tảng/khoá, chỉ khác agent id.
 SCAMSHIELD_AGENT_ID = os.getenv("SCAMSHIELD_AGENT_ID", "")
+# Agent thứ ba: chỉ trích ý định chuyển tiền từ MỘT câu, không gắn công cụ nào.
+# Tách riêng vì Chat Banking cần trả lời trong vài giây; agent Copilot mang 11
+# công cụ và prompt dài nên một lượt mất 10-20 giây, quá chậm cho màn giao dịch.
+CHATBANKING_AGENT_ID = os.getenv("CHATBANKING_AGENT_ID", "")
 
 PEER_TIMEOUT = float(os.getenv("PEER_TIMEOUT_SECONDS", "5"))
 

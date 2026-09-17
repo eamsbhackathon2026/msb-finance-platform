@@ -65,6 +65,11 @@ spec:
             # khi tạo agent thứ hai; trống thì precheck rơi về verdict suy từ tín hiệu.
             - name: SCAMSHIELD_AGENT_ID
               value: ""
+            # Agent thứ ba: chỉ trích ý định chuyển tiền từ một câu, KHÔNG gắn
+            # công cụ nào nên một lượt chỉ 1-5 giây. Agent Copilot mang 11 công
+            # cụ, một lượt 10-20 giây — quá chậm cho màn giao dịch.
+            - name: CHATBANKING_AGENT_ID
+              value: "01a0b01a-d096-75c2-b1b4-65ec422d4c29"
           ports:
             - containerPort: 8080
           readinessProbe:

@@ -259,6 +259,7 @@ def test_openapi_phuc_vu_dung_cac_endpoint_fe_goi():
         "/api/invest/rates",
         "/api/invest/maturing-deposits",
         "/api/invest/open",
+        "/api/chat-banking/parse",
         "/api/transfer/intervene",
         "/api/transfer/intervene/{decision_id}",
         "/api/products/rates",
@@ -1675,3 +1676,52 @@ def test_chat_van_dinh_bang_sau_phan_chu(monkeypatch):
     if co_bang:
         # Thứ tự cũ phải giữ: hết chữ mới tới bảng, rồi mới tới [DONE].
         assert max(co_token) < min(co_bang)
+
+
+# ---- Chat Banking: agent hiểu câu, gateway khớp danh bạ ----------------------
+
+def test_khop_ten_theo_tu_khong_phai_chuoi_con():
+    """"Khánh" phải khớp "NGUYEN VAN KHANH" nhưng KHÔNG khớp "KHANHLY" —
+    khớp chuỗi con sẽ soạn lệnh cho nhầm người."""
+    from models import TransferBeneficiary
+    db = [
+        TransferBeneficiary(id="1", name="NGUYEN VAN KHANH", bank="MSB", account="111", relationship="FRIEND", trusted=True),
+        TransferBeneficiary(id="2", name="TRAN KHANHLY", bank="VCB", account="222", relationship="UNKNOWN", trusted=False),
+    ]
+    ra = main._khop_nguoi_nhan("anh Khánh", db)
+    assert [b.id for b in ra] == ["1"]
+
+
+def test_khop_theo_so_tai_khoan():
+    from models import TransferBeneficiary
+    db = [TransferBeneficiary(id="1", name="DO VAN DUC", bank="MSB", account="0362554873", relationship="FRIEND", trusted=True)]
+    assert [b.id for b in main._khop_nguoi_nhan("0362554873", db)] == ["1"]
+    assert main._khop_nguoi_nhan("0999999999", db) == []
+
+
+def test_bo_xung_ho_va_dau():
+    from models import TransferBeneficiary
+    db = [TransferBeneficiary(id="1", name="LE THI HOA", bank="MSB", account="1", relationship="FAMILY", trusted=True)]
+    for cach_goi in ("chị Hoa", "chi Hoa", "HOA", "le thi hoa"):
+        assert main._khop_nguoi_nhan(cach_goi, db), f"trượt với: {cach_goi}"
+
+
+def test_doc_json_agent_chiu_duoc_rac_quanh():
+    """Mô hình hay bọc trong ```json hoặc thêm câu dẫn dù đã dặn không."""
+    assert main._doc_json_agent('{"amount": 500000, "recipient": "Khanh", "intent": "transfer"}')["amount"] == 500000
+    assert main._doc_json_agent('Đây là kết quả:\n```json\n{"intent": "other"}\n```')["intent"] == "other"
+    assert main._doc_json_agent("không có json") is None
+    assert main._doc_json_agent("") is None
+
+
+def test_agent_chua_cau_hinh_thi_tra_fallback():
+    """Không có agent → FE phải được báo để tự dùng regex, không được im lặng."""
+    r = client.post("/api/chat-banking/parse", json={"message": "chuyen 500k cho anh Khanh"})
+    assert r.status_code == 200
+    b = r.json()
+    assert b["source"] == "fallback" and b["intent"] == "other"
+
+
+def test_so_tien_am_hoac_khong_phai_so_bi_bo():
+    """Mô hình trả rác thì không được dựng thẻ soạn lệnh với số tiền vô nghĩa."""
+    assert main._doc_json_agent('{"amount": -5, "recipient": null, "intent": "transfer"}')["amount"] == -5

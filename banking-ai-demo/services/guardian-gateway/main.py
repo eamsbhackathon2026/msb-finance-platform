@@ -34,6 +34,7 @@ import asyncio
 import json
 import os
 import re
+import unicodedata
 from datetime import datetime, timedelta, timezone
 from typing import AsyncIterator
 
@@ -62,6 +63,8 @@ from models import (
     Customer,
     DecisionRequest,
     GuardianAction,
+    ChatBankingDraft,
+    ChatBankingRequest,
     HomeContent,
     InterveneAdvice,
     InterveneDetail,
@@ -120,6 +123,11 @@ def _now_hms() -> str:
 # 1.800–2.200ms; gateway trả tức thì sẽ làm màn đó loé qua rồi biến mất. Giữ
 # 2.000ms để chuyển demo→live không đổi nhịp trình bày. Đặt 0 để tắt.
 RISK_ASSESS_DELAY_MS = int(os.getenv("RISK_ASSESS_DELAY_MS", "2000"))
+
+# Trần chờ agent hiểu câu ở Chat Banking. Đây là màn GIAO DỊCH: khách gõ xong
+# phải thấy phản hồi gần như tức thì. Quá ngưỡng thì trả fallback để FE dùng bộ
+# luật regex, thà kém thông minh còn hơn đứng hình.
+CHATBANKING_TIMEOUT_S = float(os.getenv("CHATBANKING_TIMEOUT_SECONDS", "9"))
 
 # Tốc độ phát lại token của chat, khớp với replayAsStream bên FE.
 CHAT_TOKEN_DELAY_MS = int(os.getenv("CHAT_TOKEN_DELAY_MS", "25"))
@@ -1628,6 +1636,101 @@ async def transfer_precheck(payload: TransferPrecheckRequest) -> TransferPrechec
         options=list(eng.get("options") or []),
         scenario_id=(kich_ban or {}).get("scenario_id") if isinstance(kich_ban, dict) else None,
         tx_count=int(resolve.get("tx_count") or 0),
+    )
+
+
+# ---- Chat Banking: agent hiểu câu, gateway đối chiếu danh bạ thật -----------
+
+# Từ xưng hô bỏ khi so khớp tên: "anh Khánh" và "Khánh" là một người.
+_XUNG_HO = {"anh", "chi", "em", "bac", "co", "chu", "ong", "ba", "thay", "cu", "ba*"}
+
+
+def _bo_dau(text: str) -> str:
+    """Bỏ dấu tiếng Việt để so tên: "Khánh" khớp được với "KHANH"."""
+    thay = unicodedata.normalize("NFD", text)
+    thay = "".join(c for c in thay if unicodedata.category(c) != "Mn")
+    return thay.replace("đ", "d").replace("Đ", "D").lower()
+
+
+def _khop_nguoi_nhan(ten: str, danh_ba: list[TransferBeneficiary]) -> list[TransferBeneficiary]:
+    """Danh bạ khớp với tên (hoặc số tài khoản) agent trích ra.
+
+    Khớp theo TỪ chứ không phải chuỗi con: "Khánh" phải khớp "NGUYEN VAN KHANH"
+    nhưng không khớp "KHANHLY". Số tài khoản thì so nguyên dãy số.
+    """
+    q = _bo_dau(ten).strip()
+    if not q:
+        return []
+    chi_so = "".join(ch for ch in q if ch.isdigit())
+    if len(chi_so) >= 6:
+        return [b for b in danh_ba if chi_so in "".join(ch for ch in b.account if ch.isdigit())]
+    tu_khoa = [w for w in q.split() if w and w not in _XUNG_HO]
+    if not tu_khoa:
+        return []
+    ra = []
+    for b in danh_ba:
+        tu_ten = set(_bo_dau(b.name).split())
+        if all(w in tu_ten for w in tu_khoa):
+            ra.append(b)
+    return ra
+
+
+def _doc_json_agent(raw: str) -> dict | None:
+    """Bóc object JSON trong câu trả lời agent.
+
+    Mô hình đôi khi bọc trong ```json hoặc thêm một câu dẫn dù đã dặn không —
+    nên tìm cặp ngoặc nhọn đầu tiên thay vì json.loads thẳng cả chuỗi.
+    """
+    if not raw:
+        return None
+    m = re.search(r"\{.*?\}", raw, re.S)
+    if not m:
+        return None
+    try:
+        got = json.loads(m.group(0))
+        return got if isinstance(got, dict) else None
+    except json.JSONDecodeError:
+        return None
+
+
+@app.post("/api/chat-banking/parse", response_model=ChatBankingDraft, tags=["risk"],
+          response_model_exclude_none=True,
+          summary="Hiểu câu chuyển tiền của khách (agent) và khớp danh bạ thật")
+async def chat_banking_parse(payload: ChatBankingRequest) -> ChatBankingDraft:
+    """Chia việc rõ ràng: agent HIỂU CÂU, gateway TRA DANH BẠ.
+
+    Không để mô hình tự trả về người nhận kèm số tài khoản — nó sẽ bịa ra một
+    số trông rất thật. Agent chỉ đưa tên, gateway đối chiếu danh bạ thật của
+    đúng khách đang đăng nhập rồi mới dựng thẻ soạn lệnh.
+
+    Agent lỗi hoặc quá chậm thì trả source="fallback" để FE dùng bộ luật regex
+    sẵn có — màn chuyển tiền không bao giờ đứng vì agent.
+    """
+    danh_ba = await transfer_beneficiaries()
+    raw = None
+    if domain.agent_configured(domain.CHATBANKING_AGENT_ID):
+        try:
+            raw = await asyncio.wait_for(
+                domain.agent_answer(payload.message, agent_id=domain.CHATBANKING_AGENT_ID,
+                                    kind="chat_banking"),
+                timeout=CHATBANKING_TIMEOUT_S)
+        except Exception:
+            raw = None
+    got = _doc_json_agent(raw or "")
+    if not got:
+        return ChatBankingDraft(intent="other", source="fallback")
+
+    y_dinh = got.get("intent")
+    if y_dinh not in {"transfer", "list_beneficiaries", "other"}:
+        y_dinh = "transfer" if (got.get("amount") or got.get("recipient")) else "other"
+    so_tien = got.get("amount")
+    if not isinstance(so_tien, int) or so_tien <= 0:
+        so_tien = None
+    nguoi_nhan = got.get("recipient") if isinstance(got.get("recipient"), str) else None
+    return ChatBankingDraft(
+        intent=y_dinh, amount=so_tien, recipient=nguoi_nhan,
+        matches=_khop_nguoi_nhan(nguoi_nhan, danh_ba) if nguoi_nhan else [],
+        source="agent",
     )
 
 

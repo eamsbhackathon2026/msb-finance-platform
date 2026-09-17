@@ -627,6 +627,27 @@ class TransferPrecheckResponse(Contract):
     tx_count: int = 0
 
 
+class ChatBankingRequest(Contract):
+    message: str
+
+
+class ChatBankingDraft(Contract):
+    """Ý định chuyển tiền bóc từ MỘT câu của khách.
+
+    Agent chỉ làm đúng việc hiểu câu; số tiền và tên người nhận sau đó được
+    gateway đối chiếu với danh bạ THẬT, nên thẻ soạn lệnh hiện trên màn hình
+    không bao giờ là người nhận do mô hình bịa ra.
+    """
+    intent: Literal["transfer", "list_beneficiaries", "other"]
+    amount: int | None = None
+    # Tên hoặc số tài khoản agent trích được, giữ nguyên văn để FE hiển thị lại.
+    recipient: str | None = None
+    # Danh bạ khớp: 0 = không thấy, 1 = soạn lệnh luôn, nhiều = hỏi khách chọn.
+    matches: list[TransferBeneficiary] = []
+    # "agent" = LLM hiểu câu; "fallback" = agent lỗi/chậm, FE tự dùng regex.
+    source: Literal["agent", "fallback"] = "agent"
+
+
 class GuardianAction(Contract):
     """Một nút hành động ở lượt 2 của màn Guardian."""
     key: Literal["hold", "cancel", "contact", "continue"]
