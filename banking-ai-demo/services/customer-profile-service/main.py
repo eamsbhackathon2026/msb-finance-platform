@@ -327,10 +327,14 @@ def _add_months_yyyymmdd(start, months: int) -> str:
 
 class DepositCreateRequest(BaseModel):
     amount: float = Field(gt=0)
-    term_months: int = Field(gt=0)
+    # 0 = không kỳ hạn (sổ linh hoạt)
+    term_months: int = Field(ge=0)
     rate: float = Field(ge=0)
     linked_account_id: int | None = None
     rollover: Literal["PRINCIPAL", "PRINCIPAL_INTEREST", "NONE"] = "PRINCIPAL"
+    # Gắn sổ với sản phẩm trong bảng product (1 Măng Non, 2 Online 12T, ...)
+    product_id: int | None = None
+    product_group: Literal["DEPOSIT_TERM", "DEPOSIT_ONLINE", "DEPOSIT_FLEX"] = "DEPOSIT_ONLINE"
 
 
 @app.post("/customers/{customer_id}/deposits", tags=["customer"], status_code=201)
@@ -347,20 +351,21 @@ def create_deposit(customer_id: int, req: DepositCreateRequest):
     execute_returning(
         """
         INSERT INTO deposit (
-          deposit_id, customer_id, currency, amount, interest, interest_margin,
-          term, rollover, channel, start_date, maturity_date, linked_account_id,
-          product_group, payin_account, payout_account
-        ) VALUES (%s,%s,'VND',%s,%s,'0',%s,%s,'MOBILE',%s,%s,%s,'DEPOSIT_ONLINE',%s,%s)
+          deposit_id, customer_id, product_id, currency, amount, interest,
+          interest_margin, term, rollover, channel, start_date, maturity_date,
+          linked_account_id, product_group, payin_account, payout_account
+        ) VALUES (%s,%s,%s,'VND',%s,%s,'0',%s,%s,'MOBILE',%s,%s,%s,%s,%s,%s)
         RETURNING *
         """,
         (
-            deposit_id, customer_id, str(int(req.amount)), str(req.rate),
-            str(req.term_months), req.rollover, start_date, maturity_date,
-            req.linked_account_id, linked, linked,
+            deposit_id, customer_id, req.product_id, str(int(req.amount)),
+            str(req.rate), str(req.term_months), req.rollover, start_date,
+            maturity_date, req.linked_account_id, req.product_group, linked, linked,
         ),
     )
     return {
         "deposit_id": deposit_id,
+        "product_id": req.product_id,
         "amount": float(req.amount),
         "rate": req.rate,
         "term_months": req.term_months,

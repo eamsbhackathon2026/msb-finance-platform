@@ -2061,6 +2061,7 @@ async def invest_open(payload: OpenDepositRequest) -> OpenDepositResponse:
         "term_months": payload.months,
         "rate": payload.rate,
         "linked_account_id": account_id,
+        "product_id": payload.product_id,
     })
     if dep is None:
         # Sổ không tạo được: hoàn tiền để hai vế nợ/có cân nhau.

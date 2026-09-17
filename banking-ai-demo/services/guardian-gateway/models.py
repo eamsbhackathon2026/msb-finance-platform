@@ -538,6 +538,8 @@ class OpenDepositRequest(Contract):
     amount: int
     months: int
     rate: float
+    # Sản phẩm tiết kiệm trong bảng product; bỏ trống = Tiền gửi lãi suất đặc biệt
+    product_id: int | None = None
 
 
 class OpenDepositResponse(Contract):
