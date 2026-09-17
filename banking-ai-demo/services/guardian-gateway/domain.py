@@ -241,6 +241,21 @@ async def precheck(payload: dict) -> dict | None:
     return await _post(RISK_SCORING_URL, "/transfer/precheck", payload)
 
 
+async def scam_scenario(scenario_id: str) -> dict | None:
+    """Một kịch bản lừa đảo trong playbook (khuyến cáo, câu hỏi, lựa chọn)."""
+    return await _get(SCAM_KNOWLEDGE_URL, f"/scams/{scenario_id}")
+
+
+async def intervene(payload: dict) -> dict | None:
+    """Ghi câu trả lời của khách và lời khuyến cáo vào đúng dòng quyết định."""
+    return await _post(RISK_SCORING_URL, "/transfer/intervene", payload)
+
+
+async def risk_decision(decision_id: str) -> dict | None:
+    """Đọc lại một quyết định đã chấm (điểm, yếu tố, câu hỏi, kịch bản)."""
+    return await _get(RISK_SCORING_URL, f"/risk-decisions/{decision_id}")
+
+
 async def transfer_action(payload: dict) -> dict | None:
     return await _post(RISK_SCORING_URL, "/transfer/action", payload)
 

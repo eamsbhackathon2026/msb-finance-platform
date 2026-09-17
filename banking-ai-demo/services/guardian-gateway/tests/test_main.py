@@ -256,6 +256,8 @@ def test_openapi_phuc_vu_dung_cac_endpoint_fe_goi():
         "/api/copilot/month",
         "/api/copilot/chat",
         "/api/invest/rates",
+        "/api/transfer/intervene",
+        "/api/transfer/intervene/{decision_id}",
         "/api/products/rates",
         "/api/products/loan-options",
         "/api/products/savings-options",
@@ -844,16 +846,32 @@ def test_is_trusted_logic():
     assert main._is_trusted({}) is False
 
 
-def test_precheck_stk_moi_can_review_co_verdict():
-    # stub: resolve None → không quen → phải review; agent chưa cấu hình → verdict fallback
+def test_precheck_tra_ve_muc_guardian_va_khong_goi_llm():
+    """Wireframe: bước này phải dưới 300 ms nên KHÔNG được gọi agent.
+
+    stub: engine tắt → không có điểm; stk lạ thì vẫn phải quyết được là
+    soft_warn chứ không chặn giao dịch vì Guardian im lặng.
+    """
     r = client.post("/api/transfer/precheck",
                     json={"bankCode": "VPB", "accountNo": "1902664130", "amount": 85_000_000, "note": "gap"})
     assert r.status_code == 200
     b = r.json()
-    assert b["requiresReview"] is True and b["trusted"] is False
-    assert b["verdict"]["level"] in {"safe", "suspect", "danger"}
-    assert b["verdict"]["source"] == "fallback"
-    assert set(b["verdict"]) >= {"level", "title", "summary", "reasons", "recommendation", "source"}
+    assert b["trusted"] is False
+    assert b["level"] in {"pass", "soft_warn", "intervene"}
+    # Chỉ mức intervene mới chèn màn Guardian; soft_warn ở lại màn nhập lệnh.
+    assert b["requiresReview"] is (b["level"] == "intervene")
+    assert set(b) >= {"score", "level", "topFactors", "templateText", "decisionId", "txCount"}
+    # Không còn verdict của agent trong bước này (đã chuyển sang lượt 2).
+    assert "verdict" not in b
+
+
+def test_precheck_engine_chet_thi_khong_chan_chuyen_tien():
+    """"Precheck lỗi backend → fallback luồng cũ, không được chặn chuyển tiền
+    vì Guardian lỗi" — đúng dòng cuối bảng tình huống trong wireframe."""
+    r = client.post("/api/transfer/precheck",
+                    json={"bankCode": "VPB", "accountNo": "1902664130", "amount": 85_000_000, "note": "gap"})
+    b = r.json()
+    assert b["level"] != "intervene", "engine im lặng thì không được tự dựng màn chặn"
 
 
 def test_parse_verdict_boc_dung_muc_do():
@@ -1141,3 +1159,53 @@ def test_ke_hoach_tich_luy_van_ra_bang_lo_trinh():
     import asyncio
     t, _ = asyncio.run(main._spending_visual("kế hoạch tiết kiệm mua ô tô 500 triệu"))
     assert t is not None and "Lộ trình" in t.title
+
+
+# ---- Guardian 3 mức (wireframe màn Transfer) ---------------------------------
+
+def test_ly_do_lay_nguyen_detail_cua_engine():
+    """Ba lý do hiện cho khách phải là chữ của engine, không phải chữ gateway
+    bịa — nếu không, lý do sẽ không khớp điểm đã chấm."""
+    raw = {
+        "top_factors": ["amount_deviation", "recent_context", "new_beneficiary", "time_of_day"],
+        "factors": {
+            "amount_deviation": {"score": 25, "detail": "gấp 17 lần mức thường chuyển"},
+            "recent_context": {"score": 20, "detail": "ngay sau khi tất toán tiết kiệm"},
+            "new_beneficiary": {"score": 20, "detail": "người nhận hoàn toàn mới"},
+            "time_of_day": {"score": 10, "detail": "ngoài giờ"},
+        },
+    }
+    ly_do = main._factor_reasons(raw)
+    assert len(ly_do) == 3, "wireframe chỉ có chỗ cho ba lý do"
+    assert ly_do[0] == "Số tiền: gấp 17 lần mức thường chuyển"
+    assert ly_do[2] == "Người nhận: người nhận hoàn toàn mới"
+
+
+def test_yeu_to_thieu_detail_thi_bo_qua():
+    raw = {"top_factors": ["amount_deviation", "behavior_drift"],
+           "factors": {"amount_deviation": {"detail": "x"}, "behavior_drift": {}}}
+    assert main._factor_reasons(raw) == ["Số tiền: x"]
+
+
+def test_bon_hanh_dong_guardian_dung_tu_vung_engine():
+    keys = [k for k, _ in main._GUARDIAN_ACTIONS]
+    assert keys == ["hold", "cancel", "contact", "continue"]
+    # Mọi hành động FE gửi lên phải ánh xạ được xuống động từ của engine.
+    for act in ("cancelled", "proceeded", "reported", "held", "contacted"):
+        assert act in main.DOMAIN_ACTIONS and act in catalog.CUSTOMER_ACTIONS
+    assert main.DOMAIN_ACTIONS["held"][0] == "hold"
+    assert main.DOMAIN_ACTIONS["contacted"][0] == "contact"
+
+
+def test_hanh_dong_khoa_tam_tra_thong_diep_cho_khach():
+    r = client.post("/api/transfer/action", json={"action": "held"})
+    assert r.status_code == 200
+    assert "24 giờ" in r.json()["message"]
+
+
+def test_intervene_khong_co_quyet_dinh_thi_404():
+    r = client.get("/api/transfer/intervene/khong-ton-tai")
+    assert r.status_code == 404
+    r2 = client.post("/api/transfer/intervene",
+                     json={"decisionId": "khong-ton-tai", "selectedOption": "Không, tôi tự chuyển"})
+    assert r2.status_code == 404

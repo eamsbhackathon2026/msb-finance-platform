@@ -403,7 +403,12 @@ class OpsSession(Contract):
 # ---- Thao tác ghi -------------------------------------------------------------
 
 class TransferActionRequest(Contract):
-    action: Literal["cancelled", "proceeded", "reported"]
+    # Ba giá trị đầu là của màn Scam Shield cũ; "held"/"contacted" thêm cho màn
+    # Guardian (wireframe có bốn nút: khóa tạm · huỷ · gọi MSB · vẫn tiếp tục).
+    action: Literal["cancelled", "proceeded", "reported", "held", "contacted"]
+    # Quyết định cụ thể đang được xử lý. Bỏ trống thì dùng lần chấm gần nhất —
+    # giữ cho client cũ không gãy.
+    decision_id: str | None = None
 
 
 class TransferActionResponse(Contract):
@@ -497,6 +502,62 @@ class TransferPrecheckResponse(Contract):
     beneficiary_bank: str
     beneficiary_account: str
     verdict: ScamShieldVerdict | None = None
+
+    # ---- Guardian 3 mức (wireframe màn Transfer) ----
+    # Điểm và mức do risk engine chấm, KHÔNG phải LLM. Ngưỡng: <40 pass,
+    # 40–74 soft_warn, >=75 intervene.
+    score: int = 0
+    level: Literal["pass", "soft_warn", "intervene"] = "pass"
+    # Ba yếu tố nặng nhất, đã diễn giải thành câu cho người đọc.
+    top_factors: list[str] = []
+    # Câu cảnh báo rule-based hiện ngay, không phải chờ LLM.
+    template_text: str = ""
+    decision_id: str = ""
+    # Câu hỏi + lựa chọn của playbook, chỉ có khi level = intervene.
+    question: str | None = None
+    options: list[str] = []
+    scenario_id: str | None = None
+    # "Đã chuyển N lần" — tín hiệu tin cậy ngầm ở trạng thái pass.
+    tx_count: int = 0
+
+
+class GuardianAction(Contract):
+    """Một nút hành động ở lượt 2 của màn Guardian."""
+    key: Literal["hold", "cancel", "contact", "continue"]
+    label: str
+    # Nút engine khuyến nghị — tô đậm. Do engine chọn, không phải LLM.
+    recommended: bool = False
+
+
+class InterveneDetail(Contract):
+    """Lượt 1 (SHOW_REASONS): vì sao Guardian dừng, và câu cần hỏi khách."""
+    decision_id: str
+    score: int
+    level: Literal["pass", "soft_warn", "intervene"]
+    amount: int
+    beneficiary_label: str
+    reasons: list[str]
+    question: str
+    options: list[str]
+    scenario_id: str | None = None
+
+
+class InterveneRequest(Contract):
+    decision_id: str
+    selected_option: str
+    free_text: str | None = None
+
+
+class InterveneAdvice(Contract):
+    """Lượt 2 (SHOW_ADVICE): khuyến cáo và bốn hành động để khách tự quyết."""
+    decision_id: str
+    selected_option: str
+    advice_title: str
+    advice_body: str
+    recommended_action: Literal["hold", "cancel", "contact", "continue"]
+    actions: list[GuardianAction]
+    # "agent" = lời do LLM diễn giải; "playbook" = lấy thẳng kịch bản.
+    source: Literal["agent", "playbook"]
 
 
 class ProtectionToggleRequest(Contract):

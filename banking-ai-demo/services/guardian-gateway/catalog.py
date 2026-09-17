@@ -534,6 +534,8 @@ CUSTOMER_ACTIONS = {
     "cancelled": ("confirmed", "Khách hàng huỷ giao dịch sau cảnh báo", "Đã huỷ giao dịch. Tiền vẫn nằm trong tài khoản của bạn."),
     "reported":  ("confirmed", "Khách hàng báo cáo lừa đảo", "Đã ghi nhận báo cáo và chia sẻ ẩn danh tới hệ thống cảnh báo cộng đồng."),
     "proceeded": ("investigating", "Khách hàng vẫn tiếp tục chuyển tiền", "Giao dịch được tiếp tục và chuyển cho chuyên viên theo dõi."),
+    "held":      ("investigating", "Khách hàng chọn khóa tạm 24 giờ", "Đã khóa tạm giao dịch 24 giờ. MSB sẽ gọi lại cho bạn để xác minh."),
+    "contacted": ("investigating", "Khách hàng gọi tổng đài MSB", "Đã ghi nhận. Tổng đài MSB 1900 6083 sẽ hỗ trợ bạn ngay."),
 }
 
 # Case gắn với lệnh chuyển tiền trong luồng demo của khách hàng.

@@ -58,7 +58,11 @@ from models import (
     CopilotOverview,
     Customer,
     DecisionRequest,
+    GuardianAction,
     HomeContent,
+    InterveneAdvice,
+    InterveneDetail,
+    InterveneRequest,
     InvestRates,
     LoginRequest,
     LoginResponse,
@@ -168,6 +172,8 @@ DOMAIN_ACTIONS = {
     "cancelled": ("cancel", "prevented"),
     "reported": ("cancel", "prevented"),
     "proceeded": ("continue", "proceeded"),
+    "held": ("hold", "held"),
+    "contacted": ("contact", "n/a"),
 }
 
 # Quyết định của chuyên viên vận hành so với hợp đồng đó.
@@ -1158,14 +1164,17 @@ async def transfer_action(payload: TransferActionRequest) -> TransferActionRespo
     # Ghi xuống risk-scoring để vòng đời quyết định khép lại trong database,
     # không chỉ trong bộ nhớ gateway. Cần decision_id của lần chấm gần nhất —
     # chưa chấm lần nào thì chỉ ghi nhận cục bộ.
-    if _last_decision_id:
+    # Màn Guardian gửi kèm decision_id của đúng lệnh đang xét; client cũ không
+    # gửi thì rơi về lần chấm gần nhất.
+    quyet_dinh = payload.decision_id or _last_decision_id
+    if quyet_dinh:
         action_taken, outcome = DOMAIN_ACTIONS[payload.action]
         await domain.transfer_action({
-            "decision_id": _last_decision_id,
+            "decision_id": quyet_dinh,
             "action_taken": action_taken,
             "outcome": outcome,
         })
-        _decisions[_last_decision_id] = status
+        _decisions[quyet_dinh] = status
 
     _decisions[catalog.CUSTOMER_CASE_ID] = status
     _customer_steps.append(
@@ -1382,31 +1391,200 @@ async def scamshield_signals(bank_code: str, account_no: str, amount: int, note:
           response_model_exclude_none=True,
           summary="Quyết định: stk quen (bỏ qua Scam Shield) hay stk mới (agent Scam Shield check)")
 async def transfer_precheck(payload: TransferPrecheckRequest) -> TransferPrecheckResponse:
-    """Rẽ nhánh luồng chuyển tiền theo yêu cầu:
+    """Chấm điểm lệnh chuyển và trả về mức Guardian cho FE rẽ nhánh.
 
-    - stk QUEN (đã lưu, đã giao dịch, không nghi ngờ) → requires_review=False,
-      FE đi thẳng tới màn xác nhận, KHÔNG cần Scam Shield.
-    - stk MỚI / nghi ngờ → gọi agent Scam Shield kiểm tra dấu hiệu lừa đảo,
-      trả verdict để FE hiện màn cảnh báo.
+    Ba mức theo wireframe (ngưỡng của engine): <40 pass · 40–74 soft_warn ·
+    >=75 intervene. FE dùng `level`:
+      - pass      → đi thẳng sang xác nhận, kèm "Đã chuyển N lần" cho yên tâm.
+      - soft_warn → hiện banner inline ngay trên màn nhập lệnh, KHÔNG thêm bước.
+      - intervene → chèn màn Guardian (/transfer/guardian) trước khi xác thực.
+
+    KHÔNG gọi LLM ở đây: wireframe yêu cầu bước này dưới 300 ms, mà một lượt
+    agent mất 25–35 giây. Lời của LLM chỉ xuất hiện ở lượt 2 của màn Guardian,
+    và ngay cả ở đó cũng bị chặn thời gian.
     """
+    global _last_decision_id
     resolve = await domain.resolve_beneficiary(
         domain.current_customer_id(), payload.bank_code, payload.account_no) or {}
-    # FE gửi sẵn số TK đầy đủ; ưu tiên nó để màn xác nhận/verdict không bị che.
+    # FE gửi sẵn số TK đầy đủ; ưu tiên nó để màn xác nhận không bị che.
     masked = payload.account_no or resolve.get("account_masked") or ""
     name = payload.holder_name or masked
-    if _is_trusted(resolve):
-        return TransferPrecheckResponse(
-            requires_review=False, trusted=True, is_new=False,
-            beneficiary_name=name, beneficiary_bank=payload.bank_code,
-            beneficiary_account=masked,
-        )
-    signals = await _collect_signals(payload.bank_code, payload.account_no, payload.amount, payload.note)
-    verdict = await _scamshield_verdict(payload.bank_code, payload.account_no,
-                                        payload.amount, payload.note, signals)
+    trusted = _is_trusted(resolve)
+
+    eng = await _engine_precheck(payload)
+    # Engine chết thì vẫn phải quyết được: stk quen cho qua, stk lạ cảnh báo nhẹ.
+    # Tuyệt đối không chặn chuyển tiền chỉ vì Guardian lỗi.
+    level = eng.get("level") or ("pass" if trusted else "soft_warn")
+    decision_id = str(eng.get("decision_id") or "")
+    if decision_id:
+        _last_decision_id = decision_id
+    kich_ban = eng.get("scenario")
     return TransferPrecheckResponse(
-        requires_review=True, trusted=False, is_new=bool(signals.is_new),
-        beneficiary_name=name, beneficiary_bank=payload.bank_code,
-        beneficiary_account=payload.account_no or signals.account_masked, verdict=verdict,
+        requires_review=(level == "intervene"),
+        trusted=trusted,
+        is_new=bool(resolve.get("is_new", not trusted)),
+        beneficiary_name=name,
+        beneficiary_bank=payload.bank_code,
+        beneficiary_account=masked,
+        score=int(eng.get("score") or 0),
+        level=level,
+        top_factors=_factor_reasons(eng),
+        template_text=eng.get("template_text") or "",
+        decision_id=decision_id,
+        question=eng.get("question"),
+        options=list(eng.get("options") or []),
+        scenario_id=(kich_ban or {}).get("scenario_id") if isinstance(kich_ban, dict) else None,
+        tx_count=int(resolve.get("tx_count") or 0),
+    )
+
+
+# ---- Guardian 3 mức: pass · soft-warn · intervene (wireframe màn Transfer) ----
+
+# Tên yếu tố của engine → nhãn ngắn cho người đọc. Phần mô tả lấy nguyên
+# `detail` engine sinh ra, nên chữ luôn khớp điểm đã chấm.
+_FACTOR_LABEL = {
+    "amount_deviation": "Số tiền",
+    "new_beneficiary": "Người nhận",
+    "time_of_day": "Thời điểm",
+    "behavior_drift": "Hành vi",
+    "relationship_history": "Quan hệ",
+    "recent_context": "Bối cảnh",
+}
+
+# Bốn hành động của wireframe. Nút nào được khuyến nghị là do engine quyết
+# (recommended_action), KHÔNG phải LLM.
+_GUARDIAN_ACTIONS = [
+    ("hold", "Khóa tạm 24 giờ"),
+    ("cancel", "Hủy giao dịch"),
+    ("contact", "Gọi MSB 1900 6083"),
+    ("continue", "Vẫn tiếp tục"),
+]
+
+
+def _factor_reasons(raw: dict, limit: int = 3) -> list[str]:
+    """top_factors (tên yếu tố) → câu người đọc hiểu được."""
+    factors = raw.get("factors") or {}
+    out: list[str] = []
+    for ten in (raw.get("top_factors") or [])[:limit]:
+        chi_tiet = (factors.get(ten) or {}).get("detail")
+        if chi_tiet:
+            out.append(f"{_FACTOR_LABEL.get(ten, ten)}: {chi_tiet}")
+    return out
+
+
+async def _engine_precheck(payload: TransferPrecheckRequest) -> dict:
+    """Chấm điểm CHÍNH lệnh khách đang nhập.
+
+    Khác _precheck_for (dựng từ fraud case mẫu để minh hoạ màn Ops): ở đây số
+    tiền, người nhận và nội dung là của khách, nên điểm trả về mới là điểm của
+    giao dịch này.
+    """
+    khach = domain.current_customer_id()
+    pf = await domain.portfolio(khach)
+    accounts = (pf or {}).get("accounts") or []
+    if not accounts:
+        return {}
+    return await domain.precheck({
+        "customer_id": khach,
+        "account_id": accounts[0]["account_id"],
+        "amount": payload.amount,
+        "beneficiary_bank_code": (payload.bank_code or "").upper(),
+        "beneficiary_account_no": (payload.account_no or "").replace(" ", ""),
+        "memo": payload.note,
+    }) or {}
+
+
+@app.get("/api/transfer/intervene/{decision_id}", response_model=InterveneDetail,
+         tags=["risk"], response_model_exclude_none=True,
+         summary="Lượt 1 màn Guardian: lý do dừng và câu hỏi cho khách")
+async def transfer_intervene_detail(decision_id: str) -> InterveneDetail:
+    """Đọc lại quyết định đã chấm, KHÔNG chấm lại.
+
+    Chấm lại sẽ ra điểm khác (thời điểm đổi, sự kiện 60 phút trôi đi) và màn
+    lượt 1 sẽ lệch điểm đã hiện ở màn nhập lệnh.
+    """
+    row = await domain.risk_decision(decision_id)
+    if not row:
+        raise HTTPException(404, f"không tìm thấy quyết định {decision_id}")
+    snap = row.get("tx_snapshot") or {}
+    return InterveneDetail(
+        decision_id=str(row["decision_id"]),
+        score=int(row.get("score") or 0),
+        level=row.get("level") or "intervene",
+        amount=int(snap.get("amount") or 0),
+        beneficiary_label=f"{snap.get('bank_code') or ''} {snap.get('beneficiary_masked') or ''}".strip(),
+        reasons=_factor_reasons(row),
+        question=row.get("question") or "Có ai đang hướng dẫn bạn thực hiện giao dịch này không?",
+        options=list(row.get("options") or [
+            "Có, đang có người hướng dẫn", "Không, tôi tự chuyển", "Tôi không chắc"]),
+        scenario_id=row.get("scenario_id"),
+    )
+
+
+async def _guardian_advice(row: dict, kb: dict, chon: str, them: str | None) -> tuple[str, str, str]:
+    """(tiêu đề, nội dung, nguồn) cho lượt 2.
+
+    Playbook là nguồn chính vì khuyến cáo đã được viết sẵn cho đúng kịch bản.
+    Agent chỉ diễn giải lại cho hợp câu trả lời của khách và bị CHẶN THỜI GIAN:
+    wireframe yêu cầu màn này hiện trong 1–3 giây, chờ LLM 30 giây là hỏng buổi
+    demo — hết giờ thì dùng nguyên lời playbook.
+    """
+    tieu_de = kb.get("advice_title") or "Giao dịch này có dấu hiệu bất thường"
+    noi_dung = kb.get("advice_body") or row.get("template_text") or (
+        "Hãy dừng lại và xác minh trực tiếp với người nhận trước khi chuyển tiền.")
+    if not domain.agent_configured(domain.SCAMSHIELD_AGENT_ID):
+        return tieu_de, noi_dung, "playbook"
+    hoi = (
+        f'Khách vừa chọn: "{chon}".\n'
+        + (f"Khách nói thêm: {them}\n" if them else "")
+        + f"Kịch bản nghi ngờ: {tieu_de}. Khuyến cáo gốc: {noi_dung}\n"
+        "Viết lại khuyến cáo trên thành 2-3 câu tiếng Việt, xưng hô thân mật, bám đúng "
+        "lựa chọn của khách. Chỉ trả về đoạn văn, không tiêu đề, không bảng."
+    )
+    try:
+        loi = await asyncio.wait_for(
+            domain.agent_answer(hoi, domain.SCAMSHIELD_AGENT_ID), timeout=8)
+    except Exception:
+        loi = None
+    if loi:
+        return tieu_de, _strip_markdown_for_plain(loi) or noi_dung, "agent"
+    return tieu_de, noi_dung, "playbook"
+
+
+@app.post("/api/transfer/intervene", response_model=InterveneAdvice, tags=["risk"],
+          summary="Lượt 2 màn Guardian: khuyến cáo và bốn hành động")
+async def transfer_intervene(payload: InterveneRequest) -> InterveneAdvice:
+    """Ghi câu trả lời của khách, trả khuyến cáo và bốn nút để khách tự quyết."""
+    row = await domain.risk_decision(payload.decision_id)
+    if not row:
+        raise HTTPException(404, f"không tìm thấy quyết định {payload.decision_id}")
+    kb = {}
+    if row.get("scenario_id"):
+        kb = await domain.scam_scenario(row["scenario_id"]) or {}
+    tieu_de, noi_dung, nguon = await _guardian_advice(
+        row, kb, payload.selected_option, payload.free_text)
+    khuyen = row.get("recommended_action") or kb.get("recommended_action") or "hold"
+    if khuyen not in {k for k, _ in _GUARDIAN_ACTIONS}:
+        khuyen = "hold"
+
+    # Ghi xuống database để vòng đời quyết định khép lại ở domain, không chỉ
+    # trong trình duyệt — màn Ops đọc chính dòng này.
+    await domain.intervene({
+        "decision_id": payload.decision_id,
+        "selected_option": payload.selected_option,
+        "free_text": payload.free_text,
+        "advice_title": tieu_de,
+        "advice_body": noi_dung,
+    })
+    return InterveneAdvice(
+        decision_id=payload.decision_id,
+        selected_option=payload.selected_option,
+        advice_title=tieu_de,
+        advice_body=noi_dung,
+        recommended_action=khuyen,
+        actions=[GuardianAction(key=k, label=nhan, recommended=(k == khuyen))
+                 for k, nhan in _GUARDIAN_ACTIONS],
+        source=nguon,
     )
 
 
