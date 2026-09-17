@@ -1003,3 +1003,15 @@ def test_gioi_han_so_bang_va_so_dong():
     gs = main._parse_markdown_grids(mot_bang * 6)
     assert len(gs) <= 3
     assert all(len(g.rows) <= 15 for g in gs)
+
+
+def test_so_sanh_cac_nhom_trong_thang_khong_ra_bang_so_thang():
+    """"so sánh chi tiêu các NHÓM tháng này" là so các nhóm trong một tháng.
+    Trước đây rơi vào bảng so tháng-với-tháng nên chữ nói về nhóm mà bảng lại
+    liệt kê từng tháng."""
+    r = client.post("/api/copilot/chat",
+                    json={"message": "so sánh chi tiêu các nhóm tháng này và cho tôi lời khuyên cắt giảm"})
+    _, table, _ = _doc_events(r.text)
+    assert table is not None
+    assert table["rowHeader"] == "Nhóm", "phải là bảng theo nhóm, không phải theo tháng"
+    assert "so sánh" not in table["title"].lower()

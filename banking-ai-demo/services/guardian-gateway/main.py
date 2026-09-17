@@ -296,6 +296,9 @@ _QUARTER_RE = re.compile(r"quý|quarter", re.IGNORECASE)
 _MONTH_RE = re.compile(r"tháng", re.IGNORECASE)
 # So sánh nhiều tháng: "so với tháng 8", "so sánh các tháng", "6 tháng gần đây".
 _COMPARE_RE = re.compile(r"so sánh|so với|các tháng|mấy tháng|nhiều tháng|từng tháng|những tháng|vài tháng|\d+\s*tháng", re.IGNORECASE)
+# Câu hỏi nói về NHÓM chi tiêu chứ không phải mốc thời gian: "so sánh các nhóm
+# tháng này" là so các nhóm trong một tháng, không phải so tháng với tháng.
+_GROUP_RE = re.compile(r"nhóm|danh mục|hạng mục|khoản mục", re.IGNORECASE)
 # Một tháng cụ thể: "tháng 6", "tháng 6/2026" — SỐ đứng NGAY SAU chữ "tháng"
 # (khác "6 tháng" = số lượng tháng, đã bắt ở _COMPARE_RE).
 _SPECIFIC_MONTH_RE = re.compile(r"tháng\s*(1[0-2]|0?[1-9])(?:\s*[/-]\s*(\d{4}))?", re.IGNORECASE)
@@ -650,7 +653,9 @@ async def _spending_visual(question: str) -> tuple[ChatTable | None, ChatChart |
     1. TƯ VẤN có số tiền mục tiêu ("mua ô tô 500 triệu") → bảng lộ trình tiết
        kiệm. Phải xét TRƯỚC cổng _SPEND_RE vì câu hỏi tư vấn thường không nhắc
        chữ "chi tiêu" nào.
-    2. SO SÁNH nhiều tháng ("so với tháng 8", "6 tháng gần đây") → bảng nhiều tháng.
+    2. SO SÁNH nhiều tháng ("so với tháng 8", "6 tháng gần đây") → bảng nhiều
+       tháng. Trừ khi câu nhắc "nhóm": "so sánh các nhóm tháng này" là so các
+       nhóm TRONG một tháng, đưa bảng nhiều tháng vào là lạc đề.
     3. MỘT THÁNG CỤ THỂ ("tháng 6", "tháng 6/2026") → bảng đúng tháng đó. Phải xét
        TRƯỚC nhánh "tháng chung", nếu không "tháng 6" rơi vào bảng tháng hiện tại.
     4. Quý → bảng theo nhóm của quý.
@@ -666,7 +671,7 @@ async def _spending_visual(question: str) -> tuple[ChatTable | None, ChatChart |
             khach = await session_customer()
             return _savings_plan_visual(muc_tieu, khach.balance, report.months)
     if _SPEND_RE.search(question):
-        if _COMPARE_RE.search(question) and _MONTH_RE.search(question):
+        if _COMPARE_RE.search(question) and _MONTH_RE.search(question) and not _GROUP_RE.search(question):
             return _months_compare_visual(await copilot_months(months=6))
         mm = _SPECIFIC_MONTH_RE.search(question)
         if mm:
