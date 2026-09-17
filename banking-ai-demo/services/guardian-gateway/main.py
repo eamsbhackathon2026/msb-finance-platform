@@ -1462,10 +1462,19 @@ _GUARDIAN_ACTIONS = [
 
 
 def _factor_reasons(raw: dict, limit: int = 3) -> list[str]:
-    """top_factors (tên yếu tố) → câu người đọc hiểu được."""
+    """top_factors (tên yếu tố) → câu người đọc hiểu được.
+
+    top_factors đến từ hai nguồn với hai kiểu khác nhau: response của engine đã
+    tách sẵn thành list, còn cột trong risk_decision là chuỗi ngăn bởi dấu phẩy.
+    Duyệt thẳng chuỗi sẽ ra từng KÝ TỰ và không khớp yếu tố nào — màn Guardian
+    mở bằng deep-link sẽ trắng phần lý do.
+    """
     factors = raw.get("factors") or {}
+    tho = raw.get("top_factors") or []
+    if isinstance(tho, str):
+        tho = [x.strip() for x in tho.split(",") if x.strip() and x.strip() != "none"]
     out: list[str] = []
-    for ten in (raw.get("top_factors") or [])[:limit]:
+    for ten in tho[:limit]:
         chi_tiet = (factors.get(ten) or {}).get("detail")
         if chi_tiet:
             out.append(f"{_FACTOR_LABEL.get(ten, ten)}: {chi_tiet}")

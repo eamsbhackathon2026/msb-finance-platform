@@ -1209,3 +1209,18 @@ def test_intervene_khong_co_quyet_dinh_thi_404():
     r2 = client.post("/api/transfer/intervene",
                      json={"decisionId": "khong-ton-tai", "selectedOption": "Không, tôi tự chuyển"})
     assert r2.status_code == 404
+
+
+def test_top_factors_dang_chuoi_van_doc_duoc():
+    """Engine trả list, cột risk_decision lưu chuỗi ngăn phẩy. Duyệt thẳng chuỗi
+    sẽ ra từng ký tự và màn Guardian mở bằng deep-link sẽ trắng phần lý do."""
+    raw = {
+        "top_factors": "amount_deviation,new_beneficiary",
+        "factors": {"amount_deviation": {"detail": "gấp 17 lần"},
+                    "new_beneficiary": {"detail": "chưa từng chuyển"}},
+    }
+    assert main._factor_reasons(raw) == ["Số tiền: gấp 17 lần", "Người nhận: chưa từng chuyển"]
+
+
+def test_top_factors_none_thi_khong_ra_ly_do_rac():
+    assert main._factor_reasons({"top_factors": "none", "factors": {}}) == []
