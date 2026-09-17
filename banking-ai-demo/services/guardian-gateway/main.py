@@ -960,7 +960,8 @@ async def transfer_history() -> list[TransferHistoryItem]:
         else:
             bank = r.get("beneficiary_bank_code") or ""
             account = r.get("beneficiary_account_masked") or ""
-        t = (r.get("transaction_time") or "000000").ljust(6, "0")
+        # _tx_payload của transaction-service trả giờ dưới key "time" (HHMMSS)
+        t = (r.get("time") or "000000").ljust(6, "0")
         items.append(TransferHistoryItem(
             id=str(r.get("transaction_id")),
             datetime=f"{r.get('date')}T{t[0:2]}:{t[2:4]}:{t[4:6]}",
