@@ -58,6 +58,10 @@ spec:
             # POST /v1/agents/{id}/runs và chat dùng LLM thật thay cho kịch bản.
             - name: AGENT_ID
               value: "01a0aaef-d140-79ce-86ed-bf7cf90b097f"
+            # Agent Scam Shield — kiểm tra dấu hiệu lừa đảo cho stk mới. Điền sau
+            # khi tạo agent thứ hai; trống thì precheck rơi về verdict suy từ tín hiệu.
+            - name: SCAMSHIELD_AGENT_ID
+              value: ""
           ports:
             - containerPort: 8080
           readinessProbe:

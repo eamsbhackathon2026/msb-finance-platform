@@ -378,6 +378,67 @@ class TransferActionResponse(Contract):
     message: str
 
 
+# ---- Luồng chuyển tiền: favorite (bỏ qua Scam Shield) vs stk mới (agent check) --
+
+class TransferBeneficiary(Contract):
+    """Một người thụ hưởng trong danh bạ. trusted=True → chuyển thẳng, không cần
+    Scam Shield (stk quen, đã dùng, không bị nghi ngờ)."""
+    id: str
+    name: str
+    bank: str
+    account: str
+    relationship: str
+    trusted: bool
+
+
+class TransferPrecheckRequest(Contract):
+    bank_code: str
+    account_no: str
+    amount: int
+    note: str = ""
+    holder_name: str = ""
+
+
+class ScamShieldSignals(Contract):
+    """Tín hiệu gian lận cho một lệnh chuyển — công cụ để agent Scam Shield đọc."""
+    bank_code: str
+    account_no: str
+    account_masked: str
+    known: bool
+    is_new: bool
+    relationship: str
+    status: str
+    age_days: int
+    tx_count: int
+    amount: int
+    note: str
+    scenario_match: str | None = None
+    scenario_confidence: int | None = None
+
+
+class ScamShieldVerdict(Contract):
+    """Kết luận của agent Scam Shield về một lệnh chuyển tới stk mới."""
+    level: Literal["safe", "suspect", "danger"]
+    title: str
+    summary: str
+    reasons: list[str]
+    recommendation: str
+    # "agent" = do agent LLM kết luận; "fallback" = agent lỗi, suy ra từ tín hiệu.
+    source: Literal["agent", "fallback"]
+
+
+class TransferPrecheckResponse(Contract):
+    # requires_review=False → stk quen, chuyển thẳng tới màn xác nhận.
+    # requires_review=True  → stk mới/nghi ngờ, hiện màn Scam Shield với verdict.
+    requires_review: bool
+    trusted: bool
+    is_new: bool
+    beneficiary_name: str
+    beneficiary_bank: str
+    beneficiary_account: str
+    verdict: ScamShieldVerdict | None = None
+
+
 class ProtectionToggleRequest(Contract):
     enabled: bool
 

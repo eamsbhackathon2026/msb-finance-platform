@@ -240,7 +240,7 @@ def test_info_phan_anh_dung_cau_hinh_domain():
     body = client.get("/info").json()
     # conftest tắt DOMAIN_ENABLED nên /info phải báo đúng như vậy.
     assert body["integrated_with_domain_services"] is False
-    assert len(body["endpoints"]) == 23
+    assert len(body["endpoints"]) == 26
 
 
 def test_openapi_phuc_vu_dung_cac_endpoint_fe_goi():
@@ -257,6 +257,9 @@ def test_openapi_phuc_vu_dung_cac_endpoint_fe_goi():
         "/api/copilot/chat",
         "/api/transfer/pending",
         "/api/transfer/action",
+        "/api/transfer/beneficiaries",
+        "/api/transfer/precheck",
+        "/api/scamshield/signals",
         "/api/risk/assess",
         "/api/risk/explain",
         "/api/safety-center",
@@ -789,3 +792,50 @@ def test_agent_loi_cau_khong_chi_tieu_van_dung_kich_ban():
     tokens, table, _ = _doc_events(r.text)
     assert table is None
     assert "tiết kiệm" in "".join(tokens).lower()
+
+
+# ---- Luồng chuyển tiền: favorite (bỏ Scam Shield) vs stk mới (agent) ----------
+
+def test_transfer_beneficiaries_dung_hop_dong():
+    r = client.get("/api/transfer/beneficiaries")
+    assert r.status_code == 200
+    bl = r.json()
+    assert bl and set(bl[0]) == {"id", "name", "bank", "account", "relationship", "trusted"}
+
+
+def test_is_trusted_logic():
+    assert main._is_trusted({"known": True, "is_new": False, "status": "ACTIVE"}) is True
+    assert main._is_trusted({"known": True, "is_new": True, "status": "ACTIVE"}) is False    # stk mới
+    assert main._is_trusted({"known": True, "is_new": False, "status": "SUSPECTED"}) is False  # bị nghi
+    assert main._is_trusted({"known": False, "is_new": False, "status": "ACTIVE"}) is False    # không quen
+    assert main._is_trusted({}) is False
+
+
+def test_precheck_stk_moi_can_review_co_verdict():
+    # stub: resolve None → không quen → phải review; agent chưa cấu hình → verdict fallback
+    r = client.post("/api/transfer/precheck",
+                    json={"bankCode": "VPB", "accountNo": "1902664130", "amount": 85_000_000, "note": "gap"})
+    assert r.status_code == 200
+    b = r.json()
+    assert b["requiresReview"] is True and b["trusted"] is False
+    assert b["verdict"]["level"] in {"safe", "suspect", "danger"}
+    assert b["verdict"]["source"] == "fallback"
+    assert set(b["verdict"]) >= {"level", "title", "summary", "reasons", "recommendation", "source"}
+
+
+def test_parse_verdict_boc_dung_muc_do():
+    v = main._parse_verdict("NGUY_HIEM\n- Tài khoản mới\n- Đã bị báo cáo\nKhuyến nghị: không nên chuyển.")
+    assert v is not None and v.level == "danger" and v.source == "agent"
+    assert any("mới" in r for r in v.reasons)
+    assert "không nên" in v.recommendation.lower()
+    assert main._parse_verdict("câu không có tag mức độ") is None
+
+
+def test_fallback_verdict_stk_bi_nghi_la_danger():
+    from models import ScamShieldSignals
+    s = ScamShieldSignals(bank_code="ACB", account_no="x", account_masked="x", known=True, is_new=True,
+                          relationship="UNKNOWN", status="SUSPECTED", age_days=0, tx_count=0,
+                          amount=85_000_000, note="", scenario_match="Giả danh công an")
+    v = main._fallback_verdict(s)
+    assert v.level == "danger"
+    assert any("báo cáo" in r for r in v.reasons)

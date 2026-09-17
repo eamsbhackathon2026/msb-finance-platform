@@ -43,6 +43,7 @@ from models import (
     CopilotIntro,
     HomeContent,
     LoginUser,
+    TransferBeneficiary,
     MonthCategory,
     MonthSummary,
     MonthlyReport,
@@ -320,6 +321,18 @@ DEMO_LOGIN_USER = LoginUser(
     phone_masked="09** *** 303",
     user_status="ACTIVE",
 )
+
+
+# ============ DANH BẠ NGƯỜI THỤ HƯỞNG (bản tạm khi domain lỗi) ============
+
+TRANSFER_BENEFICIARIES = [
+    TransferBeneficiary(id="b1", name="MAI VAN S***", bank="VCB", account="3028 ****",
+                        relationship="FAMILY", trusted=True),
+    TransferBeneficiary(id="b2", name="VIETTEL T***", bank="MSB", account="8097 ****",
+                        relationship="MERCHANT", trusted=True),
+    TransferBeneficiary(id="b3", name="NGUYEN VAN T***", bank="ACB", account="5270 ****",
+                        relationship="UNKNOWN", trusted=False),
+]
 
 
 # ============ LỆNH CHUYỂN TIỀN ĐANG CHỜ (màn Scam Shield) ============

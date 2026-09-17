@@ -72,8 +72,13 @@ from models import (
     RiskExplain,
     SafetyCenter,
     ScamAlert,
+    ScamShieldSignals,
+    ScamShieldVerdict,
     TransferActionRequest,
     TransferActionResponse,
+    TransferBeneficiary,
+    TransferPrecheckRequest,
+    TransferPrecheckResponse,
 )
 
 SERVICE_NAME = "guardian-gateway"
@@ -769,6 +774,160 @@ async def transfer_action(payload: TransferActionRequest) -> TransferActionRespo
     return TransferActionResponse(ok=True, case_status=status, message=message)
 
 
+# ---- Luồng chuyển tiền: favorite bỏ qua Scam Shield, stk mới qua agent -------
+
+def _is_trusted(resolve: dict) -> bool:
+    """stk quen: đã có trong danh bạ (known), không phải mới, không bị nghi ngờ.
+    Đủ ba điều này thì chuyển thẳng, không cần Scam Shield."""
+    return (bool(resolve.get("known"))
+            and not resolve.get("is_new", True)
+            and resolve.get("status") != "SUSPECTED")
+
+
+async def _collect_signals(bank_code: str, account_no: str, amount: int, note: str) -> ScamShieldSignals:
+    """Gom tín hiệu gian lận: hồ sơ người nhận + đối chiếu playbook lừa đảo."""
+    resolve = await domain.resolve_beneficiary(domain.DEMO_CUSTOMER_ID, bank_code, account_no) or {}
+    match = await domain.scam_match({
+        "persona": "SENIOR", "memo": note or "", "amount": amount,
+        "is_new_beneficiary": bool(resolve.get("is_new", True)),
+    }) or {}
+    scen = match.get("scenario") or {}
+    return ScamShieldSignals(
+        bank_code=bank_code, account_no=account_no,
+        account_masked=resolve.get("account_masked") or account_no,
+        known=bool(resolve.get("known")), is_new=bool(resolve.get("is_new", True)),
+        relationship=resolve.get("relationship") or "UNKNOWN",
+        status=resolve.get("status") or "ACTIVE",
+        age_days=int(resolve.get("age_days") or 0),
+        tx_count=int(resolve.get("tx_count") or 0),
+        amount=amount, note=note or "",
+        scenario_match=(scen.get("scenario_name") if match.get("matched") else None),
+    )
+
+
+_LEVEL_TAGS = {"NGUY_HIEM": "danger", "NGHI_NGO": "suspect", "AN_TOAN": "safe"}
+_LEVEL_TITLES = {"danger": "Cảnh báo: dấu hiệu lừa đảo",
+                 "suspect": "Cần thận trọng", "safe": "Chưa thấy dấu hiệu bất thường"}
+
+
+def _parse_verdict(text: str) -> ScamShieldVerdict | None:
+    """Bóc verdict từ câu trả lời agent: dòng ĐẦU là NGUY_HIEM|NGHI_NGO|AN_TOAN,
+    các dòng sau là lý do (gạch đầu dòng) + khuyến nghị."""
+    lines = [ln.strip() for ln in text.strip().splitlines() if ln.strip()]
+    if not lines:
+        return None
+    level = next((lv for tag, lv in _LEVEL_TAGS.items() if tag in lines[0].upper()), None)
+    if level is None:
+        return None
+    body = lines[1:] or lines
+    reasons = [re.sub(r"^[-•*]\s*", "", ln) for ln in body if ln.lstrip()[:1] in "-•*"]
+    recommendation = next((ln for ln in body if "khuyến" in ln.lower() or "không nên" in ln.lower()), "")
+    summary = " ".join(ln for ln in body if ln.lstrip()[:1] not in "-•*").strip()[:400]
+    return ScamShieldVerdict(
+        level=level, title=_LEVEL_TITLES[level], summary=summary or _LEVEL_TITLES[level],
+        reasons=reasons or ([summary] if summary else []),
+        recommendation=recommendation, source="agent",
+    )
+
+
+def _fallback_verdict(s: ScamShieldSignals) -> ScamShieldVerdict:
+    """Agent lỗi → suy verdict từ tín hiệu (deterministic) để luồng không kẹt."""
+    reasons: list[str] = []
+    if s.status == "SUSPECTED":
+        reasons.append("Tài khoản người nhận đã bị báo cáo nghi ngờ lừa đảo.")
+    if s.is_new:
+        reasons.append("Tài khoản mới, chưa từng giao dịch với bạn.")
+    if s.age_days == 0:
+        reasons.append("Tài khoản vừa được mở gần đây.")
+    if s.scenario_match:
+        reasons.append(f"Khớp kịch bản lừa đảo: {s.scenario_match}.")
+    if s.amount >= 50_000_000:
+        reasons.append(f"Số tiền lớn: {s.amount:,} ₫.".replace(",", "."))
+    danger = s.status == "SUSPECTED" or bool(s.scenario_match)
+    level = "danger" if danger else ("suspect" if s.is_new else "safe")
+    rec = ("Không nên chuyển. Hãy gọi lại người nhận qua số bạn tự biết để xác minh."
+           if level == "danger" else
+           "Xác minh kỹ người nhận trước khi chuyển." if level == "suspect" else
+           "Có thể tiếp tục, vẫn nên kiểm tra lại thông tin người nhận.")
+    return ScamShieldVerdict(
+        level=level, title=_LEVEL_TITLES[level],
+        summary=("Đây là tài khoản mới, hệ thống ghi nhận các dấu hiệu dưới đây."
+                 if reasons else "Chưa thấy dấu hiệu bất thường rõ rệt."),
+        reasons=reasons, recommendation=rec, source="fallback",
+    )
+
+
+async def _scamshield_verdict(bank_code: str, account_no: str, amount: int, note: str,
+                              signals: ScamShieldSignals) -> ScamShieldVerdict:
+    """Hỏi agent Scam Shield; agent lỗi thì suy từ tín hiệu."""
+    question = (
+        f"Khách chuẩn bị chuyển {amount:,} đồng tới tài khoản {account_no} tại ngân hàng "
+        f"{bank_code}, nội dung chuyển khoản: \"{note}\". Hãy dùng công cụ kiểm tra dấu hiệu "
+        "lừa đảo cho tài khoản này rồi kết luận."
+    ).replace(",", ".")
+    answer = await domain.agent_answer(question, agent_id=domain.SCAMSHIELD_AGENT_ID)
+    if answer and (parsed := _parse_verdict(answer)):
+        return parsed
+    return _fallback_verdict(signals)
+
+
+@app.get("/api/transfer/beneficiaries", response_model=list[TransferBeneficiary], tags=["risk"],
+         summary="Danh bạ người thụ hưởng đã lưu (favorite)")
+async def transfer_beneficiaries() -> list[TransferBeneficiary]:
+    data = await domain.beneficiaries(domain.DEMO_CUSTOMER_ID)
+    rows = (data or {}).get("beneficiaries") if isinstance(data, dict) else data
+    if not rows:
+        return catalog.TRANSFER_BENEFICIARIES
+    return [
+        TransferBeneficiary(
+            id=str(b.get("beneficiary_id")),
+            name=b.get("name_masked") or "Người nhận",
+            bank=b.get("bank_code") or "",
+            account=b.get("account_masked") or "",
+            relationship=b.get("relationship") or "UNKNOWN",
+            trusted=(not b.get("is_new", True)) and b.get("status") == "ACTIVE",
+        )
+        for b in rows
+    ]
+
+
+@app.get("/api/scamshield/signals", response_model=ScamShieldSignals, tags=["risk"],
+         summary="Tín hiệu gian lận của một lệnh chuyển — công cụ cho agent Scam Shield")
+async def scamshield_signals(bank_code: str, account_no: str, amount: int, note: str = "") -> ScamShieldSignals:
+    return await _collect_signals(bank_code, account_no, amount, note)
+
+
+@app.post("/api/transfer/precheck", response_model=TransferPrecheckResponse, tags=["risk"],
+          response_model_exclude_none=True,
+          summary="Quyết định: stk quen (bỏ qua Scam Shield) hay stk mới (agent Scam Shield check)")
+async def transfer_precheck(payload: TransferPrecheckRequest) -> TransferPrecheckResponse:
+    """Rẽ nhánh luồng chuyển tiền theo yêu cầu:
+
+    - stk QUEN (đã lưu, đã giao dịch, không nghi ngờ) → requires_review=False,
+      FE đi thẳng tới màn xác nhận, KHÔNG cần Scam Shield.
+    - stk MỚI / nghi ngờ → gọi agent Scam Shield kiểm tra dấu hiệu lừa đảo,
+      trả verdict để FE hiện màn cảnh báo.
+    """
+    resolve = await domain.resolve_beneficiary(
+        domain.DEMO_CUSTOMER_ID, payload.bank_code, payload.account_no) or {}
+    masked = resolve.get("account_masked") or payload.account_no
+    name = payload.holder_name or masked
+    if _is_trusted(resolve):
+        return TransferPrecheckResponse(
+            requires_review=False, trusted=True, is_new=False,
+            beneficiary_name=name, beneficiary_bank=payload.bank_code,
+            beneficiary_account=masked,
+        )
+    signals = await _collect_signals(payload.bank_code, payload.account_no, payload.amount, payload.note)
+    verdict = await _scamshield_verdict(payload.bank_code, payload.account_no,
+                                        payload.amount, payload.note, signals)
+    return TransferPrecheckResponse(
+        requires_review=True, trusted=False, is_new=bool(signals.is_new),
+        beneficiary_name=name, beneficiary_bank=payload.bank_code,
+        beneficiary_account=signals.account_masked, verdict=verdict,
+    )
+
+
 # ---- Màn Ops -----------------------------------------------------------------
 
 @app.get("/api/ops/session", response_model=OpsSession, tags=["ops"],
@@ -891,6 +1050,7 @@ async def info() -> dict:
         "integrated_with_domain_services": domain.DOMAIN_ENABLED,
         "demo_customer_id": domain.DEMO_CUSTOMER_ID,
         "agent_service_configured": domain.agent_configured(),
+        "scamshield_agent_configured": domain.agent_configured(domain.SCAMSHIELD_AGENT_ID),
         "endpoints": [
             "GET /api/home",
             "POST /api/auth/login",
@@ -905,6 +1065,9 @@ async def info() -> dict:
             "POST /api/risk/assess",
             "GET /api/risk/explain",
             "POST /api/transfer/action",
+            "GET /api/transfer/beneficiaries",
+            "POST /api/transfer/precheck",
+            "GET /api/scamshield/signals",
             "GET /api/safety-center",
             "PATCH /api/safety-center/protections/{key}",
             "GET /api/ops/session",

@@ -33,6 +33,9 @@ IDENTITY_URL = os.getenv("IDENTITY_SERVICE_URL", "http://identity-service")
 AGENT_SERVICE_URL = os.getenv("AGENT_SERVICE_URL", "")
 AGENT_API_KEY = os.getenv("AGENT_API_KEY", "")
 AGENT_ID = os.getenv("AGENT_ID", "")
+# Agent thứ hai: Scam Shield — kiểm tra dấu hiệu lừa đảo cho lệnh chuyển tới stk
+# mới. Cùng nền tảng/khoá, chỉ khác agent id.
+SCAMSHIELD_AGENT_ID = os.getenv("SCAMSHIELD_AGENT_ID", "")
 
 PEER_TIMEOUT = float(os.getenv("PEER_TIMEOUT_SECONDS", "5"))
 
@@ -133,6 +136,18 @@ async def beneficiaries(customer_id: int) -> dict | None:
 
 async def account_events(customer_id: int) -> dict | None:
     return await _get(CUSTOMER_PROFILE_URL, f"/customers/{customer_id}/events")
+
+
+async def resolve_beneficiary(customer_id: int, bank_code: str, account_no: str) -> dict | None:
+    """Tra một số tài khoản người nhận: quen hay mới, tuổi tài khoản, quan hệ,
+    trạng thái (SUSPECTED?). Đây là tín hiệu để quyết định có cần Scam Shield."""
+    return await _post(CUSTOMER_PROFILE_URL, f"/customers/{customer_id}/beneficiaries/resolve",
+                       {"bank_code": bank_code, "account_no": account_no})
+
+
+async def scam_match(payload: dict) -> dict | None:
+    """Đối chiếu lệnh chuyển với playbook lừa đảo trong scam-knowledge-service."""
+    return await _post(SCAM_KNOWLEDGE_URL, "/scams/match", payload)
 
 
 # ---- transaction-service -----------------------------------------------------
@@ -241,17 +256,17 @@ async def auth_verify(username: str, password: str) -> dict | None:
 
 # ---- agent-service (chỉ gọi, KHÔNG sửa) --------------------------------------
 
-def agent_configured() -> bool:
+def agent_configured(agent_id: str | None = None) -> bool:
     """agent-service chỉ được dùng khi đã cấu hình đủ địa chỉ, khóa và agent.
 
     Nền tảng agent có xác thực riêng và cần một agent được tạo sẵn trong đó.
     Phần thiết lập ấy thuộc phạm vi người khác nên gateway không tự làm; khi
-    chưa đủ cấu hình thì chat dùng kịch bản trả lời có sẵn.
+    chưa đủ cấu hình thì phần gọi dùng dữ liệu/kịch bản dự phòng.
     """
-    return bool(AGENT_SERVICE_URL and AGENT_API_KEY and AGENT_ID)
+    return bool(AGENT_SERVICE_URL and AGENT_API_KEY and (agent_id or AGENT_ID))
 
 
-async def agent_answer(question: str) -> str | None:
+async def agent_answer(question: str, agent_id: str | None = None) -> str | None:
     """Hỏi agent-service một câu và lấy câu trả lời dạng văn bản.
 
     Dùng đúng hợp đồng công khai của nền tảng (api/openapi.yaml trong repo
@@ -274,13 +289,14 @@ async def agent_answer(question: str) -> str | None:
 
     Mọi lỗi đều trả None để phần gọi dùng kịch bản có sẵn.
     """
-    if not agent_configured():
+    aid = agent_id or AGENT_ID
+    if not agent_configured(aid):
         return None
     _mark_touched()
     try:
         async with httpx.AsyncClient(timeout=max(PEER_TIMEOUT, 60.0)) as client:
             r = await client.post(
-                f"{AGENT_SERVICE_URL}/v1/agents/{AGENT_ID}/runs",
+                f"{AGENT_SERVICE_URL}/v1/agents/{aid}/runs",
                 headers={"X-API-Key": AGENT_API_KEY},
                 json={"input": {"message": question}, "mode": "sync"},
             )
