@@ -591,6 +591,7 @@ async def agent_events(question: str, agent_id: str | None = None, kind: str = "
     Yield tuple `(loại, giá trị)`:
 
         ("text", "mẩu chữ")
+        ("reasoning", "mẩu tóm tắt suy nghĩ")
         ("step", AgentStep(...))
         ("output", "toàn văn câu trả lời")   — chỉ ở `run.completed`
 
@@ -645,7 +646,20 @@ async def agent_events(question: str, agent_id: str | None = None, kind: str = "
                       except ValueError:
                           continue
                       kind_of = event.get("type")
-                      if kind_of == "message.delta":
+                      if kind_of == "reasoning.delta":
+                          # Suy nghĩ của mô hình. KHÔNG phải câu trả lời: không gom
+                          # vào `full` nên không vào nhật ký lẫn phần chữ trả khách.
+                          #
+                          # Chỉ bản TÓM TẮT mới đi tiếp. Loại "raw" là mô hình tự
+                          # nói với chính nó: đo trên GLM qua GreenNode thì nó ra
+                          # tiếng Anh dù hội thoại tiếng Việt, dài gấp năm lần câu
+                          # trả lời, và chứa cả bản nháp mà nó tự chấm. Thứ đó
+                          # không những không nên hiện, mà còn không nên gửi xuống
+                          # trình duyệt — mở tab mạng là đọc được.
+                          text = event.get("text") or ""
+                          if text and event.get("kind") == "summary":
+                              yield "reasoning", text
+                      elif kind_of == "message.delta":
                           text = event.get("text") or ""
                           if text:
                               full.append(text)

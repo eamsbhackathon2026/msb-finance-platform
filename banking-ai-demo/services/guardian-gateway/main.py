@@ -1040,6 +1040,11 @@ async def copilot_chat(payload: ChatRequest) -> StreamingResponse:
                 # xem được dữ liệu".
                 customer_id=khach,
             ):
+                if loai == "reasoning":
+                    # Tóm tắt suy nghĩ đi cùng đường với bước: cùng là chuyện trợ
+                    # lý đang làm gì, và FE hiện chúng trên cùng một dòng.
+                    yield sse({"reasoning": gia_tri})
+                    continue
                 if loai == "step":
                     # Phát NGAY, xen giữa token: giá trị của bước nằm ở chỗ khách
                     # thấy trợ lý đang làm gì trong lúc chờ, không phải sau khi xong.

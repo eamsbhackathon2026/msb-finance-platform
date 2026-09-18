@@ -1874,7 +1874,7 @@ def _doc_su_kien(body: str) -> list[tuple[str, dict | str]]:
             ra.append(("done", ""))
             continue
         parsed = json.loads(payload)
-        for khoa in ("token", "step", "table", "grid", "chart"):
+        for khoa in ("token", "step", "reasoning", "table", "grid", "chart"):
             if khoa in parsed:
                 ra.append((khoa, parsed[khoa]))
                 break
@@ -1995,3 +1995,22 @@ def test_guardian_khuyen_cao_kem_buoc(monkeypatch):
                               "Tôi đang được hướng dẫn qua điện thoại", None))
     assert nguon == "agent" and noi_dung == "Anh/chị dừng lại giúp em nhé."
     assert [b.label for b in buoc_ra] == ["Đang chuẩn bị câu hỏi xác minh"]
+
+
+def test_chat_phat_tom_tat_suy_nghi_ra_sse(monkeypatch):
+    """Tóm tắt suy nghĩ đi tới trình duyệt trong lúc trợ lý còn đang nghĩ."""
+    ghi_nhan: dict = {}
+
+    async def fake(question, agent_id=None, kind="copilot", customer_id=None,
+                   session_key=None, decision_id=None):
+        ghi_nhan["hoi"] = question
+        yield ("reasoning", "Mình xem giao dịch trước.")
+        yield ("text", "Tháng này bạn tiêu 12 triệu.")
+
+    monkeypatch.setattr(main.domain, "agent_events", fake)
+    r = client.post("/api/copilot/chat", json={"message": "giúp tôi với"})
+    su_kien = _doc_su_kien(r.text)
+    assert ("reasoning", "Mình xem giao dịch trước.") in [
+        (k, v) for k, v in su_kien if k == "reasoning"]
+    # Suy nghĩ ra TRƯỚC chữ: đó là lúc khách đang chờ và cần biết máy đang làm gì.
+    assert [k for k, _ in su_kien].index("reasoning") < [k for k, _ in su_kien].index("token")

@@ -441,3 +441,51 @@ def test_ben_goi_het_gio_thi_nhat_ky_ghi_timeout(configured, monkeypatch):
 
     asyncio.run(chay())
     assert _call_to("/llm-traces")["json"]["status"] == "timeout"
+
+
+def test_tom_tat_suy_nghi_khong_lan_vao_cau_tra_loi(configured, monkeypatch):
+    """Nền tảng phát reasoning.delta khi trợ lý bật cờ kể suy nghĩ.
+
+    Nó phải đi đường riêng: lẫn vào `full` thì tóm tắt suy nghĩ vừa hiện ra cho
+    khách như câu trả lời, vừa nằm trong nhật ký như thể mô hình đã nói thế.
+    """
+    monkeypatch.setattr(domain.httpx, "AsyncClient", _client_phat([
+        _sse({"type": "reasoning.delta", "kind": "summary", "text": "Khách hỏi chi tiêu, "}),
+        _sse({"type": "reasoning.delta", "kind": "summary", "text": "mình xem giao dịch trước."}),
+        _sse({"type": "message.delta", "text": "Tháng này bạn tiêu 12 triệu."}),
+        _sse({"type": "run.completed", "run": {"output": "Tháng này bạn tiêu 12 triệu."}}),
+    ]))
+    out = asyncio.run(_gom(domain.agent_events("x")))
+    assert [k for k, _ in out] == ["reasoning", "reasoning", "text", "output"]
+    cau, _ = asyncio.run(domain.agent_answer_with_steps("x"))
+    assert cau == "Tháng này bạn tiêu 12 triệu."
+    trace = _call_to("/llm-traces")["json"]
+    assert "Khách hỏi chi tiêu" not in trace["response"]
+
+
+def test_suy_luan_tho_khong_duoc_gui_xuong_trinh_duyet(configured, monkeypatch):
+    """Loại "raw" là mô hình tự nói với chính nó, không phải lời kể cho khách.
+
+    Đo thật trên GLM qua GreenNode: tiếng Anh dù hội thoại tiếng Việt, dài gấp
+    năm lần câu trả lời, kèm bản nháp mô hình tự chấm. Chặn ngay ở gateway chứ
+    không để FE tự lọc, vì gửi xuống rồi thì mở tab mạng là đọc được.
+    """
+    monkeypatch.setattr(domain.httpx, "AsyncClient", _client_phat([
+        _sse({"type": "reasoning.delta", "kind": "raw",
+              "text": "Draft the Response (in Vietnamese). Does it meet all constraints? Yes."}),
+        _sse({"type": "message.delta", "text": "Tổng tuổi ba đứa là 22."}),
+        _sse({"type": "run.completed", "run": {"output": "Tổng tuổi ba đứa là 22."}}),
+    ]))
+    out = asyncio.run(_gom(domain.agent_events("x")))
+    assert [k for k, _ in out] == ["text", "output"]
+    assert not any("Draft the Response" in str(v) for _, v in out)
+
+
+def test_ban_tom_tat_thi_van_duoc_ke(configured, monkeypatch):
+    monkeypatch.setattr(domain.httpx, "AsyncClient", _client_phat([
+        _sse({"type": "reasoning.delta", "kind": "summary", "text": "Em xem giao dịch trước đã."}),
+        _sse({"type": "message.delta", "text": "Tháng này bạn tiêu 12 triệu."}),
+        _sse({"type": "run.completed"}),
+    ]))
+    out = asyncio.run(_gom(domain.agent_events("x")))
+    assert ("reasoning", "Em xem giao dịch trước đã.") in out
