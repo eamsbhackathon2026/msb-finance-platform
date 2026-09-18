@@ -9,9 +9,38 @@ Dùng asyncio.run() thay vì pytest-asyncio để không thêm dependency chỉ-
 vào image (requirements.txt cũng là thứ Docker build cài).
 """
 import asyncio
+import json
 
 import domain
 import pytest
+
+
+def _sse(event: dict) -> str:
+    return "data: " + json.dumps(event, ensure_ascii=False)
+
+
+class _FakeStream:
+    """Phản hồi SSE dựng sẵn, đủ hình dạng mà httpx.stream() trả về."""
+    def __init__(self, lines, status_code=200):
+        self._lines = lines
+        self.status_code = status_code
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *a):
+        return False
+
+    async def aread(self):
+        return b""
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise domain.httpx.HTTPStatusError("lỗi", request=None, response=None)
+
+    async def aiter_lines(self):
+        for line in self._lines:
+            yield line
 
 
 class _FakeResponse:
@@ -31,6 +60,9 @@ class _FakeClient:
     Một lượt gọi agent nay sinh HAI request: lời gọi agent, rồi lời ghi nhật ký
     sang action-feedback. Giữ cả danh sách thay vì mỗi request cuối, để mỗi test
     soi đúng request mà nó quan tâm.
+
+    Lời gọi agent đi bằng endpoint stream, nên fake này dựng một dòng SSE tối
+    thiểu từ `payload["output"]`: một mẩu delta rồi `run.completed`.
     """
     calls: list = []
     payload: dict = {"status": "succeeded", "output": "trả lời thật từ agent"}
@@ -50,6 +82,16 @@ class _FakeClient:
         if _FakeClient.fail is not None and "/v1/agents/" in url:
             raise _FakeClient.fail
         return _FakeResponse(_FakeClient.payload)
+
+    def stream(self, method, url, headers=None, json=None):
+        _FakeClient.calls.append({"url": url, "headers": headers or {}, "json": json or {}})
+        if _FakeClient.fail is not None and "/v1/agents/" in url:
+            raise _FakeClient.fail
+        output = _FakeClient.payload.get("output", "")
+        return _FakeStream([
+            _sse({"type": "message.delta", "text": output}),
+            _sse({"type": "run.completed", "run": {"output": output}}),
+        ])
 
 
 def _call_to(fragment: str) -> dict:
@@ -87,9 +129,12 @@ def test_agent_dung_hop_dong_than_request(configured):
     asyncio.run(domain.agent_answer("xin chào"))
     agent_call = _call_to("/v1/agents/")
     body = agent_call["json"]
-    # input là OBJECT có message, mode sync — không phải {"input": str, "stream": ...}
-    assert body == {"input": {"message": "xin chào"}, "mode": "sync"}
-    assert agent_call["url"].endswith("/v1/agents/agent-123/runs")
+    # input là OBJECT có message — không phải {"input": str, "stream": ...}.
+    assert body == {"input": {"message": "xin chào"}}
+    # Đi bằng endpoint stream kể cả khi bên gọi chỉ cần chữ: chỉ dòng sự kiện mới
+    # mang display_name của công cụ, còn tool_results[] của run đồng bộ thì chỉ có
+    # tên kỹ thuật — thứ không được phép đưa ra màn khách.
+    assert agent_call["url"].endswith("/v1/agents/agent-123/runs/stream")
 
 
 def test_agent_output_rong_thi_tra_none(configured):
@@ -153,30 +198,6 @@ def test_ghi_nhat_ky_hong_khong_lam_hong_cau_tra_loi(configured, monkeypatch):
 # Đường sync phải chờ trọn lần xử lý mới có chữ. Các test dưới đây ghim việc đọc
 # SSE của nền tảng: chỉ message.delta mới là chữ, heartbeat và các sự kiện khác
 # phải bỏ qua, và mọi lượt đều để lại một dòng nhật ký.
-
-class _FakeStream:
-    """Phản hồi SSE dựng sẵn, đủ hình dạng mà httpx.stream() trả về."""
-    def __init__(self, lines, status_code=200):
-        self._lines = lines
-        self.status_code = status_code
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *a):
-        return False
-
-    async def aread(self):
-        return b""
-
-    def raise_for_status(self):
-        if self.status_code >= 400:
-            raise domain.httpx.HTTPStatusError("lỗi", request=None, response=None)
-
-    async def aiter_lines(self):
-        for line in self._lines:
-            yield line
-
 
 def _client_phat(lines, status_code=200):
     class _Client:
@@ -251,3 +272,172 @@ def test_stream_409_la_ban_chu_khong_phai_hong(configured, monkeypatch):
 def test_stream_chua_cau_hinh_thi_khong_goi_mang(monkeypatch):
     monkeypatch.setattr(domain, "AGENT_SERVICE_URL", "")
     assert asyncio.run(_gom(domain.agent_stream("x"))) == []
+
+
+# ---- Bước dùng công cụ --------------------------------------------------------
+#
+# Nền tảng phát tool.started kèm display_name — nhãn người vận hành đặt trong màn
+# công cụ. Gateway phát lại NGUYÊN VĂN: không dịch, không ghép, không có bảng ánh
+# xạ nào ở đây, vì nhãn phải sửa được ở đúng nơi nó được đặt.
+
+def test_su_kien_cong_cu_thanh_buoc_co_nhan(configured, monkeypatch):
+    monkeypatch.setattr(domain.httpx, "AsyncClient", _client_phat([
+        _sse({"type": "tool.started", "call_id": "c1", "tool_name": "http_get_monthly_summary",
+              "display_name": "Đang tổng hợp thu chi theo tháng"}),
+        _sse({"type": "message.delta", "text": "Tháng này "}),
+        _sse({"type": "tool.finished", "call_id": "c1", "ok": True, "duration_ms": 312}),
+        _sse({"type": "message.delta", "text": "bạn chi 12 triệu."}),
+        _sse({"type": "run.completed", "run": {"output": "Tháng này bạn chi 12 triệu."}}),
+    ]))
+    out = asyncio.run(_gom(domain.agent_events("x")))
+    assert out == [
+        ("step", domain.AgentStep("c1", "Đang tổng hợp thu chi theo tháng", "running")),
+        ("text", "Tháng này "),
+        ("step", domain.AgentStep("c1", "Đang tổng hợp thu chi theo tháng", "done", 312)),
+        ("text", "bạn chi 12 triệu."),
+        ("output", "Tháng này bạn chi 12 triệu."),
+    ]
+
+
+def test_cong_cu_hong_van_hien_buoc_nhung_doi_trang_thai(configured, monkeypatch):
+    monkeypatch.setattr(domain.httpx, "AsyncClient", _client_phat([
+        _sse({"type": "tool.started", "call_id": "c1", "tool_name": "http_precheck_transfer",
+              "display_name": "Đang kiểm tra rủi ro"}),
+        _sse({"type": "tool.finished", "call_id": "c1", "ok": False, "duration_ms": 90}),
+        _sse({"type": "message.delta", "text": "Mình chưa tra được."}),
+        _sse({"type": "run.completed"}),
+    ]))
+    buoc = [v for k, v in asyncio.run(_gom(domain.agent_events("x"))) if k == "step"]
+    # Khách cần biết bước nào hỏng, nếu không câu trả lời thiếu ý trông như tùy tiện.
+    assert [b.status for b in buoc] == ["running", "error"]
+
+
+def test_chua_dat_nhan_thi_bo_qua_buoc_chu_khong_lo_ten_cong_cu(configured, monkeypatch):
+    """Công cụ chưa đặt nhãn: nền tảng gửi display_name BẰNG tên kỹ thuật.
+
+    Đây mới là hình dạng thật — `ToolStepLabel(step_label, display_name, name)`
+    bên agent-service không bao giờ trả chuỗi rỗng. Test cũ dựng sự kiện thiếu
+    hẳn display_name, tức một tình huống không tồn tại, nên nó không chứng minh
+    được điều đang tuyên bố.
+    """
+    monkeypatch.setattr(domain.httpx, "AsyncClient", _client_phat([
+        _sse({"type": "tool.started", "call_id": "c1", "tool_name": "http_get_portfolio",
+              "display_name": "http_get_portfolio"}),
+        _sse({"type": "tool.finished", "call_id": "c1", "ok": True, "duration_ms": 10}),
+        _sse({"type": "message.delta", "text": "xong"}),
+        _sse({"type": "run.completed"}),
+    ]))
+    out = asyncio.run(_gom(domain.agent_events("x")))
+    # Không nhãn thì im lặng còn hơn đưa http_get_portfolio ra màn khách.
+    assert [k for k, _ in out] == ["text"]
+
+
+def test_nhan_hinh_dang_ten_cong_cu_deu_bi_chan(configured):
+    for ten in ("http_get_portfolio", "mcp_office_search", "HTTP_GET_X"):
+        assert domain._nhan_cho_nguoi_doc(ten, "") == "", ten
+    # Câu thật thì phải qua, kể cả khi có gạch dưới trong tên riêng.
+    assert domain._nhan_cho_nguoi_doc("Đang xem số dư", "http_get_accounts") == "Đang xem số dư"
+
+
+def test_agent_answer_with_steps_uu_tien_output_cua_run(configured, monkeypatch):
+    monkeypatch.setattr(domain.httpx, "AsyncClient", _client_phat([
+        _sse({"type": "tool.started", "call_id": "c1", "tool_name": "t", "display_name": "Đang tra"}),
+        _sse({"type": "tool.finished", "call_id": "c1", "ok": True, "duration_ms": 5}),
+        _sse({"type": "message.delta", "text": "mẩu bị cắt"}),
+        _sse({"type": "run.completed", "run": {"output": "câu trả lời nền tảng chốt lại"}}),
+    ]))
+    cau, buoc = asyncio.run(domain.agent_answer_with_steps("x"))
+    assert cau == "câu trả lời nền tảng chốt lại"
+    # Một lần gọi công cụ cho ra MỘT bước, ở trạng thái cuối cùng của nó.
+    assert len(buoc) == 1 and buoc[0].status == "done" and buoc[0].duration_ms == 5
+
+
+def test_agent_answer_with_steps_thieu_output_thi_ghep_tu_delta(configured, monkeypatch):
+    monkeypatch.setattr(domain.httpx, "AsyncClient", _client_phat([
+        _sse({"type": "message.delta", "text": "ghép "}),
+        _sse({"type": "message.delta", "text": "lại"}),
+        _sse({"type": "run.completed"}),
+    ]))
+    assert asyncio.run(domain.agent_answer_with_steps("x")) == ("ghép lại", [])
+
+
+def test_agent_answer_with_steps_ban_thi_tra_none_khong_nem_loi(configured, monkeypatch):
+    monkeypatch.setattr(domain.httpx, "AsyncClient", _client_phat([], status_code=409))
+    # Bên gọi đồng bộ dùng kịch bản dự phòng khi không có câu trả lời; ném
+    # AgentBusy ra đó sẽ thành 500 giữa màn chuyển tiền.
+    assert asyncio.run(domain.agent_answer_with_steps("x")) == (None, [])
+
+
+def test_buoc_chua_ket_thuc_duoc_dong_lai(configured, monkeypatch):
+    """Run kết thúc khi một công cụ chưa báo xong.
+
+    Bỏ mặc thì màn hình quay vòng mãi ở một việc đã dừng từ lâu.
+    """
+    monkeypatch.setattr(domain.httpx, "AsyncClient", _client_phat([
+        _sse({"type": "tool.started", "call_id": "c1", "tool_name": "t", "display_name": "Đang tra"}),
+        _sse({"type": "run.completed", "run": {"output": "xong"}}),
+    ]))
+    buoc = [v for k, v in asyncio.run(_gom(domain.agent_events("x"))) if k == "step"]
+    assert [(b.status) for b in buoc] == ["running", "error"]
+
+
+def test_luot_thanh_cong_khong_co_delta_van_ghi_dung_nhat_ky(configured, monkeypatch):
+    """Mô hình trả lời gọn trong `run.output`, không phát mẩu delta nào.
+
+    Ghép nhật ký từ delta sẽ báo "stream không có nội dung" cho một lượt thành
+    công, và câu trả lời thật không bao giờ vào được nhật ký.
+    """
+    monkeypatch.setattr(domain.httpx, "AsyncClient", _client_phat([
+        _sse({"type": "run.completed", "run": {"output": "câu trả lời gọn"}}),
+    ]))
+    assert asyncio.run(domain.agent_answer_with_steps("x")) == ("câu trả lời gọn", [])
+    trace = _call_to("/llm-traces")["json"]
+    assert (trace["status"], trace["response"]) == ("ok", "câu trả lời gọn")
+
+
+def test_nhat_ky_noi_ro_409_thay_vi_loi_chung(configured, monkeypatch):
+    monkeypatch.setattr(domain.httpx, "AsyncClient", _client_phat([], status_code=409))
+    assert asyncio.run(domain.agent_answer_with_steps("x")) == (None, [])
+    # "Bận" khác hẳn "hỏng"; người đọc nhật ký cần phân biệt được.
+    assert "409" in _call_to("/llm-traces")["json"]["response"]
+
+
+def test_ben_goi_het_gio_thi_nhat_ky_ghi_timeout(configured, monkeypatch):
+    """asyncio.wait_for hủy generator bằng CancelledError, vốn là BaseException.
+
+    Không bắt riêng thì khối finally chạy với status mặc định "ok" và mọi lượt
+    quá hạn được đếm là thành công trên màn nhật ký AI.
+    """
+    class _StreamCham(_FakeStream):
+        async def aiter_lines(self):
+            for line in self._lines:
+                await asyncio.sleep(0.05)
+                yield line
+
+    class _Client:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, url, headers=None, json=None):
+            _FakeClient.calls.append({"url": url, "headers": headers or {}, "json": json or {}})
+            return _FakeResponse({"ok": True})
+
+        def stream(self, method, url, headers=None, json=None):
+            return _StreamCham([_sse({"type": "message.delta", "text": "một phần "})] * 20)
+
+    monkeypatch.setattr(domain.httpx, "AsyncClient", _Client)
+
+    async def chay():
+        try:
+            await asyncio.wait_for(domain.agent_answer_with_steps("x"), timeout=0.08)
+        except (asyncio.TimeoutError, TimeoutError):
+            await asyncio.sleep(0.05)   # để khối finally kịp ghi nhật ký
+
+    asyncio.run(chay())
+    assert _call_to("/llm-traces")["json"]["status"] == "timeout"

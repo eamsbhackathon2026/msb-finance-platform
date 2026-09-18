@@ -606,6 +606,18 @@ class ScamShieldSignals(Contract):
     scenario_confidence: int | None = None
 
 
+class ChatStep(Contract):
+    """Một bước trợ lý đã đi qua, kể cho khách nghe.
+
+    `label` là chữ do Agent Platform gửi xuống — gateway phát lại nguyên văn,
+    không dịch, không ghép thêm. Nơi sửa nhãn là màn công cụ của Agent Platform.
+    """
+    call_id: str
+    label: str
+    status: Literal["running", "done", "error"]
+    duration_ms: int | None = None
+
+
 class ScamShieldVerdict(Contract):
     """Kết luận của agent Scam Shield về một lệnh chuyển tới stk mới."""
     level: Literal["safe", "suspect", "danger"]
@@ -615,6 +627,7 @@ class ScamShieldVerdict(Contract):
     recommendation: str
     # "agent" = do agent LLM kết luận; "fallback" = agent lỗi, suy ra từ tín hiệu.
     source: Literal["agent", "fallback"]
+    steps: list[ChatStep] = []
 
 
 class TransferPrecheckResponse(Contract):
@@ -665,6 +678,7 @@ class ChatBankingDraft(Contract):
     matches: list[TransferBeneficiary] = []
     # "agent" = LLM hiểu câu; "fallback" = agent lỗi/chậm, FE tự dùng regex.
     source: Literal["agent", "fallback"] = "agent"
+    steps: list[ChatStep] = []
 
 
 class GuardianAction(Contract):
@@ -704,6 +718,7 @@ class InterveneAdvice(Contract):
     actions: list[GuardianAction]
     # "agent" = lời do LLM diễn giải; "playbook" = lấy thẳng kịch bản.
     source: Literal["agent", "playbook"]
+    steps: list[ChatStep] = []
 
 
 class ProtectionToggleRequest(Contract):

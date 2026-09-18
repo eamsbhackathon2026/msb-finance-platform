@@ -54,6 +54,7 @@ from models import (
     ChatGrid,
     ChatGridColumn,
     ChatRequest,
+    ChatStep,
     ChatTable,
     ChatTableRow,
     CopilotIntro,
@@ -958,6 +959,16 @@ async def _spending_visual(question: str) -> tuple[ChatTable | None, ChatChart |
     return None, None
 
 
+def _chat_step(step: domain.AgentStep) -> ChatStep:
+    """Đổi bước của domain sang hợp đồng FE. Nhãn giữ NGUYÊN VĂN.
+
+    Gateway không dịch và không ghép thêm chữ: nhãn do người vận hành đặt trong
+    Agent Platform, nên mọi câu chữ phải sửa được ở đúng chỗ đó.
+    """
+    return ChatStep(call_id=step.call_id, label=step.label, status=step.status,
+                    duration_ms=step.duration_ms)
+
+
 @app.post("/api/copilot/chat", tags=["copilot"],
           summary="Chat với Copilot (Server-Sent Events)")
 async def copilot_chat(payload: ChatRequest) -> StreamingResponse:
@@ -1019,7 +1030,7 @@ async def copilot_chat(payload: ChatRequest) -> StreamingResponse:
         emitted = False
         try:
             khach = domain.current_customer_id()
-            async for piece in domain.agent_stream(
+            async for loai, gia_tri in domain.agent_events(
                 payload.message, kind="copilot",
                 # Khoá hội thoại phải mang mã khách: dùng chung một khoá thì mọi
                 # khách cùng ghi vào một hội thoại bên nền tảng.
@@ -1029,6 +1040,14 @@ async def copilot_chat(payload: ChatRequest) -> StreamingResponse:
                 # xem được dữ liệu".
                 customer_id=khach,
             ):
+                if loai == "step":
+                    # Phát NGAY, xen giữa token: giá trị của bước nằm ở chỗ khách
+                    # thấy trợ lý đang làm gì trong lúc chờ, không phải sau khi xong.
+                    yield sse({"step": _chat_step(gia_tri).model_dump(by_alias=True)})
+                    continue
+                if loai != "text":
+                    continue
+                piece = gia_tri
                 raw.append(piece)
                 clean = plain.feed(piece)
                 if clean:
@@ -1461,20 +1480,29 @@ def _fallback_verdict(s: ScamShieldSignals) -> ScamShieldVerdict:
 
 async def _scamshield_verdict(bank_code: str, account_no: str, amount: int, note: str,
                               signals: ScamShieldSignals) -> ScamShieldVerdict:
-    """Hỏi agent Scam Shield; agent lỗi thì suy từ tín hiệu."""
+    """Hỏi agent Scam Shield; agent lỗi thì suy từ tín hiệu.
+
+    CHƯA CÓ ĐƯỜNG GỌI NÀO trong luồng đang chạy: `transfer_precheck` cố ý không
+    gọi LLM để màn chuyển tiền trả lời tức thì, nên `TransferPrecheckResponse`
+    luôn để trống `verdict`. Giữ lại vì đây là chỗ verdict sẽ được dựng khi nối
+    dây, và test đang ghim hành vi của nó.
+    """
     question = (
         f"Khách chuẩn bị chuyển {amount:,} đồng tới tài khoản {account_no} tại ngân hàng "
         f"{bank_code}, nội dung chuyển khoản: \"{note}\". Hãy dùng công cụ kiểm tra dấu hiệu "
         "lừa đảo cho tài khoản này rồi kết luận."
     ).replace(",", ".")
-    answer = await domain.agent_answer(
+    answer, steps = await domain.agent_answer_with_steps(
         question, agent_id=domain.SCAMSHIELD_AGENT_ID, kind="shield_advice",
         # _last_decision_id là lệnh chuyển vừa được chấm điểm; có nó thì dòng
         # nhật ký mở thẳng được case tương ứng bên Ops.
         decision_id=_last_decision_id,
     )
     if answer and (parsed := _parse_verdict(answer)):
-        return parsed
+        # Kết luận của agent đi kèm những gì nó đã tra, để khi màn hình này được
+        # nối dây thì khách đọc được vì sao nó nói tài khoản kia đáng ngờ.
+        return parsed.model_copy(update={"steps": [_chat_step(b) for b in steps]})
+    # Nhánh dự phòng suy từ tín hiệu, agent không chạy bước nào nên không kể bước nào.
     return _fallback_verdict(signals)
 
 
@@ -1752,15 +1780,16 @@ async def chat_banking_parse(payload: ChatBankingRequest) -> ChatBankingDraft:
     sẵn có — màn chuyển tiền không bao giờ đứng vì agent.
     """
     danh_ba = await transfer_beneficiaries()
-    raw = None
+    raw, buoc = None, []
     if domain.agent_configured(domain.CHATBANKING_AGENT_ID):
         try:
-            raw = await asyncio.wait_for(
-                domain.agent_answer(payload.message, agent_id=domain.CHATBANKING_AGENT_ID,
-                                    kind="chat_banking"),
+            raw, buoc = await asyncio.wait_for(
+                domain.agent_answer_with_steps(payload.message,
+                                               agent_id=domain.CHATBANKING_AGENT_ID,
+                                               kind="chat_banking"),
                 timeout=CHATBANKING_TIMEOUT_S)
         except Exception:
-            raw = None
+            raw, buoc = None, []
     got = _doc_json_agent(raw or "")
     if not got:
         # Agent lỗi/chậm: vẫn trả số tiền vì phần này do CODE tính, không cần
@@ -1784,7 +1813,7 @@ async def chat_banking_parse(payload: ChatBankingRequest) -> ChatBankingDraft:
     return ChatBankingDraft(
         intent=y_dinh, amount=so_tien, recipient=nguoi_nhan,
         matches=_khop_nguoi_nhan(nguoi_nhan, danh_ba) if nguoi_nhan else [],
-        source="agent",
+        source="agent", steps=[_chat_step(b) for b in buoc],
     )
 
 
@@ -1880,8 +1909,9 @@ async def transfer_intervene_detail(decision_id: str) -> InterveneDetail:
     )
 
 
-async def _guardian_advice(row: dict, kb: dict, chon: str, them: str | None) -> tuple[str, str, str]:
-    """(tiêu đề, nội dung, nguồn) cho lượt 2.
+async def _guardian_advice(row: dict, kb: dict, chon: str,
+                           them: str | None) -> tuple[str, str, str, list[ChatStep]]:
+    """(tiêu đề, nội dung, nguồn, các bước) cho lượt 2.
 
     Playbook là nguồn chính vì khuyến cáo đã được viết sẵn cho đúng kịch bản.
     Agent chỉ diễn giải lại cho hợp câu trả lời của khách và bị CHẶN THỜI GIAN:
@@ -1892,7 +1922,7 @@ async def _guardian_advice(row: dict, kb: dict, chon: str, them: str | None) -> 
     noi_dung = kb.get("advice_body") or row.get("template_text") or (
         "Hãy dừng lại và xác minh trực tiếp với người nhận trước khi chuyển tiền.")
     if not domain.agent_configured(domain.SCAMSHIELD_AGENT_ID):
-        return tieu_de, noi_dung, "playbook"
+        return tieu_de, noi_dung, "playbook", []
     hoi = (
         f'Khách vừa chọn: "{chon}".\n'
         + (f"Khách nói thêm: {them}\n" if them else "")
@@ -1901,13 +1931,15 @@ async def _guardian_advice(row: dict, kb: dict, chon: str, them: str | None) -> 
         "lựa chọn của khách. Chỉ trả về đoạn văn, không tiêu đề, không bảng."
     )
     try:
-        loi = await asyncio.wait_for(
-            domain.agent_answer(hoi, domain.SCAMSHIELD_AGENT_ID), timeout=8)
+        loi, buoc = await asyncio.wait_for(
+            domain.agent_answer_with_steps(hoi, domain.SCAMSHIELD_AGENT_ID), timeout=8)
     except Exception:
-        loi = None
+        loi, buoc = None, []
     if loi:
-        return tieu_de, _strip_markdown_for_plain(loi) or noi_dung, "agent"
-    return tieu_de, noi_dung, "playbook"
+        return (tieu_de, _strip_markdown_for_plain(loi) or noi_dung, "agent",
+                [_chat_step(b) for b in buoc])
+    # Rơi về playbook thì bước của agent không còn liên quan tới chữ đang hiện.
+    return tieu_de, noi_dung, "playbook", []
 
 
 @app.post("/api/transfer/intervene", response_model=InterveneAdvice, tags=["risk"],
@@ -1920,7 +1952,7 @@ async def transfer_intervene(payload: InterveneRequest) -> InterveneAdvice:
     kb = {}
     if row.get("scenario_id"):
         kb = await domain.scam_scenario(row["scenario_id"]) or {}
-    tieu_de, noi_dung, nguon = await _guardian_advice(
+    tieu_de, noi_dung, nguon, buoc = await _guardian_advice(
         row, kb, payload.selected_option, payload.free_text)
     khuyen = row.get("recommended_action") or kb.get("recommended_action") or "hold"
     if khuyen not in {k for k, _ in _GUARDIAN_ACTIONS}:
@@ -1943,7 +1975,7 @@ async def transfer_intervene(payload: InterveneRequest) -> InterveneAdvice:
         recommended_action=khuyen,
         actions=[GuardianAction(key=k, label=nhan, recommended=(k == khuyen))
                  for k, nhan in _GUARDIAN_ACTIONS],
-        source=nguon,
+        source=nguon, steps=buoc,
     )
 
 

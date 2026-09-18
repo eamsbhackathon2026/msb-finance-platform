@@ -16,12 +16,14 @@ một web app không còn dữ liệu dự phòng nào:
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import re
 import os
 import time
 from contextvars import ContextVar
-from typing import Any
+from typing import Any, NamedTuple
 
 import httpx
 
@@ -545,19 +547,60 @@ def with_customer_context(question: str, customer_id: int | None) -> str:
     return f"[Bối cảnh hệ thống: customer_id={customer_id}]\n{question}"
 
 
-async def agent_stream(question: str, agent_id: str | None = None, kind: str = "copilot",
-                       customer_id: int | None = None, session_key: str | None = None):
-    """Phát từng mẩu chữ của agent NGAY khi nền tảng gửi ra.
+# Nền tảng KHÔNG bao giờ gửi display_name rỗng: công cụ nào chưa đặt nhãn thì nó
+# rơi về tên hiển thị, rồi tới tên kỹ thuật (`ToolStepLabel` bên agent-service).
+# Vậy lá chắn ở đây phải nhận ra HÌNH DẠNG của một tên công cụ — `http_...`,
+# `mcp_<server>_...`, có thể kèm hậu tố băm khi trùng tên — chứ không phải chuỗi
+# rỗng. Đây là bộ lọc, không phải bảng ánh xạ: gateway vẫn không tự đặt tên cho
+# bất cứ bước nào.
+_TEN_KY_THUAT = re.compile(r"^(?:http|mcp)_[a-z0-9_]+$", re.IGNORECASE)
+
+
+def _nhan_cho_nguoi_doc(display_name: str, tool_name: str) -> str:
+    """Nhãn hiện được cho khách, hoặc chuỗi rỗng nếu nền tảng chưa có nhãn thật."""
+    label = (display_name or "").strip()
+    if not label or label == (tool_name or "").strip() or _TEN_KY_THUAT.match(label):
+        return ""
+    return label
+
+
+class AgentStep(NamedTuple):
+    """Một lần trợ lý dùng công cụ, kể theo cách người đọc hiểu được.
+
+    `label` là chữ nền tảng gửi xuống trong `display_name` của `tool.started` —
+    gateway KHÔNG tự đặt tên và không có bảng ánh xạ nào. Nhãn thuộc về nơi
+    người vận hành sửa được nó, tức Agent Platform.
+    """
+    call_id: str
+    label: str
+    status: str            # running | done | error
+    duration_ms: int | None = None
+
+
+async def agent_events(question: str, agent_id: str | None = None, kind: str = "copilot",
+                       customer_id: int | None = None, session_key: str | None = None,
+                       decision_id: str | None = None):
+    """Phát mọi thứ nền tảng gửi ra NGAY khi nó gửi: chữ và cả bước dùng công cụ.
 
     Đường `mode=sync` phải chờ trọn lần xử lý rồi mới có chữ, nên màn hình khách
-    trắng suốt thời gian mô hình chạy. Endpoint stream của nền tảng gửi SSE với
-    `event` trùng `type`; ở đây chỉ quan tâm `message.delta` (có `text`) và hai
-    sự kiện kết thúc `run.completed` / `run.failed`.
+    trắng suốt thời gian mô hình chạy. Endpoint stream gửi SSE với `event` trùng
+    `type`; ở đây quan tâm `message.delta` (có `text`), hai sự kiện công cụ
+    `tool.started` / `tool.finished`, và hai sự kiện kết thúc `run.completed` /
+    `run.failed`.
+
+    Yield tuple `(loại, giá trị)`:
+
+        ("text", "mẩu chữ")
+        ("step", AgentStep(...))
+        ("output", "toàn văn câu trả lời")   — chỉ ở `run.completed`
+
+    `output` tồn tại vì bên gọi đồng bộ cần nguyên văn câu trả lời mà nền tảng
+    chốt lại, thay vì tự ghép các mẩu delta rồi hy vọng không sót.
 
     Ngắt kết nối giữa chừng sẽ HỦY lần xử lý bên nền tảng — đúng thiết kế của nó.
 
     Ném `AgentBusy` khi gặp 409. Mọi hỏng khác kết thúc dòng chảy êm và để lại
-    một dòng `llm_trace`, giống đường sync.
+    một dòng `llm_trace`.
     """
     aid = agent_id or AGENT_ID
     if not agent_configured(aid):
@@ -569,54 +612,115 @@ async def agent_stream(question: str, agent_id: str | None = None, kind: str = "
         body["session_key"] = session_key
 
     full: list[str] = []
+    # Câu nền tảng chốt lại ở run.completed. Giữ riêng vì nhật ký phải ghi được
+    # câu trả lời thật, kể cả khi mô hình không phát mẩu delta nào.
+    output_cuoi = ""
     status, logged = "ok", ""
+    # Nhãn của lượt gọi nào thì `tool.finished` không nhắc lại, nó chỉ gửi call_id.
+    labels: dict[str, str] = {}
+    # Bước đã bắt đầu mà chưa thấy kết thúc: phải đóng lại, nếu không màn hình
+    # quay vòng mãi ở một việc đã dừng từ lâu.
+    dang_chay: dict[str, str] = {}
+    # Mã và thân phản hồi khi nền tảng từ chối. 401 vì sai cách gửi khóa và 404 vì
+    # sai agent id là hai lỗi khó đoán nhất; nuốt thân phản hồi là bắt người sau
+    # ngồi đoán lại từ đầu.
+    ma_http, than_http = 0, ""
     try:
-        async with httpx.AsyncClient(timeout=max(PEER_TIMEOUT, 120.0)) as client:
-            async with client.stream("POST", f"{AGENT_SERVICE_URL}/v1/agents/{aid}/runs/stream",
-                                     headers={"X-API-Key": AGENT_API_KEY}, json=body) as r:
-                if r.status_code == 409:
-                    await r.aread()
-                    raise AgentBusy()
-                r.raise_for_status()
-                async for line in r.aiter_lines():
-                    # Bỏ qua heartbeat (": ping") và dòng event:/id:; chỉ data mới có nội dung.
-                    if not line.startswith("data:"):
-                        continue
-                    try:
-                        event = json.loads(line[5:].strip())
-                    except ValueError:
-                        continue
-                    kind_of = event.get("type")
-                    if kind_of == "message.delta":
-                        text = event.get("text") or ""
-                        if text:
-                            full.append(text)
-                            yield text
-                    elif kind_of == "run.failed":
-                        status = "error"
-                        logged = f"run.failed: {(event.get('error') or {}).get('code', 'không rõ')}"
-                        break
-                    elif kind_of == "run.completed":
-                        break
-    except AgentBusy:
+      try:
+          async with httpx.AsyncClient(timeout=max(PEER_TIMEOUT, 120.0)) as client:
+              async with client.stream("POST", f"{AGENT_SERVICE_URL}/v1/agents/{aid}/runs/stream",
+                                       headers={"X-API-Key": AGENT_API_KEY}, json=body) as r:
+                  if r.status_code >= 400:
+                      ma_http = r.status_code
+                      than_http = (await r.aread()).decode("utf-8", "replace").strip()[:200]
+                      if ma_http == 409:
+                          raise AgentBusy()
+                      r.raise_for_status()
+                  async for line in r.aiter_lines():
+                      # Bỏ qua heartbeat (": ping") và dòng event:/id:; chỉ data mới có nội dung.
+                      if not line.startswith("data:"):
+                          continue
+                      try:
+                          event = json.loads(line[5:].strip())
+                      except ValueError:
+                          continue
+                      kind_of = event.get("type")
+                      if kind_of == "message.delta":
+                          text = event.get("text") or ""
+                          if text:
+                              full.append(text)
+                              yield "text", text
+                      elif kind_of == "tool.started":
+                          call_id = event.get("call_id") or ""
+                          # Chưa ai đặt nhãn cho công cụ này thì im lặng, còn hơn
+                          # đưa http_get_portfolio ra trước mặt khách.
+                          label = _nhan_cho_nguoi_doc(event.get("display_name") or "",
+                                                      event.get("tool_name") or "")
+                          if call_id and label:
+                              labels[call_id] = label
+                              dang_chay[call_id] = label
+                              yield "step", AgentStep(call_id, label, "running")
+                      elif kind_of == "tool.finished":
+                          call_id = event.get("call_id") or ""
+                          if call_id in labels:
+                              dang_chay.pop(call_id, None)
+                              yield "step", AgentStep(
+                                  call_id, labels[call_id],
+                                  "done" if event.get("ok") else "error",
+                                  event.get("duration_ms"))
+                      elif kind_of == "run.failed":
+                          status = "error"
+                          logged = f"run.failed: {(event.get('error') or {}).get('code', 'không rõ')}"
+                          break
+                      elif kind_of == "run.completed":
+                          output_cuoi = ((event.get("run") or {}).get("output") or "").strip()
+                          if output_cuoi:
+                              yield "output", output_cuoi
+                          break
+      except AgentBusy:
+        # Nói rõ 409 trong nhật ký: "bận" khác hẳn "hỏng", và người đọc nhật ký
+        # cần phân biệt được hai thứ đó.
+        status, logged = "error", f"HTTP 409: {than_http or 'hội thoại còn một lần xử lý chưa xong'}"
         raise
-    except Exception as err:
+      except asyncio.CancelledError:
+        # Bên gọi bọc asyncio.wait_for và đã hết giờ. CancelledError là
+        # BaseException nên nhánh Exception bên dưới KHÔNG thấy nó; thiếu nhánh
+        # này thì mọi lượt quá hạn được ghi là "ok" và màn nhật ký AI đếm chúng
+        # thành công.
+        status, logged = "timeout", "bên gọi hủy giữa chừng"
+        raise
+      except Exception as err:
         if isinstance(err, httpx.TimeoutException):
             status, logged = "timeout", "stream quá hạn"
+        elif ma_http:
+            status, logged = "error", f"HTTP {ma_http}: {than_http}"
         else:
             status, logged = "error", f"{type(err).__name__}: {err}"
-        logger.warning("agent_stream hỏng (%s): %s", kind, logged)
+        logger.warning("agent_events hỏng (%s): %s", kind, logged)
         mark_degraded()
+      # Tới được đây nghĩa là generator còn sống, nên đóng nốt các bước dở dang.
+      for call_id, label in dang_chay.items():
+          yield "step", AgentStep(call_id, label, "error")
     finally:
-        answer = "".join(full)
+        # Câu chốt lại thắng phần ghép từ delta: bên nền tảng mới là nơi biết
+        # câu trả lời cuối cùng trông như thế nào.
+        answer = output_cuoi or "".join(full)
         if status == "ok" and not answer:
             status, logged = "error", "stream không có nội dung"
         try:
             await _write_llm_trace(kind, question, logged or answer, status,
                                    round((time.monotonic() - started) * 1000),
-                                   aid, customer_id, None)
+                                   aid, customer_id, decision_id)
         except Exception as err:  # nhật ký hỏng không được làm hỏng câu trả lời
             logger.warning("không ghi được nhật ký lượt stream: %s", err)
+
+
+async def agent_stream(question: str, agent_id: str | None = None, kind: str = "copilot",
+                       customer_id: int | None = None, session_key: str | None = None):
+    """Chỉ phần chữ của `agent_events`, cho bên gọi không quan tâm bước công cụ."""
+    async for loai, gia_tri in agent_events(question, agent_id, kind, customer_id, session_key):
+        if loai == "text":
+            yield gia_tri
 
 
 def copilot_session_key(customer_id: int) -> str:
@@ -635,76 +739,50 @@ def copilot_session_key(customer_id: int) -> str:
     return f"copilot-{customer_id}"
 
 
+async def agent_answer_with_steps(question: str, agent_id: str | None = None, kind: str = "copilot",
+                                  customer_id: int | None = None, decision_id: str | None = None,
+                                  session_key: str | None = None) -> tuple[str | None, list[AgentStep]]:
+    """Hỏi agent một câu, lấy về câu trả lời VÀ các bước nó đã đi qua.
+
+    Đi bằng endpoint stream chứ không phải `mode=sync`, vì chỉ dòng sự kiện mới
+    mang `display_name` của công cụ. Kết quả của một run đồng bộ
+    (`tool_results[]`) chỉ có tên công cụ dạng kỹ thuật, mà thứ đó thì không được
+    phép đưa ra màn khách.
+
+    Câu trả lời ưu tiên `run.output` nền tảng chốt lại ở `run.completed`; chỉ khi
+    thiếu mới ghép từ các mẩu delta.
+
+    Mọi lỗi — kể cả 409 vì hội thoại đang bận — đều trả `(None, [])` để bên gọi
+    dùng kịch bản dự phòng, đúng như hành vi cũ của `agent_answer`.
+    """
+    mau: list[str] = []
+    output: str | None = None
+    buoc: dict[str, AgentStep] = {}
+    try:
+        async for loai, gia_tri in agent_events(question, agent_id, kind, customer_id,
+                                                session_key, decision_id):
+            if loai == "text":
+                mau.append(gia_tri)
+            elif loai == "output":
+                output = gia_tri
+            elif loai == "step":
+                # Giữ theo call_id: bước kết thúc ghi đè bước đang chạy, thứ tự
+                # xuất hiện lần đầu được bảo toàn.
+                buoc[gia_tri.call_id] = gia_tri
+    except AgentBusy:
+        return None, []
+    cau = output or "".join(mau).strip()
+    return (cau or None), list(buoc.values())
+
+
 async def agent_answer(question: str, agent_id: str | None = None, kind: str = "copilot",
                        customer_id: int | None = None, decision_id: str | None = None,
                        session_key: str | None = None) -> str | None:
     """Hỏi agent-service một câu và lấy câu trả lời dạng văn bản.
 
-    Dùng đúng hợp đồng công khai của nền tảng (api/openapi.yaml trong repo
-    hackathon-agent-platform):
-
-        POST /v1/agents/{agentId}/runs
-        X-API-Key: <khóa api-key, scope runs:write>
-        {"input": {"message": "..."}, "mode": "sync"}
-        → 200 {"status": "...", "output": "câu trả lời", ...}
-
-    Hai cái dễ sai, cả hai đều cho ra 4xx rồi chat lặng lẽ rơi về kịch bản —
-    nhìn bên ngoài y như chưa cấu hình agent:
-
-    1) XÁC THỰC. api-key phải đi trong header `X-API-Key`, KHÔNG phải
-       `Authorization: Bearer`. Endpoint runs nhận cả JWT (bearer) lẫn api-key,
-       nhưng api-key chỉ được nhận diện qua X-API-Key; gửi api-key dưới dạng
-       Bearer sẽ nhận 401 unauthenticated.
-    2) THÂN REQUEST. `input` là OBJECT có khóa `message`, không phải chuỗi, và
-       chế độ đồng bộ khai bằng `mode: "sync"` chứ không phải `stream: false`.
-
-    Mọi lỗi đều trả None để phần gọi dùng kịch bản có sẵn.
+    Vỏ mỏng của `agent_answer_with_steps` cho những chỗ chỉ cần chữ. Nhật ký
+    `llm_trace` do `agent_events` ghi, nên một lượt gọi vẫn để lại đúng một dòng.
     """
-    aid = agent_id or AGENT_ID
-    if not agent_configured(aid):
-        return None
-    _mark_touched()
-    started = time.monotonic()
-
-    def elapsed_ms() -> int:
-        return round((time.monotonic() - started) * 1000)
-
-    answer: str | None = None
-    try:
-        async with httpx.AsyncClient(timeout=max(PEER_TIMEOUT, 60.0)) as client:
-            r = await client.post(
-                f"{AGENT_SERVICE_URL}/v1/agents/{aid}/runs",
-                headers={"X-API-Key": AGENT_API_KEY},
-                json={
-                    "input": {"message": with_customer_context(question, customer_id)},
-                    "mode": "sync",
-                    **({"session_key": session_key} if session_key else {}),
-                },
-            )
-            r.raise_for_status()
-            body = r.json()
-        output = body.get("output")
-        answer = output if isinstance(output, str) and output.strip() else None
-        status, logged = ("ok", answer) if answer else ("error", "agent trả lời rỗng")
-    except Exception as err:
-        # Ba lý do hỏng khác hẳn nhau nhưng trước đây cho ra cùng một None không
-        # dấu vết: 401 vì sai cách gửi khóa, 404 vì agent id không có trong môi
-        # trường này, 409 vì hội thoại còn run đang chạy. Ghi lại để lần sau đọc
-        # nhật ký là biết, thay vì phải đoán.
-        if isinstance(err, httpx.TimeoutException):
-            status, logged = "timeout", f"quá {max(PEER_TIMEOUT, 60.0):.0f}s không có phản hồi"
-        elif isinstance(err, httpx.HTTPStatusError):
-            status, logged = "error", f"HTTP {err.response.status_code}: {err.response.text[:200]}"
-        else:
-            status, logged = "error", f"{type(err).__name__}: {err}"
-        logger.warning("agent_answer hỏng (%s): %s", kind, logged)
-        mark_degraded()
-
-    # Ghi nhật ký nằm NGOÀI khối trên và có lưới riêng: nhật ký là việc phụ,
-    # hỏng ở đây không được phép nuốt mất câu trả lời đã lấy được.
-    try:
-        await _write_llm_trace(kind, question, logged, status, elapsed_ms(),
-                               aid, customer_id, decision_id)
-    except Exception as err:
-        logger.warning("không ghi được nhật ký lượt gọi agent: %s", err)
+    answer, _ = await agent_answer_with_steps(question, agent_id, kind, customer_id,
+                                              decision_id, session_key)
     return answer

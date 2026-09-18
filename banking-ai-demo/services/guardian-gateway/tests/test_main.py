@@ -1681,18 +1681,22 @@ def test_phien_lam_viec_bao_dung_service_nao_chet(domain_that, monkeypatch):
 # token phát lại, nên khách nhìn màn hình trắng suốt thời gian mô hình chạy.
 
 def _gia_lap_agent_stream(monkeypatch, pieces, busy=False):
-    """Thay domain.agent_stream bằng một dòng chảy dựng sẵn, ghi lại tham số."""
+    """Thay domain.agent_events bằng một dòng chảy dựng sẵn, ghi lại tham số.
+
+    Phần tử là chuỗi thì phát ra chữ; là AgentStep thì phát ra bước dùng công cụ.
+    """
     ghi_nhan: dict = {}
 
-    async def fake(question, agent_id=None, kind="copilot", customer_id=None, session_key=None):
+    async def fake(question, agent_id=None, kind="copilot", customer_id=None,
+                   session_key=None, decision_id=None):
         ghi_nhan.update(question=question, kind=kind, session_key=session_key,
                         customer_id=customer_id)
         if busy:
             raise main.domain.AgentBusy()
         for piece in pieces:
-            yield piece
+            yield ("step", piece) if isinstance(piece, main.domain.AgentStep) else ("text", piece)
 
-    monkeypatch.setattr(main.domain, "agent_stream", fake)
+    monkeypatch.setattr(main.domain, "agent_events", fake)
     return ghi_nhan
 
 
@@ -1851,3 +1855,143 @@ def test_agent_hong_van_tra_so_tien_vi_code_tu_tinh():
     b = r.json()
     assert b["source"] == "fallback"       # conftest tắt agent
     assert b["amount"] == 2_500_000
+
+
+# ---- Bước dùng công cụ trên màn chat ------------------------------------------
+#
+# Khách hỏi xong nhìn ba chấm nhấp nháy cho tới khi câu trả lời hiện ra. Nền tảng
+# thì biết trợ lý đang đọc dữ liệu gì; các test dưới đây ghim việc đưa điều đó ra
+# tới trình duyệt, đúng lúc nó xảy ra chứ không phải sau khi xong.
+
+def _doc_su_kien(body: str) -> list[tuple[str, dict | str]]:
+    """Mọi sự kiện theo đúng thứ tự phát, để soi được thứ tự xen kẽ."""
+    ra: list[tuple[str, dict | str]] = []
+    for line in body.split("\n"):
+        if not line.startswith("data:"):
+            continue
+        payload = line[5:].strip()
+        if payload == "[DONE]":
+            ra.append(("done", ""))
+            continue
+        parsed = json.loads(payload)
+        for khoa in ("token", "step", "table", "grid", "chart"):
+            if khoa in parsed:
+                ra.append((khoa, parsed[khoa]))
+                break
+    return ra
+
+
+def test_chat_phat_buoc_xen_giua_token(monkeypatch):
+    buoc = main.domain.AgentStep("c1", "Đang tổng hợp thu chi theo tháng", "running")
+    xong = main.domain.AgentStep("c1", "Đang tổng hợp thu chi theo tháng", "done", 312)
+    _gia_lap_agent_stream(monkeypatch, [buoc, "Tháng này ", xong, "bạn chi 12 triệu."])
+    # Câu trung tính: hỏi về chi tiêu sẽ kèm bảng + biểu đồ và làm loãng điều
+    # test này muốn nói, là thứ tự xen kẽ giữa bước và chữ.
+    r = client.post("/api/copilot/chat", json={"message": "giúp tôi với"})
+    loai = [k for k, _ in _doc_su_kien(r.text)]
+    # Bước ĐANG CHẠY phải ra trước chữ: giá trị của nó nằm ở lúc khách đang chờ.
+    assert loai == ["step", "token", "step", "token", "done"]
+    su_kien = dict(enumerate(_doc_su_kien(r.text)))
+    dau = su_kien[0][1]
+    assert dau["label"] == "Đang tổng hợp thu chi theo tháng"
+    assert (dau["callId"], dau["status"]) == ("c1", "running")
+    cuoi = su_kien[2][1]
+    assert (cuoi["status"], cuoi["durationMs"]) == ("done", 312)
+
+
+def test_chat_khong_co_buoc_thi_khung_stream_giu_nguyen(monkeypatch):
+    _gia_lap_agent_stream(monkeypatch, ["Xin chào."])
+    r = client.post("/api/copilot/chat", json={"message": "chào"})
+    assert [k for k, _ in _doc_su_kien(r.text)] == ["token", "done"]
+
+
+def test_chat_ban_thi_khong_phat_buoc_nao(monkeypatch):
+    _gia_lap_agent_stream(monkeypatch, [], busy=True)
+    r = client.post("/api/copilot/chat", json={"message": "chào"})
+    loai = {k for k, _ in _doc_su_kien(r.text)}
+    # Câu trả lời "đợi một chút" là của gateway, không phải của agent; gắn bước
+    # vào đó là kể chuyện không có thật.
+    assert "step" not in loai
+
+
+# ---- Bước dùng công cụ ở ba luồng đồng bộ -------------------------------------
+#
+# Scam Shield, Chat Banking và khuyến cáo Guardian không phát SSE: chúng gọi agent
+# rồi trả về một response. Bước đi kèm trong response để màn hình kể lại được trợ
+# lý đã tra những gì trước khi kết luận.
+
+def _gia_lap_agent_dong_bo(monkeypatch, answer, steps):
+    """Thay domain.agent_answer_with_steps, trả sẵn (câu trả lời, các bước)."""
+    async def fake(question, agent_id=None, kind="copilot", customer_id=None,
+                   decision_id=None, session_key=None):
+        return answer, steps
+
+    monkeypatch.setattr(main.domain, "agent_answer_with_steps", fake)
+    monkeypatch.setattr(main.domain, "agent_configured", lambda *a, **k: True)
+
+
+def test_chat_banking_tra_kem_buoc_cua_agent(monkeypatch):
+    buoc = main.domain.AgentStep("c1", "Đang tra sổ người nhận", "done", 42)
+    _gia_lap_agent_dong_bo(monkeypatch, '{"intent": "transfer", "recipient": "Khanh"}', [buoc])
+    r = client.post("/api/chat-banking/parse", json={"message": "chuyen 500k cho anh Khanh"})
+    b = r.json()
+    assert b["source"] == "agent"
+    assert b["steps"] == [{"callId": "c1", "label": "Đang tra sổ người nhận",
+                           "status": "done", "durationMs": 42}]
+
+
+def test_chat_banking_hong_thi_khong_kem_buoc(monkeypatch):
+    _gia_lap_agent_dong_bo(monkeypatch, None, [])
+    r = client.post("/api/chat-banking/parse", json={"message": "chuyen 500k cho anh Khanh"})
+    b = r.json()
+    # Nhánh dự phòng do gateway dựng, không có bước nào của agent để kể.
+    assert b["source"] == "fallback" and b.get("steps", []) == []
+
+
+def test_scamshield_ket_luan_kem_buoc_da_tra(monkeypatch):
+    """Kết luận của agent đi kèm những gì nó đã tra.
+
+    Màn Scam Shield nói tài khoản này đáng ngờ; khách có quyền biết kết luận đó
+    dựa trên việc gì.
+    """
+    import asyncio
+
+    from models import ScamShieldSignals
+    buoc = main.domain.AgentStep("c1", "Đang đối chiếu với các thủ đoạn lừa đảo đã biết", "done", 120)
+    _gia_lap_agent_dong_bo(
+        monkeypatch,
+        "NGUY_HIEM\n- Tài khoản mới mở\nKhuyến nghị: không nên chuyển.",
+        [buoc])
+    s = ScamShieldSignals(bank_code="ACB", account_no="x", account_masked="x", known=True,
+                          is_new=True, relationship="UNKNOWN", status="SUSPECTED", age_days=0,
+                          tx_count=0, amount=85_000_000, note="", scenario_match="Giả danh công an")
+    v = asyncio.run(main._scamshield_verdict("ACB", "x", 85_000_000, "", s))
+    assert v.source == "agent"
+    assert [b.label for b in v.steps] == ["Đang đối chiếu với các thủ đoạn lừa đảo đã biết"]
+
+
+def test_scamshield_roi_ve_tin_hieu_thi_khong_kem_buoc(monkeypatch):
+    import asyncio
+
+    from models import ScamShieldSignals
+    buoc = main.domain.AgentStep("c1", "Đang đối chiếu", "done", 10)
+    # Agent chạy nhưng trả câu không đọc được → verdict suy từ tín hiệu, nên các
+    # bước kia không còn giải thích cho chữ đang hiện trên màn hình.
+    _gia_lap_agent_dong_bo(monkeypatch, "câu không có tag mức độ", [buoc])
+    s = ScamShieldSignals(bank_code="ACB", account_no="x", account_masked="x", known=True,
+                          is_new=True, relationship="UNKNOWN", status="ACTIVE", age_days=0,
+                          tx_count=0, amount=1_000_000, note="", scenario_match=None)
+    v = asyncio.run(main._scamshield_verdict("ACB", "x", 1_000_000, "", s))
+    assert v.source == "fallback" and v.steps == []
+
+
+def test_guardian_khuyen_cao_kem_buoc(monkeypatch):
+    import asyncio
+
+    buoc = main.domain.AgentStep("c1", "Đang chuẩn bị câu hỏi xác minh", "done", 88)
+    _gia_lap_agent_dong_bo(monkeypatch, "Anh/chị dừng lại giúp em nhé.", [buoc])
+    tieu_de, noi_dung, nguon, buoc_ra = asyncio.run(
+        main._guardian_advice({}, {"advice_title": "Cẩn thận", "advice_body": "Dừng lại"},
+                              "Tôi đang được hướng dẫn qua điện thoại", None))
+    assert nguon == "agent" and noi_dung == "Anh/chị dừng lại giúp em nhé."
+    assert [b.label for b in buoc_ra] == ["Đang chuẩn bị câu hỏi xác minh"]
