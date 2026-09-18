@@ -2139,17 +2139,36 @@ async def ops_model() -> OpsModelConfig:
 @app.get("/api/ops/audit", response_model=OpsAuditLog, tags=["ops"],
          response_model_exclude_none=True,
          summary="Nhật ký mọi lượt gọi LLM")
-async def ops_audit(agent: str | None = None, status: str | None = None) -> OpsAuditLog:
+async def ops_audit(agent: str | None = None, status: str | None = None,
+                    customer_id: int | None = None,
+                    since: str | None = None, until: str | None = None) -> OpsAuditLog:
     """Bằng chứng "AI kiểm toán được": bản ghi timeout/error vẫn còn nguyên nên
-    tỷ lệ dùng bản dự phòng là con số thật, không phải con số tự khai."""
-    traces = await domain.llm_traces(agent=agent, status=status, limit=100)
+    tỷ lệ dùng bản dự phòng là con số thật, không phải con số tự khai.
+
+    Bộ lọc chạy dưới database chứ không cắt trên tập đã tải: màn hình chỉ giữ
+    100 lượt gần nhất, lọc trên đó thì một khách có lượt gọi cũ hơn sẽ biến mất
+    khỏi kết quả mà không ai biết. `since`/`until` là mốc tuyệt đối, nửa mở
+    [since, until) — người gọi tự quy đổi ngày theo múi giờ của họ.
+    """
+    traces = await domain.llm_traces(agent=agent, status=status, customer_id=customer_id,
+                                     since=since, until=until, limit=100)
     stats = await domain.llm_trace_stats()
     if not traces or not stats:
         domain.mark_degraded()
         # Lọc cả dữ liệu dự phòng: bộ lọc trên màn hình phải có tác dụng kể cả
         # khi domain chưa gọi được, nếu không người dùng tưởng màn hình hỏng.
-        return mappers.filter_audit(catalog.OPS_AUDIT, status=status)
-    return mappers.map_ops_audit(traces.get("traces") or [], stats)
+        return mappers.filter_audit(catalog.OPS_AUDIT, status=status, agent=agent,
+                                    customer_id=customer_id, since=since, until=until)
+    # Tên che lấy cùng nguồn với màn Case nên hai màn gọi một khách hàng bằng
+    # đúng một cái tên. Gọi hỏng thì `domain.customers` tự đánh dấu suy giảm;
+    # ở đây chỉ cần bản đồ rỗng, nhật ký vẫn đủ dùng với mã khách.
+    people = await domain.customers()
+    names = {
+        int(c["customer_id"]): c["name_masked"]
+        for c in ((people or {}).get("customers") or [])
+        if c.get("name_masked")
+    }
+    return mappers.map_ops_audit(traces.get("traces") or [], stats, names)
 
 
 # ---- Gợi ý câu hỏi cho chat --------------------------------------------------

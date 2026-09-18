@@ -405,7 +405,9 @@ async def update_case(case_id: str, status: str, note: str | None = None) -> dic
 
 
 async def llm_traces(agent: str | None = None, status: str | None = None,
-                     decision_id: str | None = None, limit: int = 50) -> dict | None:
+                     decision_id: str | None = None, customer_id: int | None = None,
+                     since: str | None = None, until: str | None = None,
+                     limit: int = 50) -> dict | None:
     params: dict = {"limit": limit}
     if agent:
         params["agent"] = agent
@@ -413,6 +415,12 @@ async def llm_traces(agent: str | None = None, status: str | None = None,
         params["status"] = status
     if decision_id:
         params["decision_id"] = decision_id
+    if customer_id is not None:
+        params["customer_id"] = customer_id
+    if since:
+        params["since"] = since
+    if until:
+        params["until"] = until
     return await _get(ACTION_FEEDBACK_URL, "/llm-traces", params)
 
 

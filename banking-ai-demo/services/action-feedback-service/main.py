@@ -613,8 +613,15 @@ def list_llm_traces(
     decision_id: str | None = None,
     agent: str | None = None,
     status: str | None = None,
+    customer_id: int | None = None,
+    since: str | None = None,
+    until: str | None = None,
     limit: int = Query(50, ge=1, le=200),
 ):
+    """`since`/`until` là mốc tuyệt đối có múi giờ (ISO 8601), khoảng nửa mở
+    [since, until). Không nhận ngày trần: `created_at` là TIMESTAMPTZ, nhận ngày
+    trần thì service phải đoán múi giờ của người gọi và sẽ cắt nhầm ngày cho mọi
+    bản ghi rạng sáng."""
     sql = "SELECT * FROM llm_trace WHERE 1 = 1"
     params: list = []
     if decision_id:
@@ -626,6 +633,15 @@ def list_llm_traces(
     if status:
         sql += " AND status = %s"
         params.append(status)
+    if customer_id is not None:
+        sql += " AND customer_id = %s"
+        params.append(customer_id)
+    if since:
+        sql += " AND created_at >= %s::timestamptz"
+        params.append(since)
+    if until:
+        sql += " AND created_at < %s::timestamptz"
+        params.append(until)
     sql += " ORDER BY created_at DESC LIMIT %s"
     params.append(limit)
     rows = query(sql, params)
@@ -647,10 +663,22 @@ def llm_trace_stats():
     )
     total = sum(int(r["n"]) for r in rows) or 1
     failed = sum(int(r["n"]) for r in rows if r["status"] in ("timeout", "error"))
+    # Hai mục dưới đây là của TOÀN BỘ nhật ký, không theo bộ lọc: màn vận hành
+    # cần danh sách khách để chọn (lọc rồi mà danh sách co lại theo thì không
+    # chọn tiếp được) và một mốc thời gian cố định để tính các khoảng nhanh.
+    customers = query(
+        """
+        SELECT customer_id, count(*) AS n FROM llm_trace
+        WHERE customer_id IS NOT NULL GROUP BY customer_id ORDER BY customer_id
+        """
+    )
+    latest = query_one("SELECT max(created_at) AS latest_at FROM llm_trace")
     return {
         "total_calls": total,
         "fallback_rate": round(failed / total, 4),
         "breakdown": rows,
+        "customers": customers,
+        "latest_at": (latest or {}).get("latest_at"),
     }
 
 

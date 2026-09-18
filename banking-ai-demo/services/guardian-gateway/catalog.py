@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from models import (
     AuditAgentStat,
+    AuditCustomer,
     AuditTrace,
     Beneficiary,
     BudgetSummary,
@@ -773,20 +774,35 @@ OPS_AUDIT = OpsAuditLog(
     fallback_rate_pct=6,
     avg_latency_ms=940,
     per_agent=[
-        AuditAgentStat(agent_label="Scam Shield — giải thích rủi ro", calls=54, fallback_calls=3, avg_latency_ms=1_120),
-        AuditAgentStat(agent_label="Trợ lý tài chính", calls=74, fallback_calls=5, avg_latency_ms=810),
+        AuditAgentStat(agent_key="shield_explain", agent_label="Scam Shield — giải thích rủi ro",
+                       calls=54, fallback_calls=3, avg_latency_ms=1_120),
+        AuditAgentStat(agent_key="copilot", agent_label="Trợ lý tài chính",
+                       calls=74, fallback_calls=5, avg_latency_ms=810),
     ],
     traces=[
+        # Mã và tên khách bám theo chính các mục catalog kế bên (khách demo của
+        # DEMO_LOGIN_USER và khách của case ALT-4090), nên nhánh dự phòng không
+        # nói tên khác với màn Case ngay bên cạnh.
         AuditTrace(id="1042", time="2026-09-15T09:41:03", agent_label="Scam Shield — giải thích rủi ro",
                    model="z-ai/glm-5.2-hackathon", status="ok", status_label="Thành công",
-                   latency_ms=1_080, decision_id=CUSTOMER_CASE_ID),
+                   latency_ms=1_080, decision_id=CUSTOMER_CASE_ID,
+                   customer_id=100008, customer_label="Nguyễn Minh A***"),
         AuditTrace(id="1041", time="2026-09-15T09:38:50", agent_label="Trợ lý tài chính",
                    model="z-ai/glm-5.2-hackathon", status="timeout",
-                   status_label="Quá hạn — đã dùng bản dự phòng", latency_ms=6_000, decision_id=None),
+                   status_label="Quá hạn — đã dùng bản dự phòng", latency_ms=6_000, decision_id=None,
+                   customer_id=100008, customer_label="Nguyễn Minh A***"),
         AuditTrace(id="1040", time="2026-09-15T09:22:14", agent_label="Trợ lý tài chính",
                    model="z-ai/glm-5.2-hackathon", status="ok", status_label="Thành công",
-                   latency_ms=760, decision_id=None),
+                   latency_ms=760, decision_id=None,
+                   customer_id=100002, customer_label="Lê Thị H***"),
     ],
+    # Facet của toàn bộ nhật ký: nhánh dự phòng cũng phải dựng được ô chọn khách
+    # và các khoảng thời gian nhanh, nếu không màn hình trông như hỏng bộ lọc.
+    customers=[
+        AuditCustomer(id=100002, label="Lê Thị H***", calls=1),
+        AuditCustomer(id=100008, label="Nguyễn Minh A***", calls=2),
+    ],
+    latest_trace_at="2026-09-15T09:41:03",
 )
 
 

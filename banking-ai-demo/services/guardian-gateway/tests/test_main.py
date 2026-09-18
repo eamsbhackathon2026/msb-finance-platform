@@ -405,7 +405,8 @@ OPS_CASE_KEYS = {"id", "decisionId", "customer", "scenarioName", "status",
 OPS_SCENARIO_KEYS = {"id", "name", "groupLabel", "patternLabel", "actionLabel",
                      "canAsk", "adviceTitle", "adviceBody", "priority", "alertsToday"}
 OPS_MODEL_KEYS = {"softWarnMin", "interveneMin", "maxScore", "factors", "inputs"}
-OPS_AUDIT_KEYS = {"totalCalls", "fallbackRatePct", "avgLatencyMs", "perAgent", "traces"}
+OPS_AUDIT_KEYS = {"totalCalls", "fallbackRatePct", "avgLatencyMs", "perAgent", "traces",
+                  "customers", "latestTraceAt"}
 
 
 def test_ops_cases_dung_hop_dong():
@@ -461,12 +462,15 @@ def test_ops_audit_dung_hop_dong():
     assert set(body) == OPS_AUDIT_KEYS
     assert 0 <= body["fallbackRatePct"] <= 100
     for stat in body["perAgent"]:
-        assert set(stat) == {"agentLabel", "calls", "fallbackCalls", "avgLatencyMs"}
+        assert set(stat) == {"agentKey", "agentLabel", "calls", "fallbackCalls", "avgLatencyMs"}
         assert stat["fallbackCalls"] <= stat["calls"]
     for trace in body["traces"]:
         assert set(trace) <= {"id", "time", "agentLabel", "model", "status",
-                              "statusLabel", "latencyMs", "decisionId"}
+                              "statusLabel", "latencyMs", "decisionId",
+                              "customerId", "customerLabel"}
         assert trace["status"] in {"ok", "cache", "timeout", "error"}
+        if "customerId" in trace:
+            assert isinstance(trace["customerId"], int) and trace["customerId"] > 0
 
 
 def test_nhat_ky_ai_loc_duoc_ca_khi_dung_du_lieu_du_phong():
@@ -480,6 +484,78 @@ def test_nhat_ky_ai_loc_duoc_ca_khi_dung_du_lieu_du_phong():
     assert all(t["status"] == "timeout" for t in body["traces"])
     # Ba con số là của toàn bộ nhật ký, không đổi theo bộ lọc.
     assert body["totalCalls"] == client.get("/api/ops/audit").json()["totalCalls"]
+
+
+def test_o_chon_khach_va_moc_thoi_gian_khong_doi_theo_bo_loc():
+    """Danh sách khách và mốc mới nhất là của toàn bộ nhật ký.
+
+    Nếu chúng co lại theo bộ lọc thì lọc xong khách A sẽ không còn cách nào chọn
+    khách B, và khoảng "7 ngày" sẽ trôi mỗi lần bấm.
+    """
+    day_du = client.get("/api/ops/audit").json()
+    da_loc = client.get("/api/ops/audit?customer_id=100002").json()
+    assert day_du["customers"] == da_loc["customers"]
+    assert day_du["latestTraceAt"] == da_loc["latestTraceAt"]
+    for c in day_du["customers"]:
+        assert set(c) <= {"id", "label", "calls"}
+        assert c["calls"] > 0
+
+
+def test_loc_theo_tro_ly_dung_khoa_chu_khong_dung_nhan():
+    """Endpoint nhận khoá agent, nên facet phải phát ra chính khoá đó.
+
+    Nếu màn hình phải đoán khoá từ nhãn tiếng Việt thì đổi nhãn một chữ là bộ lọc
+    chết, và không ai biết cho tới lúc trình bày.
+    """
+    body = client.get("/api/ops/audit").json()
+    keys = {a["agentKey"] for a in body["perAgent"]}
+    assert keys and all(k and " " not in k for k in keys)
+
+    khoa = sorted(keys)[0]
+    nhan = next(a["agentLabel"] for a in body["perAgent"] if a["agentKey"] == khoa)
+    loc = client.get(f"/api/ops/audit?agent={khoa}").json()["traces"]
+    assert loc and all(t["agentLabel"] == nhan for t in loc)
+
+
+def test_loc_nhat_ky_theo_khach_va_khoang_nua_mo():
+    """Khoảng [since, until): bản ghi đúng mốc `until` bị loại, nếu không một
+    lượt gọi sẽ được đếm ở cả hai khoảng liền nhau."""
+    theo_khach = client.get("/api/ops/audit?customer_id=100002").json()["traces"]
+    assert theo_khach and all(t["customerId"] == 100002 for t in theo_khach)
+
+    tu_0930 = client.get("/api/ops/audit?since=2026-09-15T09:30:00%2B07:00").json()["traces"]
+    assert {t["id"] for t in tu_0930} == {"1042", "1041"}
+
+    truoc_093850 = client.get("/api/ops/audit?until=2026-09-15T09:38:50%2B07:00").json()["traces"]
+    assert {t["id"] for t in truoc_093850} == {"1040"}
+
+
+def test_nhat_ky_ai_noi_duoc_luot_goi_thuoc_ve_khach_nao():
+    """Nhật ký không có cột khách hàng thì chuyên viên không lần được lượt gọi
+    này phục vụ ai — kể cả ở nhánh dự phòng, nơi buổi trình bày hay rơi vào."""
+    traces = client.get("/api/ops/audit").json()["traces"]
+    assert any(t.get("customerId") for t in traces)
+    for t in traces:
+        # Có mã khách thì phải có tên đã che đi kèm, nếu không cột hiện mỗi con số.
+        if t.get("customerId"):
+            assert t.get("customerLabel")
+
+
+def test_mapper_nhat_ky_giu_ma_khach_khi_thieu_bang_ten():
+    """Thiếu bảng tên che chỉ được mất phần tên, không được mất luôn mã khách:
+    mã khách chính là thứ nối bản ghi này với hồ sơ khách hàng."""
+    import mappers
+
+    rows = [{"trace_id": 7, "agent": "copilot", "model": "m", "status": "ok",
+             "customer_id": 100008, "created_at": "2026-09-15T09:41:04+07:00"}]
+    stats = {"total_calls": 1, "breakdown": [{"agent": "copilot", "status": "ok",
+                                              "n": 1, "avg_latency_ms": 100}]}
+    khong_ten = mappers.map_ops_audit(rows, stats)
+    assert khong_ten.traces[0].customer_id == 100008
+    assert khong_ten.traces[0].customer_label is None
+
+    co_ten = mappers.map_ops_audit(rows, stats, {100008: "NGUYEN THI B***"})
+    assert co_ten.traces[0].customer_label == "NGUYEN THI B***"
 
 
 def test_dong_thoi_gian_cua_case():

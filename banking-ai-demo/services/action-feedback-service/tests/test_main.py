@@ -107,15 +107,52 @@ def test_ghi_trace_mask_pii_con_sot_trong_prompt(monkeypatch):
     assert "0912345678" not in ghi["params"][5]
 
 
-def test_thong_ke_tinh_ca_luot_that_bai(monkeypatch):
-    """Bản ghi timeout và error phải được đếm, nếu không tỷ lệ fallback bị tô hồng."""
-    monkeypatch.setattr(main, "query", lambda *a, **k: [
+def _fake_stats_query(sql, params=None):
+    """Hai truy vấn thống kê dùng chung một hàm `query`, phân biệt theo nội dung SQL."""
+    if "GROUP BY customer_id" in sql:
+        return [{"customer_id": 100008, "n": 7}, {"customer_id": 100002, "n": 3}]
+    return [
         {"agent": "shield_explain", "status": "ok", "n": 8, "avg_latency_ms": 900},
         {"agent": "shield_explain", "status": "timeout", "n": 2, "avg_latency_ms": 3000},
-    ])
+    ]
+
+
+def test_thong_ke_tinh_ca_luot_that_bai(monkeypatch):
+    """Bản ghi timeout và error phải được đếm, nếu không tỷ lệ fallback bị tô hồng."""
+    monkeypatch.setattr(main, "query", _fake_stats_query)
+    monkeypatch.setattr(main, "query_one", lambda *a, **k: {"latest_at": "2026-09-15T09:41:03+07:00"})
     body = client.get("/llm-traces/stats").json()
     assert body["total_calls"] == 10
     assert body["fallback_rate"] == 0.2
+
+
+def test_thong_ke_kem_danh_sach_khach_va_moc_moi_nhat(monkeypatch):
+    """Màn vận hành cần hai thứ KHÔNG đổi theo bộ lọc: danh sách khách để chọn,
+    và một mốc thời gian cố định để tính các khoảng nhanh."""
+    monkeypatch.setattr(main, "query", _fake_stats_query)
+    monkeypatch.setattr(main, "query_one", lambda *a, **k: {"latest_at": "2026-09-15T09:41:03+07:00"})
+    body = client.get("/llm-traces/stats").json()
+    assert [c["customer_id"] for c in body["customers"]] == [100008, 100002]
+    assert body["latest_at"].startswith("2026-09-15")
+
+
+def test_loc_nhat_ky_theo_khach_va_khoang_thoi_gian(monkeypatch):
+    """Khoảng nửa mở [since, until): bản ghi đúng mốc `until` KHÔNG được tính,
+    nếu không một lượt gọi nằm ở hai ngày liền nhau."""
+    ghi = {}
+
+    def fake(sql, params=None):
+        ghi["sql"] = sql
+        ghi["params"] = params
+        return []
+
+    monkeypatch.setattr(main, "query", fake)
+    client.get("/llm-traces?customer_id=100008"
+               "&since=2026-09-12T17:00:00%2B00:00&until=2026-09-13T17:00:00%2B00:00")
+    assert "AND customer_id = %s" in ghi["sql"]
+    assert "created_at >= %s::timestamptz" in ghi["sql"]
+    assert "created_at < %s::timestamptz" in ghi["sql"]
+    assert ghi["params"][:3] == [100008, "2026-09-12T17:00:00+00:00", "2026-09-13T17:00:00+00:00"]
 
 
 def test_health_va_agent_tools():

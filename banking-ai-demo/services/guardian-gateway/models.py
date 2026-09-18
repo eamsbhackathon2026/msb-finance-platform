@@ -471,9 +471,23 @@ class AuditTrace(Contract):
     status_label: str
     latency_ms: int | None = None
     decision_id: str | None = None
+    # Lượt gọi của Copilot lẫn Scam Shield đều gắn với một khách hàng cụ thể;
+    # thiếu cột này thì nhật ký chỉ nói "có một lượt gọi" chứ không nói của ai.
+    customer_id: int | None = None
+    customer_label: str | None = None
+
+
+class AuditCustomer(Contract):
+    """Một khách hàng có mặt trong nhật ký — dựng ô chọn ở màn vận hành."""
+    id: int
+    label: str | None = None
+    calls: int
 
 
 class AuditAgentStat(Contract):
+    # Khoá agent là thứ endpoint nhận để lọc; nhãn chỉ để đọc. Thiếu khoá thì màn
+    # hình phải đoán ngược từ nhãn — đúng kiểu magic string mà repo đang tránh.
+    agent_key: str
     agent_label: str
     calls: int
     fallback_calls: int
@@ -487,6 +501,11 @@ class OpsAuditLog(Contract):
     avg_latency_ms: int
     per_agent: list[AuditAgentStat]
     traces: list[AuditTrace]
+    # Hai mục dưới là của TOÀN BỘ nhật ký, cố tình không đổi theo bộ lọc: ô chọn
+    # khách phải còn đủ lựa chọn sau khi lọc, và các khoảng thời gian nhanh phải
+    # neo vào một mốc đứng yên.
+    customers: list[AuditCustomer] = []
+    latest_trace_at: str | None = None
 
 
 # ---- Thao tác ghi -------------------------------------------------------------

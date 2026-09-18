@@ -11,10 +11,11 @@ Chỗ nào domain KHÔNG có dữ liệu tương ứng đều được chú thí
 from __future__ import annotations
 
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from models import (
     AuditAgentStat,
+    AuditCustomer,
     AuditTrace,
     Beneficiary,
     CaseCustomerProfile,
@@ -517,13 +518,31 @@ def _first_int(text: object, default: int) -> int:
     return int(m.group(0)) if m else default
 
 
-def map_ops_audit(traces: list[dict], stats: dict) -> OpsAuditLog:
+# Dữ liệu dự phòng viết theo giờ Việt Nam; hằng này chỉ dùng để so sánh, không
+# dùng để hiển thị (màn hình luôn hiện theo giờ máy người xem).
+DEMO_TZ = timezone(timedelta(hours=7))
+
+
+def _as_instant(value: str) -> datetime:
+    """Chuỗi thời gian -> thời điểm so sánh được.
+
+    Dữ liệu dự phòng viết giờ địa phương không kèm offset ("2026-09-15T09:41:03")
+    còn dữ liệu thật kèm offset. Gán múi giờ demo cho chuỗi trần để hai nguồn so
+    trên cùng một trục, thay vì để Python ném lỗi khi trừ hai kiểu khác nhau.
+    """
+    dt = datetime.fromisoformat(value)
+    return dt if dt.tzinfo else dt.replace(tzinfo=DEMO_TZ)
+
+
+def map_ops_audit(traces: list[dict], stats: dict,
+                  names: dict[int, str] | None = None) -> OpsAuditLog:
     rows = []
     for t in traces:
         # Trạng thái và nhãn phải lấy từ cùng một khoá: tra hai lần với hai mặc
         # định khác nhau sinh ra cặp vô nghĩa như "error" kèm chữ "Không rõ".
         raw = t.get("status") or ""
         status = raw if raw in TRACE_STATUS else "error"
+        cid = int(t["customer_id"]) if t.get("customer_id") is not None else None
         rows.append(AuditTrace(
             id=str(t.get("trace_id") if t.get("trace_id") is not None else ""),
             time=t.get("created_at") or "",
@@ -535,6 +554,10 @@ def map_ops_audit(traces: list[dict], stats: dict) -> OpsAuditLog:
             status_label=TRACE_STATUS[status],
             latency_ms=int(t["latency_ms"]) if t.get("latency_ms") is not None else None,
             decision_id=str(t["decision_id"]) if t.get("decision_id") else None,
+            customer_id=cid,
+            # Tên đã che là thứ đọc được; thiếu bảng tên thì vẫn còn mã khách,
+            # nhật ký không vì thế mà mất dấu người liên quan.
+            customer_label=(names or {}).get(cid) if cid is not None else None,
         ))
 
     breakdown = stats.get("breakdown") or []
@@ -544,7 +567,8 @@ def map_ops_audit(traces: list[dict], stats: dict) -> OpsAuditLog:
     for row in breakdown:
         label = AGENT_LABELS.get(row.get("agent") or "", row.get("agent") or "—")
         n = int(row.get("n") or 0)
-        acc = per_agent.setdefault(label, {"calls": 0, "fallback": 0, "latency": 0, "timed": 0})
+        acc = per_agent.setdefault(label, {"calls": 0, "fallback": 0, "latency": 0, "timed": 0,
+                                          "key": row.get("agent") or ""})
         acc["calls"] += n
         if row.get("status") in FALLBACK_STATUSES:
             acc["fallback"] += n
@@ -562,12 +586,23 @@ def map_ops_audit(traces: list[dict], stats: dict) -> OpsAuditLog:
     # để khỏi chia cho 0). Màn chứng minh "AI kiểm toán được" không được hiện
     # một lượt gọi không tồn tại.
     total = int(stats.get("total_calls") or 0) if breakdown else 0
+
+    customers = [
+        AuditCustomer(
+            id=int(c["customer_id"]),
+            label=(names or {}).get(int(c["customer_id"])),
+            calls=int(c.get("n") or 0),
+        )
+        for c in (stats.get("customers") or [])
+        if c.get("customer_id") is not None
+    ]
     return OpsAuditLog(
         total_calls=total,
         fallback_rate_pct=round(float(stats.get("fallback_rate") or 0) * 100) if breakdown else 0,
         avg_latency_ms=round(weighted / timed_calls) if timed_calls else 0,
         per_agent=[
             AuditAgentStat(
+                agent_key=str(v["key"]),
                 agent_label=label,
                 calls=v["calls"],
                 fallback_calls=v["fallback"],
@@ -576,18 +611,39 @@ def map_ops_audit(traces: list[dict], stats: dict) -> OpsAuditLog:
             for label, v in sorted(per_agent.items())
         ],
         traces=rows,
+        customers=customers,
+        latest_trace_at=str(stats["latest_at"]) if stats.get("latest_at") else None,
     )
 
 
-def filter_audit(log: OpsAuditLog, status: str | None = None) -> OpsAuditLog:
+def filter_audit(log: OpsAuditLog, status: str | None = None,
+                 agent: str | None = None, customer_id: int | None = None,
+                 since: str | None = None, until: str | None = None) -> OpsAuditLog:
     """Lọc nhật ký đã dựng sẵn — dùng cho nhánh dữ liệu dự phòng.
 
-    Ba con số thống kê giữ nguyên vì chúng là số của toàn bộ nhật ký, không phải
-    của phần đang lọc; màn hình nói rõ điều đó.
+    Ba con số thống kê, danh sách khách và mốc mới nhất giữ nguyên vì chúng là
+    của toàn bộ nhật ký, không phải của phần đang lọc; màn hình nói rõ điều đó.
+
+    `since`/`until` là mốc tuyệt đối, khoảng nửa mở [since, until) — so sánh trên
+    thời điểm chứ không trên chuỗi ngày, để trùng đúng ngữ nghĩa của tầng SQL.
     """
-    if not status:
+    traces = log.traces
+    if status:
+        traces = [t for t in traces if t.status == status]
+    if agent:
+        # Bản ghi dự phòng chỉ có nhãn, còn endpoint nhận khoá — quy đổi một lần
+        # ở đây để hai nguồn dữ liệu cùng hiểu một tham số.
+        label = AGENT_LABELS.get(agent, agent)
+        traces = [t for t in traces if t.agent_label == label]
+    if customer_id is not None:
+        traces = [t for t in traces if t.customer_id == customer_id]
+    if since:
+        traces = [t for t in traces if _as_instant(t.time) >= _as_instant(since)]
+    if until:
+        traces = [t for t in traces if _as_instant(t.time) < _as_instant(until)]
+    if traces is log.traces:
         return log
-    return log.model_copy(update={"traces": [t for t in log.traces if t.status == status]})
+    return log.model_copy(update={"traces": traces})
 
 
 # ---- Chi tiết case, dòng thời gian và tình trạng hệ thống ---------------------
