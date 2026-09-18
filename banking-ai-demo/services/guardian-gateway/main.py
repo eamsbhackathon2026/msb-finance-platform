@@ -1018,13 +1018,16 @@ async def copilot_chat(payload: ChatRequest) -> StreamingResponse:
         raw: list[str] = []
         emitted = False
         try:
+            khach = domain.current_customer_id()
             async for piece in domain.agent_stream(
                 payload.message, kind="copilot",
-                session_key=domain.copilot_session_key(),
+                # Khoá hội thoại phải mang mã khách: dùng chung một khoá thì mọi
+                # khách cùng ghi vào một hội thoại bên nền tảng.
+                session_key=domain.copilot_session_key(khach),
                 # Bộ công cụ nhận customer_id trên đường dẫn, mà chỉ gateway mới
                 # biết khách của phiên — không truyền thì agent trả lời "chưa
                 # xem được dữ liệu".
-                customer_id=domain.current_customer_id(),
+                customer_id=khach,
             ):
                 raw.append(piece)
                 clean = plain.feed(piece)

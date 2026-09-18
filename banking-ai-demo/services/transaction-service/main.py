@@ -56,6 +56,33 @@ CATEGORIES = [
     "FAMILY_SUPPORT", "INVESTMENT", "TRANSFER_P2P", "OTHER",
 ]
 
+# Mã nhóm → nhãn tiếng Việt. Trả kèm trong payload thay vì để bên gọi tự dịch:
+# trợ lý dịch lại mỗi lượt một kiểu ("FAMILY_SUPPORT" ra "chuyển tiền cho người
+# khác" ở câu này, "cho người thân" ở câu sau) nên cùng một nhóm hiện hai tên
+# trong cùng một cuộc trò chuyện.
+CATEGORY_LABELS_VI = {
+    "FOOD": "Ăn uống",
+    "TRANSPORT": "Di chuyển",
+    "SHOPPING": "Mua sắm",
+    "BILLS": "Hoá đơn tiện ích",
+    "RENT": "Thuê nhà",
+    "HEALTH": "Sức khoẻ",
+    "FAMILY_SUPPORT": "Hỗ trợ gia đình",
+    "INVESTMENT": "Đầu tư",
+    "TRANSFER_P2P": "Chuyển khoản đi",
+    "TRANSFER": "Chuyển khoản đi",
+    "OTHER": "Khác",
+}
+
+
+def _nhan_nhom(category: str) -> str:
+    return CATEGORY_LABELS_VI.get(category, category)
+
+
+def _tien_vi(amount: float) -> str:
+    """1234000 → "1.234.000 ₫"."""
+    return f"{round(amount):,.0f}".replace(",", ".") + " ₫"
+
 OPENAPI_TAGS = COMMON_TAGS + [
     {
         "name": 'transaction',
@@ -198,15 +225,6 @@ def _require_decision(decision_id: str | None) -> None:
         raise HTTPException(404, f"decision {decision_id} không tồn tại")
 
 
-def _require_transactions(customer_id: int) -> None:
-    exists = query_one(
-        "SELECT 1 AS x FROM transaction_history WHERE customer_id = %s LIMIT 1",
-        (customer_id,),
-    )
-    if exists is None:
-        raise HTTPException(404, f"không có giao dịch nào của customer {customer_id}")
-
-
 def _percentile(values: list[float], pct: float) -> float:
     """Nội suy tuyến tính; tránh phụ thuộc numpy cho image nhẹ."""
     if not values:
@@ -289,13 +307,36 @@ def get_transactions(
     }
 
 
+# Chuyển khoản đi KHÔNG phải chi tiêu: nó là tiền chuyển chỗ, không phải tiền
+# tiêu mất. Gộp chung thì một lệnh chuyển lớn nuốt trọn biểu đồ và các nhóm chi
+# tiêu thật bị ép về gần 0%.
+TRANSFER_CATEGORIES = ("TRANSFER_P2P", "TRANSFER")
+
+
 @app.get("/transactions/{customer_id}/monthly-summary", tags=["transaction"])
 def monthly_summary(
-    customer_id: int, months: int = Query(6, ge=1, le=24)
+    customer_id: int,
+    months: int = Query(6, ge=1, le=24),
+    include_transfers: bool = Query(
+        False, description="Tính cả chuyển khoản đi vào phần chi tiêu"
+    ),
 ):
-    """Thu/chi/net theo tháng kèm phân rã theo nhóm chi tiêu — Scene 1 của Copilot."""
-    _require_transactions(customer_id)
-    start = (now_vn() - timedelta(days=31 * months)).strftime("%Y%m%d")
+    """Thu/chi/net theo tháng kèm phân rã theo nhóm chi tiêu — Scene 1 của Copilot.
+
+    `expense` là chi tiêu THẬT, không gồm chuyển khoản đi — cùng định nghĩa với
+    quarterly-summary và monthly-comparison. Trước đây endpoint này gộp chung
+    nên một lệnh chuyển 620 triệu biến thành "tháng này bạn chi tiêu 622 triệu".
+    Tiền chuyển đi vẫn rời tài khoản thật nên `net` trừ cả hai, và `transfer_out`
+    giữ riêng cho bên nào cần tổng dòng tiền ra.
+
+    Khách không có giao dịch nào là chuyện bình thường, không phải lỗi: trả danh
+    sách rỗng. Chỉ mã khách không tồn tại mới là 404 để bên gọi biết đi tra lại id.
+    """
+    _require_customer(customer_id)
+    # Lấy dư một tháng rồi cắt: tháng cũ nhất trong cửa sổ luôn bị cắt giữa
+    # chừng, gắn nhãn tháng đầy đủ cho nó thì cùng một tháng ra hai con số khác
+    # nhau tuỳ `months` bên gọi truyền vào.
+    start = (now_vn() - timedelta(days=31 * (months + 1))).strftime("%Y%m%d")
     rows = query(
         """
         SELECT * FROM transaction_history
@@ -305,8 +346,10 @@ def monthly_summary(
         (customer_id, start),
     )
 
+    excluded = () if include_transfers else TRANSFER_CATEGORIES
     buckets: dict[str, dict] = defaultdict(
-        lambda: {"income": 0.0, "expense": 0.0, "count": 0, "by_category": defaultdict(float)}
+        lambda: {"income": 0.0, "expense": 0.0, "transfer_out": 0.0, "count": 0,
+                 "by_category": defaultdict(float)}
     )
     for r in rows:
         period = r["transaction_date"][:6]  # YYYYMM
@@ -315,10 +358,15 @@ def monthly_summary(
         b["count"] += 1
         if r.get("direction") == "IN":
             b["income"] += amount
-        else:
-            b["expense"] += amount
-            b["by_category"][r.get("category") or "OTHER"] += amount
+            continue
+        category = r.get("category") or "OTHER"
+        if category in excluded:
+            b["transfer_out"] += amount
+            continue
+        b["expense"] += amount
+        b["by_category"][category] += amount
 
+    ky_hien_tai = now_vn().strftime("%Y%m")
     summary = []
     for period in sorted(buckets):
         b = buckets[period]
@@ -329,21 +377,26 @@ def monthly_summary(
                 "month": f"{period[:4]}-{period[4:]}",
                 "income": round(b["income"]),
                 "expense": round(b["expense"]),
-                "net": round(b["income"] - b["expense"]),
+                "transfer_out": round(b["transfer_out"]),
+                "net": round(b["income"] - b["expense"] - b["transfer_out"]),
                 "count": b["count"],
+                # Tháng đang chạy chưa đủ ngày để so với tháng đã đóng sổ.
+                "partial": period == ky_hien_tai,
                 "top_categories": [
-                    {"category": c, "amount": round(v), "rank": i + 1}
+                    {"category": c, "label": _nhan_nhom(c), "amount": round(v), "rank": i + 1}
                     for i, (c, v) in enumerate(by_cat[:5])
                 ],
             }
         )
-    return {"customer_id": customer_id, "months": len(summary), "summary": summary}
-
-
-# Chuyển khoản đi KHÔNG phải chi tiêu: nó là tiền chuyển chỗ, không phải tiền
-# tiêu mất. Gộp chung thì một lệnh chuyển lớn nuốt trọn biểu đồ và các nhóm chi
-# tiêu thật bị ép về gần 0%.
-TRANSFER_CATEGORIES = ("TRANSFER_P2P", "TRANSFER")
+    # Bỏ tháng dư đã lấy thêm để cắt cửa sổ cho tròn tháng lịch.
+    summary = summary[-months:]
+    return {
+        "customer_id": customer_id,
+        "months": len(summary),
+        "include_transfers": include_transfers,
+        "excluded_categories": list(excluded),
+        "summary": summary,
+    }
 
 
 def _quarter_of(transaction_date: str) -> tuple[int, int]:
@@ -369,7 +422,7 @@ def quarterly_summary(
     trước. Đây là con số trả lời thẳng câu hỏi "quý này tôi tiêu khác gì quý
     trước", thay vì bắt bên gọi tự trừ hai danh sách.
     """
-    _require_transactions(customer_id)
+    _require_customer(customer_id)
     # Lấy dư một quý rồi cắt: quý cũ nhất trong cửa sổ thường bị cắt giữa chừng
     # nên delta của nó vô nghĩa, nhưng vẫn cần nó làm mốc so sánh cho quý kế.
     start = (now_vn() - timedelta(days=92 * (quarters + 1))).strftime("%Y%m%d")
@@ -428,6 +481,7 @@ def quarterly_summary(
             "by_category": [
                 {
                     "category": c,
+                    "label": _nhan_nhom(c),
                     "amount": round(v),
                     "pct": round(v * 100 / total),
                     "rank": j + 1,
@@ -457,7 +511,8 @@ def quarterly_summary(
         "excluded_categories": list(excluded),
         "summary": summary,
         "category_totals": [
-            {"category": c, "amount": round(v), "pct": round(v * 100 / grand)}
+            {"category": c, "label": _nhan_nhom(c), "amount": round(v),
+             "pct": round(v * 100 / grand)}
             for c, v in sorted(totals.items(), key=lambda kv: kv[1], reverse=True)
         ],
     }
@@ -486,7 +541,7 @@ def monthly_comparison(
     trừ hai danh sách — cùng khuôn với quarterly-summary, chỉ đổi đơn vị sang
     tháng.
     """
-    _require_transactions(customer_id)
+    _require_customer(customer_id)
     # Lấy dư một tháng rồi cắt: tháng cũ nhất trong cửa sổ dùng làm mốc so sánh
     # cho tháng kế, bản thân delta của nó thì bỏ.
     start = (now_vn() - timedelta(days=31 * (months + 1))).strftime("%Y%m%d")
@@ -548,6 +603,7 @@ def monthly_comparison(
             "by_category": [
                 {
                     "category": c,
+                    "label": _nhan_nhom(c),
                     "amount": round(v),
                     "pct": round(v * 100 / total),
                     "rank": j + 1,
@@ -575,7 +631,8 @@ def monthly_comparison(
         "excluded_categories": list(excluded),
         "summary": summary,
         "category_totals": [
-            {"category": c, "amount": round(v), "pct": round(v * 100 / grand)}
+            {"category": c, "label": _nhan_nhom(c), "amount": round(v),
+             "pct": round(v * 100 / grand)}
             for c, v in sorted(totals.items(), key=lambda kv: kv[1], reverse=True)
         ],
     }
@@ -597,7 +654,7 @@ def cashflow_forecast(customer_id: int, horizon: Annotated[int, Query(ge=1, le=1
     hàng thực tế đang dư tiền vẫn có thể bị dự báo âm — sai lệch đủ để Copilot đưa ra
     lời khuyên ngược hẳn với tình hình thật.
     """
-    _require_transactions(customer_id)
+    _require_customer(customer_id)
     data = monthly_summary(customer_id, months=7)["summary"]
     if not data:
         raise HTTPException(404, f"không đủ dữ liệu dự báo cho customer {customer_id}")
@@ -839,15 +896,57 @@ def get_insights(
         params.append(period)
     sql += " ORDER BY period DESC, rank_in_period NULLS LAST"
     rows = query(sql, params)
-    return {"customer_id": customer_id, "count": len(rows), "insights": rows}
+    for r in rows:
+        r["label"] = _nhan_nhom(r.get("category") or "OTHER")
+    # Insight là số đã cache. Kỳ đang chạy thì bản cache chỉ phản ánh tới lúc
+    # sinh, nên bên gọi phải biết mà sinh lại trước khi đọc, thay vì tưởng đây
+    # là con số chốt của cả tháng.
+    ky_hien_tai = now_vn().strftime("%Y%m")
+    return {
+        "customer_id": customer_id,
+        "count": len(rows),
+        "period_in_progress": any(r.get("period") == ky_hien_tai for r in rows),
+        "insights": rows,
+    }
+
+
+def _cau_insight(category: str, amount: float, rank: int | None,
+                 tong_ky: float, delta: float | None) -> str:
+    """Câu mô tả cho một dòng insight, viết từ chính con số vừa tính.
+
+    Trước đây cột này để trống và bên đọc (thẻ insight của app, trợ lý) phải tự
+    nghĩ chữ — mỗi lần một kiểu, và nhóm chi tiêu bị gọi hai tên khác nhau trong
+    cùng một cuộc trò chuyện.
+    """
+    if category == "TOTAL":
+        cau = f"Tổng chi kỳ này là {_tien_vi(amount)}."
+    else:
+        pct = round(amount * 100 / tong_ky)
+        cau = f"Nhóm {_nhan_nhom(category)} chiếm {pct}% tổng chi, xếp thứ {rank}."
+    if delta is None:
+        return cau
+    if round(delta) == 0:
+        return cau + " So với kỳ trước gần như không đổi."
+    chieu = "tăng" if delta > 0 else "giảm"
+    return cau + f" So với kỳ trước {chieu} {abs(delta):.0f}%."
 
 
 @app.post("/customers/{customer_id}/insights/generate", tags=["insight"])
 def generate_insights(
-    customer_id: int, period: str | None = Query(None, description="YYYYMM, mặc định tháng trước")
+    customer_id: int,
+    period: str | None = Query(None, description="YYYYMM, mặc định tháng trước"),
+    include_transfers: bool = Query(
+        False, description="Tính cả chuyển khoản đi vào phần chi tiêu"
+    ),
 ):
-    """Tính và cache insight cho một kỳ. Số liệu do service tính; LLM chỉ viết
-    `insight_text` sau đó, không được tự nghĩ ra con số."""
+    """Tính và cache insight cho một kỳ. Số liệu do service tính; câu chữ cũng
+    do service viết từ chính con số đó — LLM không được tự nghĩ ra con số.
+
+    Chi tiêu KHÔNG gồm chuyển khoản đi, cùng định nghĩa với monthly-summary.
+
+    Sinh cho kỳ ĐANG CHẠY vẫn được (khách hỏi "tháng này tôi tiêu gì" là câu
+    hợp lệ) nhưng kết quả trả `partial: true`: bản cache chỉ tính tới thời điểm
+    sinh, ai đọc lại ngày hôm sau mà không sinh lại sẽ nhận số cũ."""
     # Không có cổng này thì khách không tồn tại sẽ nhận "không có chi tiêu kỳ X"
     # — nghe như nghiệp vụ bình thường, nên trợ lý đi tiếp thay vì tra lại id.
     _require_customer(customer_id)
@@ -861,6 +960,8 @@ def generate_insights(
         prev_mon, prev_year = 12, prev_year - 1
     prev_period = f"{prev_year:04d}{prev_mon:02d}"
 
+    excluded = () if include_transfers else TRANSFER_CATEGORIES
+
     def totals(p: str) -> dict[str, float]:
         rows = query(
             """
@@ -872,7 +973,11 @@ def generate_insights(
             """,
             (customer_id, p),
         )
-        return {r["category"] or "OTHER": float(r["total"]) for r in rows}
+        return {
+            r["category"] or "OTHER": float(r["total"])
+            for r in rows
+            if (r["category"] or "OTHER") not in excluded
+        }
 
     current, previous = totals(period), totals(prev_period)
     if not current:
@@ -884,29 +989,36 @@ def generate_insights(
     ]
     prev_total = sum(previous.values())
 
+    tong_ky = sum(current.values()) or 1
     saved = []
     for category, amount, rank in rows_out:
         base = prev_total if category == "TOTAL" else previous.get(category, 0.0)
         delta = round((amount - base) / base * 100, 2) if base else None
+        text = _cau_insight(category, amount, rank, tong_ky, delta)
         row = execute_returning(
             """
             INSERT INTO spending_insight
-              (customer_id, period, category, amount, delta_vs_prev, rank_in_period)
-            VALUES (%s,%s,%s,%s,%s,%s)
+              (customer_id, period, category, amount, delta_vs_prev, rank_in_period, insight_text)
+            VALUES (%s,%s,%s,%s,%s,%s,%s)
             ON CONFLICT (customer_id, period, category) DO UPDATE SET
               amount = EXCLUDED.amount,
               delta_vs_prev = EXCLUDED.delta_vs_prev,
               rank_in_period = EXCLUDED.rank_in_period,
+              insight_text = EXCLUDED.insight_text,
               generated_at = now()
             RETURNING *
             """,
-            (customer_id, period, category, round(amount), delta, rank),
+            (customer_id, period, category, round(amount), delta, rank, text),
         )
+        if row is not None:
+            row["label"] = _nhan_nhom(category)
         saved.append(row)
     return {
         "customer_id": customer_id,
         "period": period,
         "compared_to": prev_period,
+        "include_transfers": include_transfers,
+        "partial": period == now_vn().strftime("%Y%m"),
         "count": len(saved),
         "insights": saved,
     }

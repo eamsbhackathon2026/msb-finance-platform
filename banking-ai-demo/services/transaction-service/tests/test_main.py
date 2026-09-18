@@ -76,7 +76,50 @@ def test_monthly_summary_tach_thu_chi_va_xep_hang_nhom(monkeypatch):
     assert thang["expense"] == 8_000_000
     assert thang["net"] == 12_000_000
     assert thang["top_categories"][0] == {
-        "category": "SHOPPING", "amount": 6_000_000, "rank": 1}
+        "category": "SHOPPING", "label": "Mua sắm", "amount": 6_000_000, "rank": 1}
+
+
+def test_monthly_summary_khong_tinh_chuyen_khoan_vao_chi_tieu(monkeypatch):
+    """Một lệnh chuyển lớn từng nuốt trọn bảng chi tiêu: "tháng này bạn chi 622
+    triệu" trong khi 620 triệu là tiền chuyển đi, không phải tiền tiêu mất."""
+    rows = [
+        tx(600_000_000, "OUT", "20260810", cat="TRANSFER_P2P"),
+        tx(2_000_000, "OUT", "20260812", cat="FOOD"),
+        tx(10_000_000, "IN", "20260805", cat="OTHER"),
+    ]
+    monkeypatch.setattr(main, "query", lambda *a, **k: rows)
+    monkeypatch.setattr(main, "query_one", lambda *a, **k: {"x": 1})
+    thang = client.get("/transactions/100001/monthly-summary").json()["summary"][0]
+    assert thang["expense"] == 2_000_000
+    assert thang["transfer_out"] == 600_000_000
+    # Tiền chuyển đi vẫn rời tài khoản thật nên net phải trừ cả hai.
+    assert thang["net"] == 10_000_000 - 2_000_000 - 600_000_000
+    assert [c["category"] for c in thang["top_categories"]] == ["FOOD"]
+
+
+def test_monthly_summary_bo_thang_cut_dau_cua_so(monkeypatch):
+    """Tháng cũ nhất trong cửa sổ luôn bị cắt giữa chừng; giữ lại thì cùng một
+    tháng ra hai con số khác nhau tuỳ `months` bên gọi truyền."""
+    rows = [
+        tx(1_000_000, "OUT", "20260710", cat="FOOD"),
+        tx(2_000_000, "OUT", "20260810", cat="FOOD"),
+        tx(3_000_000, "OUT", "20260910", cat="FOOD"),
+    ]
+    monkeypatch.setattr(main, "query", lambda *a, **k: rows)
+    monkeypatch.setattr(main, "query_one", lambda *a, **k: {"x": 1})
+    body = client.get("/transactions/100001/monthly-summary", params={"months": 2}).json()
+    assert [m["period"] for m in body["summary"]] == ["202608", "202609"]
+    assert body["months"] == 2
+
+
+def test_monthly_summary_khach_khong_co_giao_dich_tra_rong_chu_khong_404(monkeypatch):
+    """Không có giao dịch là dữ liệu rỗng, không phải lỗi: báo lỗi thì trợ lý nói
+    với khách "thử lại sau" trong khi thật ra chẳng có gì để thử."""
+    monkeypatch.setattr(main, "query", lambda *a, **k: [])
+    monkeypatch.setattr(main, "query_one", lambda *a, **k: {"x": 1})
+    r = client.get("/transactions/100001/monthly-summary")
+    assert r.status_code == 200
+    assert r.json()["summary"] == []
 
 
 def test_du_bao_loai_thang_cut(monkeypatch):
@@ -398,3 +441,40 @@ def test_sinh_goi_y_cho_khach_khong_ton_tai_noi_dung_khach_khong_ton_tai(monkeyp
     r = client.post("/customers/999999/recommendations/generate")
     assert r.status_code == 404
     assert r.json()["detail"] == "customer 999999 không tồn tại"
+
+
+def test_sinh_insight_loai_chuyen_khoan_va_tu_viet_cau(monkeypatch):
+    """Insight phải cùng định nghĩa "chi tiêu" với monthly-summary, và câu chữ do
+    service viết từ chính con số vừa tính — để trống thì mỗi bên đọc tự nghĩ một
+    kiểu, cùng một nhóm bị gọi hai tên trong một cuộc trò chuyện."""
+    tong_theo_nhom = [
+        {"category": "TRANSFER_P2P", "total": "600000000"},
+        {"category": "FOOD", "total": "3000000"},
+        {"category": "SHOPPING", "total": "1000000"},
+    ]
+    ghi: list[tuple] = []
+    monkeypatch.setattr(main, "query_one", lambda *a, **k: {"x": 1})
+    monkeypatch.setattr(main, "query", lambda *a, **k: tong_theo_nhom)
+    monkeypatch.setattr(main, "execute_returning",
+                        lambda sql, params: ghi.append(params) or {"category": params[2]})
+    body = client.post("/customers/100001/insights/generate",
+                       params={"period": "202608"}).json()
+
+    nhom = {p[2]: p for p in ghi}
+    assert "TRANSFER_P2P" not in nhom, "chuyển khoản không phải chi tiêu"
+    assert nhom["TOTAL"][3] == 4_000_000
+    assert nhom["FOOD"][6] == (
+        "Nhóm Ăn uống chiếm 75% tổng chi, xếp thứ 1. So với kỳ trước gần như không đổi.")
+    assert body["insights"][1]["label"] == "Ăn uống"
+    assert body["partial"] is False
+
+
+def test_doc_insight_bao_ky_dang_chay(monkeypatch):
+    """Kỳ đang chạy thì bản cache chỉ tính tới lúc sinh; bên gọi phải biết mà
+    sinh lại, thay vì tưởng đây là con số chốt của cả tháng."""
+    ky = main.now_vn().strftime("%Y%m")
+    monkeypatch.setattr(main, "query", lambda *a, **k: [
+        {"period": ky, "category": "FOOD", "amount": 1_000_000}])
+    body = client.get("/customers/100001/insights").json()
+    assert body["period_in_progress"] is True
+    assert body["insights"][0]["label"] == "Ăn uống"

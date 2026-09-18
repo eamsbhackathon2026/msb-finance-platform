@@ -161,13 +161,14 @@ def map_overview(monthly: dict, ins: dict | None) -> CopilotOverview | None:
         return None
     latest = periods[-1]
 
-    # Chuyển khoản đi KHÔNG phải chi tiêu. Màn Copilot nói về thói quen tiêu
-    # dùng; để nguyên thì một lệnh chuyển 620 triệu chiếm 100% biểu đồ và các
-    # nhóm thật bị ép về 0%, màn hình mất hết ý nghĩa.
-    cats = [c for c in (latest.get("top_categories") or [])
-            if not str(c.get("category", "")).startswith("TRANSFER")]
+    # Chuyển khoản đi KHÔNG phải chi tiêu — giờ chính transaction-service đã loại
+    # nó khỏi `expense`, nên lấy thẳng con số của domain thay vì cộng lại ở đây:
+    # hai chỗ cùng tính một con số là hai chỗ có thể lệch nhau.
+    cats = latest.get("top_categories") or []
+    # `total` chỉ để chia tỷ trọng trong biểu đồ nên tính trên đúng các nhóm
+    # đang hiển thị (top 5), không phải trên tổng chi của cả tháng.
     total = sum(int(c.get("amount") or 0) for c in cats) or 1
-    expense = total
+    expense = int(latest.get("expense") or 0) or total
 
     # delta_vs_prev của insight cùng kỳ, cùng nhóm — dùng làm xu hướng.
     rows = sorted(((ins or {}).get("insights") or []), key=lambda i: i.get("period") or "")

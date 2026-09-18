@@ -611,15 +611,20 @@ async def agent_stream(question: str, agent_id: str | None = None, kind: str = "
             logger.warning("không ghi được nhật ký lượt stream: %s", err)
 
 
-def copilot_session_key(customer_id: int | None = None) -> str:
+def copilot_session_key(customer_id: int) -> str:
     """Khoá hội thoại của Copilot, một hội thoại cho mỗi khách.
 
     Thiếu khoá này thì mỗi câu hỏi mở một hội thoại mới bên Agent Platform và
     trợ lý không nhớ gì: hỏi "còn tháng trước thì sao?" được trả lời như câu đầu.
     `session_key` là cách nền tảng cho phép người gọi bằng API key tự đặt tên
     hội thoại (duy nhất theo trợ lý + khoá).
+
+    `customer_id` BẮT BUỘC và không có giá trị mặc định: khoá từng rơi về
+    DEMO_CUSTOMER_ID khi bên gọi quên truyền, nên mọi khách đăng nhập cùng ghi
+    vào MỘT hội thoại. Khách sau đọc được số dư và bảng chi tiêu của khách trước
+    ngay trong ngữ cảnh của mô hình.
     """
-    return f"copilot-{customer_id if customer_id is not None else DEMO_CUSTOMER_ID}"
+    return f"copilot-{customer_id}"
 
 
 async def agent_answer(question: str, agent_id: str | None = None, kind: str = "copilot",

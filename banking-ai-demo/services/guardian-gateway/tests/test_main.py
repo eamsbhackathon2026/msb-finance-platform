@@ -1609,7 +1609,8 @@ def _gia_lap_agent_stream(monkeypatch, pieces, busy=False):
     ghi_nhan: dict = {}
 
     async def fake(question, agent_id=None, kind="copilot", customer_id=None, session_key=None):
-        ghi_nhan.update(question=question, kind=kind, session_key=session_key)
+        ghi_nhan.update(question=question, kind=kind, session_key=session_key,
+                        customer_id=customer_id)
         if busy:
             raise main.domain.AgentBusy()
         for piece in pieces:
@@ -1641,12 +1642,24 @@ def test_chat_go_markdown_ngay_trong_dong_chay(monkeypatch):
     assert "12.460.000 ₫" in noi_dung
 
 
-def test_chat_gui_kem_khoa_hoi_thoai(monkeypatch):
+def test_chat_gui_kem_khoa_hoi_thoai_rieng_tung_khach(monkeypatch):
+    """Khoá hội thoại phải mang mã khách đang đăng nhập.
+
+    Dùng chung một khoá thì mọi khách ghi vào MỘT hội thoại bên nền tảng: khách
+    sau đọc được số dư và bảng chi tiêu của khách trước ngay trong ngữ cảnh mô
+    hình. Thiếu khoá hẳn thì ngược lại — mỗi câu hỏi mở một hội thoại mới và trợ
+    lý không nhớ gì.
+    """
+    monkeypatch.setattr(main.domain, "current_customer_id", lambda: 100001)
     ghi_nhan = _gia_lap_agent_stream(monkeypatch, ["xong"])
     client.post("/api/copilot/chat", json={"message": "còn tháng trước thì sao?"})
-    # Thiếu khoá này thì mỗi câu hỏi mở một hội thoại mới và trợ lý không nhớ gì.
-    assert ghi_nhan["session_key"] == main.domain.copilot_session_key()
+    assert ghi_nhan["session_key"] == "copilot-100001"
+    assert ghi_nhan["customer_id"] == 100001
     assert ghi_nhan["kind"] == "copilot"
+
+
+def test_hai_khach_khong_dung_chung_khoa_hoi_thoai():
+    assert main.domain.copilot_session_key(100001) != main.domain.copilot_session_key(100008)
 
 
 def test_chat_hoi_don_thi_noi_thanh_loi(monkeypatch):
