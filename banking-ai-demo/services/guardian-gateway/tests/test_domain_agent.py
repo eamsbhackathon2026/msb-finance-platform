@@ -463,12 +463,13 @@ def test_tom_tat_suy_nghi_khong_lan_vao_cau_tra_loi(configured, monkeypatch):
     assert "Khách hỏi chi tiêu" not in trace["response"]
 
 
-def test_suy_luan_tho_khong_duoc_gui_xuong_trinh_duyet(configured, monkeypatch):
-    """Loại "raw" là mô hình tự nói với chính nó, không phải lời kể cho khách.
+def test_suy_luan_tho_van_duoc_ke_cho_khach(configured, monkeypatch):
+    """Cả hai loại suy nghĩ đều tới được màn hình, kể cả chuỗi thô.
 
-    Đo thật trên GLM qua GreenNode: tiếng Anh dù hội thoại tiếng Việt, dài gấp
-    năm lần câu trả lời, kèm bản nháp mô hình tự chấm. Chặn ngay ở gateway chứ
-    không để FE tự lọc, vì gửi xuống rồi thì mở tab mạng là đọc được.
+    Quyết định sản phẩm: suy nghĩ là năng lực của mô hình, muốn nó nghĩ bằng
+    tiếng Việt thì đổi mô hình chứ không giấu đi. Đo thật trên GLM qua GreenNode
+    thì chuỗi thô ra tiếng Anh và dài gấp nhiều lần câu trả lời — phần rút gọn
+    nằm ở FE, không phải ở đây.
     """
     monkeypatch.setattr(domain.httpx, "AsyncClient", _client_phat([
         _sse({"type": "reasoning.delta", "kind": "raw",
@@ -477,8 +478,10 @@ def test_suy_luan_tho_khong_duoc_gui_xuong_trinh_duyet(configured, monkeypatch):
         _sse({"type": "run.completed", "run": {"output": "Tổng tuổi ba đứa là 22."}}),
     ]))
     out = asyncio.run(_gom(domain.agent_events("x")))
-    assert [k for k, _ in out] == ["text", "output"]
-    assert not any("Draft the Response" in str(v) for _, v in out)
+    assert [k for k, _ in out] == ["reasoning", "text", "output"]
+    # Vẫn không được lẫn vào câu trả lời: đó là ranh giới không đổi.
+    cau, _ = asyncio.run(domain.agent_answer_with_steps("x"))
+    assert "Draft the Response" not in (cau or "")
 
 
 def test_ban_tom_tat_thi_van_duoc_ke(configured, monkeypatch):
