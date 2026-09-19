@@ -856,6 +856,12 @@ def _dong_tien_dien_hinh(customer_id: int, months: int = 12) -> dict | None:
     }
 
 
+def _dot(n: float) -> str:
+    """Số nguyên với dấu chấm ngăn nghìn, KHÔNG kèm ' ₫'. Dùng khi câu cần chèn
+    số mà không muốn .replace(',', '.') nuốt luôn dấu phẩy văn bản."""
+    return f"{round(n):,}".replace(",", ".")
+
+
 @app.get("/customers/{customer_id}/financial-health", tags=["advisor"])
 def financial_health(
     customer_id: int,
@@ -896,7 +902,7 @@ def financial_health(
         "key": "savings_rate", "label": "Tỷ lệ tiết kiệm", "status": d,
         "score": max(0, min(100, round(ty_le * 5))),
         "value": round(ty_le),
-        "detail": f"Mỗi tháng để dành {round(dt['net']):,} ₫, bằng {round(ty_le)}% thu nhập.".replace(",", "."),
+        "detail": f"Mỗi tháng để dành {_tien_vi(dt['net'])}, bằng {round(ty_le)}% thu nhập.",
     })
 
     # 2. Quỹ dự phòng (số tháng chi thiết yếu mà số dư lỏng gánh được)
@@ -918,7 +924,7 @@ def financial_health(
         "score": max(0, min(100, round((100 - ganh) * 1.4))),
         "value": round(ganh),
         "detail": f"Chi thiết yếu và cam kết chiếm {round(ganh)}% thu nhập "
-                  f"({round(co_dinh_thang):,} ₫/tháng).".replace(",", "."),
+                  f"({_tien_vi(co_dinh_thang)}/tháng).",
     })
 
     # 4. Tiền nhàn rỗi: phần số dư vượt 6 tháng chi thiết yếu, để không sinh lời
@@ -930,9 +936,9 @@ def financial_health(
         "key": "idle_cash", "label": "Tiền nhàn rỗi", "status": d,
         "score": max(0, min(100, 100 - round(nhan_roi / (nguong_du_phong or 1) * 50))),
         "value": round(nhan_roi),
-        "detail": (f"Khoảng {round(nhan_roi):,} ₫ để trong tài khoản thanh toán không sinh lời — "
-                   f"mỗi năm lỡ mất khoảng {lai_mat_nam:,} ₫ tiền lãi nếu gửi ở mức {lai}%/năm."
-                   ).replace(",", ".") if nhan_roi > 0 else
+        "detail": (f"Khoảng {_tien_vi(nhan_roi)} để trong tài khoản thanh toán không sinh lời — "
+                   f"mỗi năm lỡ mất khoảng {_dot(lai_mat_nam)} ₫ tiền lãi nếu gửi ở mức {lai}%/năm."
+                   ) if nhan_roi > 0 else
                   "Không có tiền để không đáng kể — số dư đang ở mức quỹ dự phòng hợp lý.",
     })
 
@@ -1021,18 +1027,18 @@ def resilience_check(
         thieu_ca_gui = expense_amount - (liquid_balance + deposit_balance)
         if thieu_long <= 0:
             verdict, khuyen = "đủ sức", (
-                f"Khoản {expense_amount:,} ₫ nằm gọn trong số dư khả dụng. Sau khi chi vẫn còn "
-                f"khoảng {liquid_balance - expense_amount:,} ₫."
+                f"Khoản {_tien_vi(expense_amount)} nằm gọn trong số dư khả dụng. Sau khi chi vẫn còn "
+                f"khoảng {_tien_vi(liquid_balance - expense_amount)}."
             )
         elif thieu_ca_gui <= 0:
             verdict, khuyen = "cần chú ý", (
-                f"Tiền trong tài khoản thanh toán còn thiếu {thieu_long:,} ₫; phải tất toán bớt "
+                f"Tiền trong tài khoản thanh toán còn thiếu {_tien_vi(thieu_long)}; phải tất toán bớt "
                 f"tiền gửi có kỳ hạn để bù. Cân nhắc tất toán một phần thay vì toàn bộ để không mất hết lãi."
             )
         else:
             verdict, khuyen = "rủi ro", (
-                f"Toàn bộ tài sản khả dụng ({liquid_balance + deposit_balance:,} ₫) vẫn thiếu "
-                f"{thieu_ca_gui:,} ₫ so với khoản cần. Nên cân nhắc vay cầm cố sổ tiết kiệm hoặc "
+                f"Toàn bộ tài sản khả dụng ({_tien_vi(liquid_balance + deposit_balance)}) vẫn thiếu "
+                f"{_tien_vi(thieu_ca_gui)} so với khoản cần. Nên cân nhắc vay cầm cố sổ tiết kiệm hoặc "
                 f"khoản vay ngắn hạn thay vì bán tháo tài sản."
             )
         ra.update({
@@ -1040,7 +1046,7 @@ def resilience_check(
             "shortfall_liquid": max(0, thieu_long),
             "shortfall_total": max(0, thieu_ca_gui),
             "verdict": verdict,
-            "recommendation": khuyen.replace(",", "."),
+            "recommendation": khuyen,
         })
         return ra
 
@@ -1057,9 +1063,8 @@ def resilience_check(
     if n:
         con_lai = liquid_balance - thiet_yeu * n
         khuyen += (f"Qua {n} tháng như giả định, "
-                   + (f"vẫn còn khoảng {round(con_lai):,} ₫." if con_lai >= 0
-                      else f"sẽ thiếu khoảng {round(-con_lai):,} ₫ và cần tới tiền gửi hoặc nguồn khác.")
-                   ).replace(",", ".")
+                   + (f"vẫn còn khoảng {_tien_vi(con_lai)}." if con_lai >= 0
+                      else f"sẽ thiếu khoảng {_tien_vi(-con_lai)} và cần tới tiền gửi hoặc nguồn khác."))
     ra.update({
         "income_loss_months": n,
         "runway_essential_months": round(runway_thiet_yeu, 1),

@@ -807,3 +807,19 @@ def test_resilience_chi_dot_xuat_du_tien_thi_du_suc(monkeypatch):
 def test_hai_tool_advisor_co_trong_danh_muc_agent():
     ten = {t["name"] for t in main.AGENT_TOOLS}
     assert {"check_financial_health", "check_resilience"} <= ten
+
+
+def test_advisor_khong_nuot_dau_phay_van_ban(monkeypatch):
+    """.replace(',', '.') áp lên cả câu từng biến "để dành 1.018.000 ₫, bằng 13%"
+    thành "₫. bằng". Số phải định dạng riêng, dấu phẩy văn bản giữ nguyên."""
+    monkeypatch.setattr(main, "query_one", lambda *a, **k: {"x": 1})
+    monkeypatch.setattr(main, "_dong_tien_dien_hinh", _dt_100008)
+    monkeypatch.setattr(main, "_lai_tiet_kiem_tot_nhat", lambda *a, **k: 5.6)
+    h = client.get("/customers/100008/financial-health",
+                   params={"liquid_balance": 28_679_000}).json()
+    d1 = {p["key"]: p for p in h["pillars"]}["savings_rate"]["detail"]
+    assert "₫, bằng" in d1 and "₫. bằng" not in d1
+
+    r = client.get("/customers/100008/resilience", params={
+        "liquid_balance": 28_679_000, "shock_type": "income_loss", "income_loss_months": 3}).json()
+    assert "giả định, vẫn" in r["recommendation"] and "giả định. vẫn" not in r["recommendation"]
