@@ -1105,12 +1105,13 @@ def test_strip_markdown_bo_bang_va_dam_giu_chu():
     assert "**" not in out and "---" not in out
     assert "Đây là chi tiêu Quý 3/2026:" in out
     assert "Nhận xét:" in out
-    assert "- Y tế giảm gần 50%." in out
+    # Màn Guardian in chữ thô nên gạch đầu dòng phải thành dấu tròn đọc được ngay.
+    assert "• Y tế giảm gần 50%." in out
     assert ">" not in main._strip_markdown_for_plain("> 📊 Thu nhập: 1 ₫\nchữ")
 
 
 def test_strip_markdown_van_ban_thuan_giu_nguyen():
-    plain = "Tháng 9 bạn chi 2.465.000 ₫, giảm 62% so tháng 8.\n- Ăn uống giảm mạnh."
+    plain = "Tháng 9 bạn chi 2.465.000 ₫, giảm 62% so tháng 8.\nĂn uống giảm mạnh."
     assert main._strip_markdown_for_plain(plain) == plain
 
 
@@ -1711,15 +1712,16 @@ def test_chat_phat_thang_tung_mau_cua_agent(monkeypatch):
     assert len(tokens) == 3
 
 
-def test_chat_go_markdown_ngay_trong_dong_chay(monkeypatch):
+def test_chat_giu_markdown_nhung_bo_dong_bang(monkeypatch):
     _gia_lap_agent_stream(monkeypatch, ["Bạn chi **12.4", "60.000 ₫** tháng này.\n", "| Nhóm | Tiền |\n", "Hết."])
     r = client.post("/api/copilot/chat", json={"message": "chi tiêu"})
     tokens, _, _ = _doc_token(r.text)
     noi_dung = "".join(tokens)
-    # FE render văn bản thuần: không được để lọt dấu ** hay dòng bảng markdown.
-    assert "**" not in noi_dung
+    # FE render markdown thật, nên **đậm** phải tới nơi nguyên vẹn để render.
+    # Riêng dòng bảng vẫn bị bỏ: gateway đã đính bảng số liệu riêng của mình.
+    assert "**12.460.000 ₫**" in noi_dung
     assert "|" not in noi_dung
-    assert "12.460.000 ₫" in noi_dung
+    assert noi_dung.rstrip().endswith("Hết.")
 
 
 def test_chat_gui_kem_khoa_hoi_thoai_rieng_tung_khach(monkeypatch):

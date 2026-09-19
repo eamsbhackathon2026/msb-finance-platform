@@ -464,14 +464,15 @@ _SPECIFIC_MONTH_RE = re.compile(r"tháng\s*(1[0-2]|0?[1-9])(?:\s*[/-]\s*(\d{4}))
 
 
 def _strip_markdown_for_plain(text: str) -> str:
-    """Gỡ markdown khỏi câu trả lời agent cho msb-guardian-fe (render văn bản thuần).
+    """Gỡ markdown cho MÀN GUARDIAN, nơi khuyến cáo hiện ra dưới dạng chữ thuần.
 
-    Agent xuất bảng markdown (kiểu Excel) để render đẹp ở admin-web của nền tảng
-    agent. Nhưng bong bóng chat của msb-guardian-fe render {content} dạng văn bản
-    thuần và ĐÃ có bảng số liệu riêng do gateway đính (số của domain, đảm bảo
-    đúng). Nên ở đường này: bỏ nguyên khối bảng (dòng bắt đầu bằng "|") để không
-    hiện dấu | thô và không trùng bảng, đồng thời gỡ **đậm** và # tiêu đề. Phần
-    chữ nhận xét và gạch đầu dòng "- " giữ nguyên.
+    Khung chat không dùng hàm này nữa: msb-guardian-fe render markdown thật nên
+    chữ đi thẳng tới đó. Màn Guardian thì vẫn in chữ thô, nên ở đây phải dịch
+    markdown sang thứ đọc được: bỏ dòng bảng, gỡ **đậm**, # tiêu đề và > trích
+    dẫn, đổi gạch đầu dòng thành "• ", bỏ backtick.
+
+    Vì màn này chỉ nhận vài câu khuyến cáo ngắn, một bộ luật gọn là đủ; những
+    dạng markdown hiếm hơn (liên kết, gạch ngang) chưa xuất hiện ở đó.
     """
     kept = [ln for ln in text.split("\n") if not ln.lstrip().startswith("|")]
     out = "\n".join(kept)
@@ -479,6 +480,10 @@ def _strip_markdown_for_plain(text: str) -> str:
     out = re.sub(r"__(.+?)__", r"\1", out)        # bỏ __đậm__
     out = re.sub(r"(?m)^\s{0,3}#{1,6}\s*", "", out)  # bỏ tiêu đề #
     out = re.sub(r"(?m)^\s{0,3}>\s?", "", out)        # bỏ dấu trích dẫn >
+    # Gạch đầu dòng: model viết "* " hoặc "- ", cả hai hiện ra màn hình như dấu
+    # lạc lõng khi không có bộ render markdown. Một dấu tròn đọc ra ngay là danh sách.
+    out = re.sub(r"(?m)^(\s{0,3})[*+-][ \t]+", r"\1• ", out)
+    out = out.replace("`", "")                    # `mã` không có gì để render
     out = re.sub(r"\n{3,}", "\n\n", out)          # gộp dòng trống thừa
     return out.strip()
 
