@@ -929,8 +929,19 @@ async def _product_visual(question: str) -> ChatGrid | None:
     return None
 
 
-async def _spending_visual(question: str) -> tuple[ChatTable | None, ChatChart | None]:
-    """Bảng + biểu đồ số liệu thật cho câu hỏi, hoặc (None, None).
+async def _spending_visual(question: str) -> tuple[ChatTable | None, ChatChart | None, bool]:
+    """Bảng + biểu đồ số liệu thật cho câu hỏi, và cờ "đây là bảng lộ trình tiết kiệm".
+
+    Cờ thứ ba tồn tại vì đúng một nhánh phải nhường đường cho trợ lý. Bảng lộ
+    trình của gateway chia đều mục tiêu cho số tháng, KHÔNG tính lãi kép; còn
+    công cụ `plan_savings_goal` tính bằng biểu lãi thật. Hai bên ra hai con số
+    khác nhau cho cùng một câu hỏi — trong một lần thử, chữ của trợ lý nói cần
+    12.672.987đ/tháng và 20,5 năm trong khi bảng gateway ngay bên dưới ghi
+    13.092.250đ và 39 năm. Hai con số chọi nhau trên cùng màn hình là thứ khách
+    nhìn thấy đầu tiên.
+
+    Các nhánh còn lại giữ nguyên quyền ưu tiên: số lãi và tiền trả góp ở đó vẫn
+    phải là số của biểu lãi chứ không phải số LLM chép lại.
 
     Dùng lại đúng các endpoint copilot_months/quarters/overview nên số ở bảng
     khớp từng đồng với màn hình và với điều agent nói — một nguồn số duy nhất.
@@ -962,22 +973,24 @@ async def _spending_visual(question: str) -> tuple[ChatTable | None, ChatChart |
         if muc_tieu:
             report = await copilot_months(months=12)
             khach = await session_customer()
-            return _savings_plan_visual(muc_tieu, khach.balance, report.months)
+            bang, bieu_do = _savings_plan_visual(muc_tieu, khach.balance, report.months)
+            # Cờ riêng cho nhánh này: xem chú thích ở _spending_visual.
+            return bang, bieu_do, True
     if _SPEND_RE.search(question):
         if _COMPARE_RE.search(question) and _MONTH_RE.search(question) and not _GROUP_RE.search(question):
-            return _months_compare_visual(await copilot_months(months=6))
+            return (*_months_compare_visual(await copilot_months(months=6)), False)
         mm = _SPECIFIC_MONTH_RE.search(question)
         if mm:
             period = _resolve_period(int(mm.group(1)), int(mm.group(2)) if mm.group(2) else None)
             m = await _month_report(period)
-            return _month_visual(m) if m else (None, None)
+            return (*_month_visual(m), False) if m else (None, None, False)
         if _QUARTER_RE.search(question):
-            return _quarter_visual(await copilot_quarters(quarters=8))
+            return (*_quarter_visual(await copilot_quarters(quarters=8)), False)
         if _MONTH_RE.search(question):
-            return _overview_visual(await copilot_overview())
+            return (*_overview_visual(await copilot_overview()), False)
     if tu_van:
-        return _surplus_visual((await copilot_months(months=6)).months)
-    return None, None
+        return (*_surplus_visual((await copilot_months(months=6)).months), False)
+    return None, None, False
 
 
 def _chat_step(step: domain.AgentStep) -> ChatStep:
@@ -1002,7 +1015,7 @@ async def copilot_chat(payload: ChatRequest) -> StreamingResponse:
     # Lấy bảng + biểu đồ số liệu THẬT cho câu hỏi chi tiêu TRƯỚC, để biết câu này
     # có bảng hay không (và để middleware kịp đóng dấu X-Guardian-Data-Source
     # theo các lời gọi domain này trước khi trả StreamingResponse).
-    table, data_chart = await _spending_visual(payload.message)
+    table, data_chart, bang_lo_trinh = await _spending_visual(payload.message)
     # Bảng sản phẩm (lãi vay / lãi gửi) cũng do gateway dựng từ biểu lãi thật.
     # Chỉ xét khi câu hỏi không rơi vào bảng chi tiêu nào, để một câu không bao
     # giờ kèm hai bảng nói về hai chuyện khác nhau.
@@ -1108,24 +1121,32 @@ async def copilot_chat(payload: ChatRequest) -> StreamingResponse:
             async for chunk in replay(fallback):
                 yield chunk
 
-        # Bảng sản phẩm của gateway thay cho mọi bảng agent tự kẻ: số lãi và tiền
-        # trả góp phải là số của biểu lãi, không phải số LLM chép lại. Không có
-        # bảng chuẩn nào thì mới chuyển thể bảng markdown agent vừa viết ra.
+        # Bảng lộ trình tiết kiệm là ngoại lệ: khi trợ lý đã tự trả lời thì bảng
+        # của nó do `plan_savings_goal` tính trên biểu lãi thật, còn bảng của
+        # gateway chỉ chia đều mục tiêu cho số tháng. Giữ cả hai là bày hai con
+        # số chọi nhau trước mặt khách, nên gateway rút lui.
+        nhuong_tro_ly = bool(bang_lo_trinh and emitted and raw)
+        bang = None if nhuong_tro_ly else table
+        do_thi = None if nhuong_tro_ly else chart
+
+        # Ngoài ngoại lệ trên, bảng của gateway thay cho mọi bảng agent tự kẻ: số
+        # lãi và tiền trả góp phải là số của biểu lãi, không phải số LLM chép
+        # lại. Không có bảng chuẩn nào thì mới chuyển thể markdown agent vừa viết.
         if grid_gw is not None:
             grids = [grid_gw]
-        elif table is None and raw:
+        elif bang is None and raw:
             grids = _parse_markdown_grids("".join(raw))
         else:
             grids = []
 
-        if table is not None:
+        if bang is not None:
             # Sự kiện bảng phát sau khi hết token, trước biểu đồ. FE bỏ qua object
             # không có "token" nếu chưa hỗ trợ, nên không làm hỏng client cũ.
-            yield sse({"table": table.model_dump(by_alias=True)})
+            yield sse({"table": bang.model_dump(by_alias=True)})
         for g in grids:
             yield sse({"grid": g.model_dump(by_alias=True)})
-        if chart is not None:
-            yield sse({"chart": chart.model_dump(by_alias=True)})
+        if do_thi is not None:
+            yield sse({"chart": do_thi.model_dump(by_alias=True)})
         yield b"data: [DONE]\n\n"
 
     return StreamingResponse(

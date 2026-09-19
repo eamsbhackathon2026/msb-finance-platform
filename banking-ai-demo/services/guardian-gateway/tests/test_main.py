@@ -1542,21 +1542,23 @@ def test_cau_di_vay_khong_gan_bang_lo_trinh_tiet_kiem():
     """"vay 500 triệu mua ô tô" khớp cả "mua ô tô" lẫn số tiền nên trước đây rơi
     vào bảng lộ trình TIẾT KIỆM — khuyên ngược hẳn điều khách hỏi."""
     import asyncio
-    t, _ = asyncio.run(main._spending_visual("tôi muốn vay 500 triệu mua ô tô trong 5 năm"))
+    t, _, lo_trinh = asyncio.run(main._spending_visual("tôi muốn vay 500 triệu mua ô tô trong 5 năm"))
     assert t is None, "câu đi vay không được gắn bảng tích lũy"
+    assert lo_trinh is False
 
 
 def test_cau_gui_goi_tiet_kiem_khong_gan_bang_lo_trinh():
     import asyncio
-    t, _ = asyncio.run(main._spending_visual("gửi tiết kiệm 100 triệu trong 12 tháng thì gói nào lợi"))
-    assert t is None
+    t, _, lo_trinh = asyncio.run(main._spending_visual("gửi tiết kiệm 100 triệu trong 12 tháng thì gói nào lợi"))
+    assert t is None and lo_trinh is False
 
 
 def test_ke_hoach_tich_luy_van_ra_bang_lo_trinh():
     """Chốt chặn hai chiều: câu tích lũy thật vẫn phải ra bảng lộ trình."""
     import asyncio
-    t, _ = asyncio.run(main._spending_visual("kế hoạch tiết kiệm mua ô tô 500 triệu"))
+    t, _, lo_trinh = asyncio.run(main._spending_visual("kế hoạch tiết kiệm mua ô tô 500 triệu"))
     assert t is not None and "Lộ trình" in t.title
+    assert lo_trinh is True, "phải báo đây là nhánh lộ trình để stream biết mà nhường trợ lý"
 
 
 # ---- Guardian 3 mức (wireframe màn Transfer) ---------------------------------
@@ -2071,3 +2073,55 @@ def test_chat_phat_tom_tat_suy_nghi_ra_sse(monkeypatch):
         (k, v) for k, v in su_kien if k == "reasoning"]
     # Suy nghĩ ra TRƯỚC chữ: đó là lúc khách đang chờ và cần biết máy đang làm gì.
     assert [k for k, _ in su_kien].index("reasoning") < [k for k, _ in su_kien].index("token")
+
+
+def test_bang_lo_trinh_cua_gateway_nhuong_cho_tro_ly(monkeypatch):
+    """Gateway chia đều mục tiêu cho số tháng, KHÔNG tính lãi kép; công cụ
+    plan_savings_goal tính trên biểu lãi thật. Trong một lần thử trên cụm, chữ
+    của trợ lý nói "cần 12.672.987đ/tháng, 20,5 năm" còn bảng gateway ngay bên
+    dưới ghi "13.092.250đ" và "39 năm". Hai con số chọi nhau là thứ khách nhìn
+    thấy trước tiên, nên nhánh này gateway phải rút lui khi trợ lý đã trả lời."""
+    async def gia_lap(_q):
+        from models import ChatTable, ChatTableRow, ChatChart, ChatChartPoint
+        bang = ChatTable(title="Lộ trình tiết kiệm",
+                         rows=[ChatTableRow(label="3 năm", amount=13_092_250, pct=172)],
+                         total_label="Thực tế để dành được", total_amount=1_018_000)
+        do_thi = ChatChart(type="bar", title="Cần để dành mỗi tháng",
+                           data=[ChatChartPoint(label="3 năm", value=13_092_250)])
+        return bang, do_thi, True
+
+    async def phat(*a, **k):
+        yield "text", "Cần 12.672.987 đ/tháng.\n\n| Gói | Lãi |\n|---|---:|\n| Tiết kiệm | 6,2% |\n"
+
+    monkeypatch.setattr(main, "_spending_visual", gia_lap)
+    monkeypatch.setattr(main.domain, "agent_events", phat)
+    monkeypatch.setattr(main.domain, "agent_configured", lambda *a, **k: True)
+    r = client.post("/api/copilot/chat", json={"message": "kế hoạch tiết kiệm mua ô tô 500 triệu"})
+    body = r.text
+    # SSE trả số thô, không định dạng — kiểm "13.092.250" sẽ đúng một cách vô nghĩa.
+    assert "13092250" not in body, "bảng gateway phải rút lui, không được chọi số với trợ lý"
+    assert '"table"' not in body
+    assert '"chart"' not in body, "biểu đồ đi theo bảng, cùng rút lui"
+    assert '"grid"' in body, "bảng markdown của trợ lý phải được dựng thay vào"
+
+
+def test_tro_ly_hong_thi_bang_lo_trinh_cua_gateway_van_hien(monkeypatch):
+    """Nhường là nhường cho một câu trả lời CÓ THẬT. Trợ lý chết mà gateway cũng
+    rút bảng thì khách nhận được một màn trống."""
+    async def gia_lap(_q):
+        from models import ChatTable, ChatTableRow
+        return ChatTable(title="Lộ trình tiết kiệm",
+                         rows=[ChatTableRow(label="3 năm", amount=13_092_250, pct=172)],
+                         total_label="Thực tế để dành được", total_amount=1_018_000), None, True
+
+    async def hong(*a, **k):
+        # agent_events tự nuốt mọi lỗi và không phát chữ nào — đó mới là hình
+        # dạng thật của "agent hỏng", không phải một exception ném ra ngoài.
+        return
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(main, "_spending_visual", gia_lap)
+    monkeypatch.setattr(main.domain, "agent_events", hong)
+    monkeypatch.setattr(main.domain, "agent_configured", lambda *a, **k: True)
+    r = client.post("/api/copilot/chat", json={"message": "kế hoạch tiết kiệm mua ô tô 500 triệu"})
+    assert "13092250" in r.text, "agent hỏng thì bảng gateway phải quay lại"
