@@ -240,7 +240,7 @@ def test_info_phan_anh_dung_cau_hinh_domain():
     body = client.get("/info").json()
     # conftest tắt DOMAIN_ENABLED nên /info phải báo đúng như vậy.
     assert body["integrated_with_domain_services"] is False
-    assert len(body["endpoints"]) == 37
+    assert len(body["endpoints"]) == 38
 
 
 def test_openapi_phuc_vu_dung_cac_endpoint_fe_goi():
@@ -272,6 +272,7 @@ def test_openapi_phuc_vu_dung_cac_endpoint_fe_goi():
         "/api/transfer/execute",
         "/api/transfer/history",
         "/api/scamshield/signals",
+        "/api/scamshield/verdict",
         "/api/risk/assess",
         "/api/risk/explain",
         "/api/safety-center",
@@ -1233,6 +1234,60 @@ def test_fallback_verdict_stk_bi_nghi_la_danger():
     v = main._fallback_verdict(s)
     assert v.level == "danger"
     assert any("báo cáo" in r for r in v.reasons)
+
+
+def test_agent_configured_khong_muon_agent_khac_khi_id_rong():
+    """Hỏi đích danh một agent chưa cấu hình phải ra False.
+
+    Trả True ở đây là cách lỗi tốn một buổi debug: câu hỏi chống lừa đảo lặng
+    lẽ chạy vào agent Copilot (11 công cụ, 15-20s), quá trần chờ nên lượt nào
+    cũng rơi về playbook — nhìn như agent trả lời kém chứ không như gọi nhầm.
+    """
+    import domain
+    cu = (domain.AGENT_SERVICE_URL, domain.AGENT_API_KEY, domain.AGENT_ID)
+    domain.AGENT_SERVICE_URL, domain.AGENT_API_KEY, domain.AGENT_ID = "http://x", "k", "agent-copilot"
+    try:
+        assert domain.agent_configured() is True          # không truyền → xét AGENT_ID
+        assert domain.agent_configured("") is False       # hỏi đích danh, id rỗng
+        assert domain.agent_configured(None) is False
+        assert domain.agent_configured("agent-shield") is True
+    finally:
+        domain.AGENT_SERVICE_URL, domain.AGENT_API_KEY, domain.AGENT_ID = cu
+
+
+def test_scamshield_verdict_khong_cau_hinh_agent_van_tra_ket_luan():
+    """Endpoint không bao giờ chặn khách: agent chưa cấu hình → verdict tín hiệu."""
+    r = client.post("/api/scamshield/verdict", json={
+        "bankCode": "ACB", "accountNo": "5270384262",
+        "amount": 85_000_000, "note": "chuyen gap theo huong dan cong an"})
+    assert r.status_code == 200
+    body = r.json()
+    assert set(body) == {"level", "title", "summary", "reasons", "recommendation", "source", "steps"}
+    assert body["steps"] == []  # nhánh dự phòng không chạy bước nào nên không kể bước nào
+    assert body["level"] in {"safe", "suspect", "danger"}
+    assert body["source"] == "fallback"
+
+
+def test_parse_verdict_doc_duoc_dung_cau_tra_loi_that_cua_agent():
+    """Chuỗi dưới đây chép nguyên từ một lượt chạy thật của agent MSB Scam Shield."""
+    that = ("NGUY_HIEM\n"
+            "- Người nhận là tài khoản mới, quan hệ không xác định và đã bị hệ thống cảnh báo SUSPECTED.\n"
+            "- Nội dung chuyển khoản chứa từ khóa \"công an\", khớp mô típ giả danh cơ quan chức năng.\n"
+            "Khuyến nghị: Ngừng giao dịch ngay, gọi cho người thân hoặc công an địa phương để xác minh.")
+    v = main._parse_verdict(that)
+    assert v is not None
+    assert v.level == "danger" and v.source == "agent"
+    assert len(v.reasons) == 2
+    assert v.recommendation.startswith("Khuyến nghị:")
+    # Dòng tag mức độ không được lọt vào phần khách đọc.
+    assert "NGUY_HIEM" not in v.summary and all("NGUY_HIEM" not in r for r in v.reasons)
+
+
+def test_parse_verdict_tu_choi_doan_van_cua_luot_2():
+    """Lượt 2 màn Guardian trả đoạn văn thuần; ép nó thành verdict là sai."""
+    doan_van = ("Bạn ơi, vì đang có người hướng dẫn nên hãy bình tĩnh ngắt cuộc gọi ngay. "
+                "Công an không bao giờ yêu cầu chuyển tiền để chứng minh trong sạch.")
+    assert main._parse_verdict(doan_van) is None
 
 
 # ---- Tư vấn: lộ trình tiết kiệm cho mục tiêu lớn ------------------------------

@@ -475,14 +475,28 @@ async def user_by_username(username: str) -> dict | None:
 
 # ---- agent-service (chỉ gọi, KHÔNG sửa) --------------------------------------
 
-def agent_configured(agent_id: str | None = None) -> bool:
+_KHONG_TRUYEN = object()
+
+
+def agent_configured(agent_id: str | None | object = _KHONG_TRUYEN) -> bool:
     """agent-service chỉ được dùng khi đã cấu hình đủ địa chỉ, khóa và agent.
 
     Nền tảng agent có xác thực riêng và cần một agent được tạo sẵn trong đó.
     Phần thiết lập ấy thuộc phạm vi người khác nên gateway không tự làm; khi
     chưa đủ cấu hình thì phần gọi dùng dữ liệu/kịch bản dự phòng.
+
+    HỎI ĐÍCH DANH MỘT AGENT mà biến môi trường của agent đó còn trống thì trả
+    False, KHÔNG mượn AGENT_ID. Trước đây `agent_configured(SCAMSHIELD_AGENT_ID)`
+    trả True lúc id rỗng, nên câu hỏi chống lừa đảo lặng lẽ chạy vào agent
+    Copilot — agent ấy mang 11 công cụ, mất 15–20s, quá trần chờ nên lượt nào
+    cũng rơi về playbook. Nhìn bên ngoài y như agent trả lời kém, không ai ngờ
+    là gọi nhầm agent, và `/health` còn báo đã cấu hình.
     """
-    return bool(AGENT_SERVICE_URL and AGENT_API_KEY and (agent_id or AGENT_ID))
+    if not (AGENT_SERVICE_URL and AGENT_API_KEY):
+        return False
+    if agent_id is _KHONG_TRUYEN:
+        return bool(AGENT_ID)
+    return bool(agent_id)
 
 
 async def _write_llm_trace(kind: str, question: str, answer: str | None,

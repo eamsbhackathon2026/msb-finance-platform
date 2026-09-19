@@ -132,6 +132,18 @@ RISK_ASSESS_DELAY_MS = int(os.getenv("RISK_ASSESS_DELAY_MS", "2000"))
 # luật regex, thà kém thông minh còn hơn đứng hình.
 CHATBANKING_TIMEOUT_S = float(os.getenv("CHATBANKING_TIMEOUT_SECONDS", "9"))
 
+# Trần chờ agent Scam Shield viết lại khuyến cáo ở LƯỢT 2 màn Guardian. Lượt này
+# agent không gọi công cụ nên đo được 5,0–10,2s (trung vị 6,5s, 6 lượt liên
+# tiếp trên qwen3.6-flash); để 8s thì 1/3 số lượt rơi về playbook ngay giữa
+# buổi demo. Quá ngưỡng vẫn có lời playbook nên khách không bao giờ thấy màn trống.
+SHIELD_ADVICE_TIMEOUT = float(os.getenv("SHIELD_ADVICE_TIMEOUT_SECONDS", "12"))
+
+# Trần chờ agent Scam Shield điều tra đầy đủ (POST /api/scamshield/verdict).
+# Lượt này agent gọi 3 công cụ thật — hồ sơ khách, hồ sơ người nhận, đối chiếu
+# playbook — nên mất 25–37s. Đây là màn có trạng thái chờ riêng, không phải
+# bước chèn giữa luồng chuyển tiền, nên trần rộng hơn hẳn lượt 2.
+SHIELD_VERDICT_TIMEOUT = float(os.getenv("SHIELD_VERDICT_TIMEOUT_SECONDS", "45"))
+
 # Tốc độ phát lại token của chat, khớp với replayAsStream bên FE.
 CHAT_TOKEN_DELAY_MS = int(os.getenv("CHAT_TOKEN_DELAY_MS", "25"))
 
@@ -1509,25 +1521,38 @@ async def _scamshield_verdict(bank_code: str, account_no: str, amount: int, note
                               signals: ScamShieldSignals) -> ScamShieldVerdict:
     """Hỏi agent Scam Shield; agent lỗi thì suy từ tín hiệu.
 
-    CHƯA CÓ ĐƯỜNG GỌI NÀO trong luồng đang chạy: `transfer_precheck` cố ý không
-    gọi LLM để màn chuyển tiền trả lời tức thì, nên `TransferPrecheckResponse`
-    luôn để trống `verdict`. Giữ lại vì đây là chỗ verdict sẽ được dựng khi nối
-    dây, và test đang ghim hành vi của nó.
+    Đường gọi là `POST /api/scamshield/verdict`. Cố ý KHÔNG nằm trong
+    `transfer_precheck`: precheck phải trả dưới 300 ms theo wireframe, còn một
+    lượt điều tra của agent mất 25–37 giây vì có ba lần gọi công cụ.
+
+    Câu hỏi phải kèm mã khách vì công cụ của agent nhận customer_id trên đường
+    dẫn (`/customers/{customer_id}/beneficiaries/resolve`). Thiếu nó thì agent
+    không tra được người nhận và chỉ đoán theo câu chữ — đúng thứ Scam Shield
+    sinh ra để tránh.
     """
+    if not domain.agent_configured(domain.SCAMSHIELD_AGENT_ID):
+        return _fallback_verdict(signals)
     question = (
         f"Khách chuẩn bị chuyển {amount:,} đồng tới tài khoản {account_no} tại ngân hàng "
         f"{bank_code}, nội dung chuyển khoản: \"{note}\". Hãy dùng công cụ kiểm tra dấu hiệu "
         "lừa đảo cho tài khoản này rồi kết luận."
     ).replace(",", ".")
-    answer, steps = await domain.agent_answer_with_steps(
-        question, agent_id=domain.SCAMSHIELD_AGENT_ID, kind="shield_advice",
-        # _last_decision_id là lệnh chuyển vừa được chấm điểm; có nó thì dòng
-        # nhật ký mở thẳng được case tương ứng bên Ops.
-        decision_id=_last_decision_id,
-    )
+    try:
+        answer, steps = await asyncio.wait_for(
+            domain.agent_answer_with_steps(
+                question, agent_id=domain.SCAMSHIELD_AGENT_ID, kind="shield_verdict",
+                customer_id=domain.current_customer_id(),
+                # _last_decision_id là lệnh chuyển vừa được chấm điểm; có nó thì
+                # dòng nhật ký mở thẳng được case tương ứng bên Ops.
+                decision_id=_last_decision_id,
+            ),
+            timeout=SHIELD_VERDICT_TIMEOUT,
+        )
+    except Exception:
+        answer, steps = None, []
     if answer and (parsed := _parse_verdict(answer)):
-        # Kết luận của agent đi kèm những gì nó đã tra, để khi màn hình này được
-        # nối dây thì khách đọc được vì sao nó nói tài khoản kia đáng ngờ.
+        # Kết luận của agent đi kèm những gì nó đã tra, để màn verdict hiện
+        # được vì sao nó nói tài khoản kia đáng ngờ.
         return parsed.model_copy(update={"steps": [_chat_step(b) for b in steps]})
     # Nhánh dự phòng suy từ tín hiệu, agent không chạy bước nào nên không kể bước nào.
     return _fallback_verdict(signals)
@@ -1644,6 +1669,26 @@ async def transfer_history() -> list[TransferHistoryItem]:
          summary="Tín hiệu gian lận của một lệnh chuyển — công cụ cho agent Scam Shield")
 async def scamshield_signals(bank_code: str, account_no: str, amount: int, note: str = "") -> ScamShieldSignals:
     return await _collect_signals(bank_code, account_no, amount, note)
+
+
+@app.post("/api/scamshield/verdict", response_model=ScamShieldVerdict, tags=["risk"],
+          summary="Kết luận của agent Scam Shield cho một lệnh chuyển tới stk mới")
+async def scamshield_verdict(payload: TransferPrecheckRequest) -> ScamShieldVerdict:
+    """Điều tra đầy đủ: agent tự gọi hồ sơ khách, hồ sơ người nhận và playbook
+    lừa đảo rồi kết luận safe/suspect/danger kèm lý do.
+
+    KHÔNG nằm trong `/api/transfer/precheck`: precheck phải trả dưới 300 ms theo
+    wireframe, còn một lượt điều tra của agent mất 25–37 giây vì có ba lần gọi
+    công cụ. Tách riêng để màn nào cần chiều sâu thì gọi và tự hiện trạng thái
+    chờ, còn luồng chuyển tiền chính vẫn nhanh như cũ.
+
+    Agent lỗi hoặc quá giờ thì trả verdict suy từ tín hiệu (`source=fallback`),
+    nên endpoint này không bao giờ chặn khách.
+    """
+    signals = await _collect_signals(
+        payload.bank_code, payload.account_no, payload.amount, payload.note)
+    return await _scamshield_verdict(
+        payload.bank_code, payload.account_no, payload.amount, payload.note, signals)
 
 
 @app.post("/api/transfer/precheck", response_model=TransferPrecheckResponse, tags=["risk"],
@@ -1942,8 +1987,9 @@ async def _guardian_advice(row: dict, kb: dict, chon: str,
 
     Playbook là nguồn chính vì khuyến cáo đã được viết sẵn cho đúng kịch bản.
     Agent chỉ diễn giải lại cho hợp câu trả lời của khách và bị CHẶN THỜI GIAN:
-    wireframe yêu cầu màn này hiện trong 1–3 giây, chờ LLM 30 giây là hỏng buổi
-    demo — hết giờ thì dùng nguyên lời playbook.
+    agent Scam Shield trả lời trong 5–10 giây (đo trên qwen3.6-flash, lượt này
+    KHÔNG gọi công cụ), nên trần chờ là SHIELD_ADVICE_TIMEOUT giây; quá giờ thì
+    dùng nguyên lời playbook chứ không để khách ngồi đợi.
     """
     tieu_de = kb.get("advice_title") or "Giao dịch này có dấu hiệu bất thường"
     noi_dung = kb.get("advice_body") or row.get("template_text") or (
@@ -1959,7 +2005,8 @@ async def _guardian_advice(row: dict, kb: dict, chon: str,
     )
     try:
         loi, buoc = await asyncio.wait_for(
-            domain.agent_answer_with_steps(hoi, domain.SCAMSHIELD_AGENT_ID), timeout=8)
+            domain.agent_answer_with_steps(hoi, domain.SCAMSHIELD_AGENT_ID),
+            timeout=SHIELD_ADVICE_TIMEOUT)
     except Exception:
         loi, buoc = None, []
     if loi:
@@ -2492,6 +2539,7 @@ async def info() -> dict:
             "POST /api/transfer/execute",
             "GET /api/transfer/history",
             "GET /api/scamshield/signals",
+            "POST /api/scamshield/verdict",
             "GET /api/safety-center",
             "PATCH /api/safety-center/protections/{key}",
             "POST /api/ops/login",

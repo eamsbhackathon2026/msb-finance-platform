@@ -61,10 +61,14 @@ spec:
               # 5 service domain (49.213.71.208). Bộ agent cũ nằm ở Postgres
               # trong cluster, đã ngừng dùng từ 17/09.
               value: "01a0a9fa-081c-7465-b681-bd8dc90834ec"
-            # Agent Scam Shield — kiểm tra dấu hiệu lừa đảo cho stk mới. Điền sau
-            # khi tạo agent thứ hai; trống thì precheck rơi về verdict suy từ tín hiệu.
+            # Agent Scam Shield — chống lừa đảo. Mang 4 công cụ domain thật:
+            # get_customer, resolve_beneficiary, match_scam, get_scam. Dùng ở
+            # lượt 2 màn Guardian (viết lại khuyến cáo, không gọi công cụ, 5-10s)
+            # và ở POST /api/scamshield/verdict (điều tra đủ, 3 lần gọi công cụ,
+            # 25-37s). Trống thì cả hai rơi về playbook/tín hiệu, KHÔNG mượn
+            # agent Copilot nữa.
             - name: SCAMSHIELD_AGENT_ID
-              value: ""
+              value: "01a0ba02-df8a-78ae-b0b7-9c763598b10d"
             # Agent thứ ba: chỉ trích ý định chuyển tiền từ một câu, KHÔNG gắn
             # công cụ nào nên một lượt chỉ 1-5 giây. Agent Copilot mang 11 công
             # cụ, một lượt 10-20 giây — quá chậm cho màn giao dịch.
