@@ -478,3 +478,169 @@ def test_doc_insight_bao_ky_dang_chay(monkeypatch):
     body = client.get("/customers/100001/insights").json()
     assert body["period_in_progress"] is True
     assert body["insights"][0]["label"] == "Ăn uống"
+
+
+# ---------------------------------------------------------------------------
+# Lộ trình tiết kiệm: review quý → khả năng tiết kiệm → gói sản phẩm
+# ---------------------------------------------------------------------------
+def _thang(period, income, expense, cats=None):
+    """Một tháng dựng sẵn cho _thang_trong_ky đã monkeypatch."""
+    return {"period": period, "income": income, "expense": expense,
+            "net": income - expense, "count": 30, "by_category": cats or {}}
+
+
+def test_fv_va_pmt_la_hai_chieu_cua_cung_mot_phep_tinh():
+    """Sai một trong hai là hứa với khách một mốc thời gian không có thật."""
+    for lai in (0, 3.5, 5.6, 7.2):
+        for n in (12, 36, 60):
+            pmt = main._pmt_for_goal(500_000_000, lai, n)
+            assert abs(main._fv_annuity(pmt, lai, n) - 500_000_000) < 1
+
+
+def test_lai_suat_0_thi_khong_sinh_them_dong_nao():
+    """Nhánh r = 0 phải tách riêng: công thức annuity chia cho r sẽ nổ."""
+    assert main._fv_annuity(1_000_000, 0, 36) == 36_000_000
+    assert main._pmt_for_goal(36_000_000, 0, 36) == 1_000_000
+
+
+def test_von_co_san_du_lon_thi_khong_can_gui_them():
+    """Không được ra số âm — "mỗi tháng gửi -2 triệu" là câu vô nghĩa với khách."""
+    assert main._pmt_for_goal(100_000_000, 5.6, 36, initial=200_000_000) == 0.0
+
+
+def test_kha_nang_tiet_kiem_bo_thang_khong_co_thu_nhap(monkeypatch):
+    """Tháng ở mép cửa sổ dữ liệu không có kỳ lương; tính vào sẽ đẻ ra một tháng
+    âm bịa đặt và kéo mức để dành xuống gần một nửa."""
+    monkeypatch.setattr(main, "query_one", lambda *a, **k: {"x": 1})
+    monkeypatch.setattr(main, "_thang_trong_ky", lambda c, m: [
+        _thang("202603", 0, 4_588_000),            # mép dữ liệu, phải bỏ
+        _thang("202604", 7_600_000, 6_500_000),
+        _thang("202605", 7_600_000, 6_600_000),
+        _thang("202606", 7_600_000, 6_400_000),
+    ])
+    b = client.get("/transactions/100001/savings-capacity").json()
+    assert b["months_used"] == 3
+    assert [x["period"] for x in b["months_excluded"]] == ["202603"]
+    assert b["realistic"]["monthly"] == 1_100_000      # trung vị, không phải -4,5tr
+    assert b["realistic"]["annual"] == 13_200_000
+
+
+def test_kha_nang_tiet_kiem_dung_trung_vi_chu_khong_trung_binh(monkeypatch):
+    """Một tháng nhận 527 triệu là có thật trong dữ liệu demo. Trung bình sẽ ra
+    "để dành 88 triệu/tháng" rồi dựng cả kế hoạch 3 năm trên con số đó."""
+    monkeypatch.setattr(main, "query_one", lambda *a, **k: {"x": 1})
+    monkeypatch.setattr(main, "_thang_trong_ky", lambda c, m: [
+        _thang("202604", 7_600_000, 6_500_000),
+        _thang("202605", 7_600_000, 6_600_000),
+        _thang("202606", 527_000_000, 6_400_000),   # khoản một lần
+    ])
+    b = client.get("/transactions/100001/savings-capacity").json()
+    assert b["realistic"]["monthly"] == 1_100_000
+    assert b["basis"] == "median"
+
+
+def test_kha_nang_tiet_kiem_muc_stretch_chi_cat_phan_co_gian(monkeypatch):
+    """Thiết yếu và cam kết không được tính là cắt được, và không cắt quá 70%."""
+    monkeypatch.setattr(main, "query_one", lambda *a, **k: {"x": 1})
+    monkeypatch.setattr(main, "_thang_trong_ky", lambda c, m: [
+        _thang("202604", 10_000_000, 8_000_000,
+               {"BILLS": 3_000_000, "FAMILY_SUPPORT": 4_000_000, "SHOPPING": 1_000_000}),
+        _thang("202605", 10_000_000, 8_000_000,
+               {"BILLS": 3_000_000, "FAMILY_SUPPORT": 4_000_000, "SHOPPING": 1_000_000}),
+    ])
+    b = client.get("/transactions/100001/savings-capacity").json()
+    assert b["realistic"]["monthly"] == 2_000_000
+    assert b["stretch"]["flexible_monthly"] == 1_000_000      # chỉ SHOPPING
+    assert b["stretch"]["monthly"] == 2_700_000               # + 70% của 1tr
+
+
+def test_review_quy_bo_qua_quy_dang_chay(monkeypatch):
+    """Quý đang chạy mới đi được một phần đường nên tổng chi luôn thấp giả tạo."""
+    ky = main.now_vn().strftime("%Y%m")
+    nam, quy = main._quarter_of(ky + "01")
+    truoc = f"{nam}Q{quy - 1}" if quy > 1 else f"{nam - 1}Q4"
+    thang_truoc = {1: ("10", "11", "12"), 2: ("01", "02", "03"),
+                   3: ("04", "05", "06"), 4: ("07", "08", "09")}[quy]
+    nam_truoc = nam if quy > 1 else nam - 1
+    monkeypatch.setattr(main, "query_one", lambda *a, **k: {"x": 1})
+    monkeypatch.setattr(main, "query", lambda *a, **k: [])
+    monkeypatch.setattr(main, "_thang_trong_ky", lambda c, m: [
+        _thang(f"{nam_truoc}{mm}", 7_600_000, 6_400_000, {"FOOD": 6_400_000})
+        for mm in thang_truoc
+    ] + [_thang(ky, 7_600_000, 900_000, {"FOOD": 900_000})])
+    b = client.get("/transactions/100001/quarter-review").json()
+    assert b["period"] == truoc
+    assert b["is_completed_quarter"] is True
+    assert b["monthly_avg"]["expense"] == 6_400_000
+
+
+def test_review_quy_xep_nhom_vao_ba_ro(monkeypatch):
+    monkeypatch.setattr(main, "query_one", lambda *a, **k: {"x": 1})
+    monkeypatch.setattr(main, "query", lambda *a, **k: [])
+    monkeypatch.setattr(main, "_thang_trong_ky", lambda c, m: [
+        _thang("202604", 10_000_000, 8_000_000,
+               {"BILLS": 3_000_000, "FAMILY_SUPPORT": 4_000_000, "SHOPPING": 1_000_000}),
+    ])
+    b = client.get("/transactions/100001/quarter-review", params={"quarter": "2026Q2"}).json()
+    ro = {x["bucket"]: x for x in b["buckets"]}
+    assert ro["essential"]["amount"] == 3_000_000
+    assert ro["committed"]["amount"] == 4_000_000
+    assert ro["flexible"]["amount"] == 1_000_000
+    assert {c["category"]: c["bucket"] for c in b["by_category"]}["SHOPPING"] == "flexible"
+
+
+def _bieu_lai():
+    return {"as_of": "2026-09-01", "rates": [
+        {"product_id": "RB.TK.LSCN", "product_name": "Tiết kiệm lãi suất cao nhất",
+         "term_code": "T12", "term_label": "12 tháng", "term_months": 12.0, "rate_pct": 5.6},
+        {"product_id": "RB.TK.THUONG", "product_name": "Tiết kiệm thường",
+         "term_code": "T06", "term_label": "6 tháng", "term_months": 6.0, "rate_pct": 4.2},
+    ]}
+
+
+def test_ke_hoach_muc_tieu_bao_khong_kha_thi_kem_phuong_an(monkeypatch):
+    """500 triệu / 3 năm với mức để dành 1 triệu là không tới. Câu trả lời phải
+    nói thẳng còn thiếu bao nhiêu chứ không dừng ở "bạn không làm được"."""
+    monkeypatch.setattr(main, "_rate_matrix", lambda g: _bieu_lai())
+    b = client.get("/products/savings-goal-plan", params={
+        "goal_amount": 500_000_000, "months": 36, "monthly_capacity": 1_018_000}).json()
+    assert b["feasible"] is False
+    assert b["best_rate_pct"] == 5.6
+    assert b["required_monthly_with_interest"] == 12_787_180
+    assert b["coverage_pct"] == 8
+    assert b["gap_amount"] == 500_000_000 - b["projected_amount"]
+    assert b["alternatives"]["keep_pace_years_needed"] > 3
+    assert b["alternatives"]["reachable_goal_same_months"] == b["projected_amount"]
+
+
+def test_ke_hoach_muc_tieu_bao_kha_thi_khi_du_kha_nang(monkeypatch):
+    monkeypatch.setattr(main, "_rate_matrix", lambda g: _bieu_lai())
+    b = client.get("/products/savings-goal-plan", params={
+        "goal_amount": 500_000_000, "months": 36, "monthly_capacity": 14_000_000}).json()
+    assert b["feasible"] is True
+    assert b["coverage_pct"] >= 100
+    assert b["gap_amount"] == 0 and b["gap_monthly"] == 0
+    assert "alternatives" not in b
+
+
+def test_ke_hoach_chi_lay_ky_han_khong_vuot_thoi_gian_gui(monkeypatch):
+    """Áp lãi kỳ 12 tháng cho người gửi 6 tháng là hứa mức lãi không có thật."""
+    monkeypatch.setattr(main, "_rate_matrix", lambda g: _bieu_lai())
+    b = client.get("/products/savings-goal-plan", params={
+        "goal_amount": 100_000_000, "months": 6, "monthly_capacity": 1_000_000}).json()
+    assert [p["product_id"] for p in b["products"]] == ["RB.TK.THUONG"]
+    assert b["best_rate_pct"] == 4.2
+
+
+def test_ke_hoach_khong_co_kha_nang_thi_bao_chua_ket_luan_duoc(monkeypatch):
+    """Thiếu monthly_capacity mà vẫn phán "khả thi" là đoán mò."""
+    monkeypatch.setattr(main, "_rate_matrix", lambda g: _bieu_lai())
+    b = client.get("/products/savings-goal-plan", params={
+        "goal_amount": 500_000_000, "months": 36}).json()
+    assert b["feasible"] is None
+    assert "savings-capacity" in b["note"]
+
+
+def test_ba_tool_moi_co_trong_danh_muc_agent():
+    ten = {t["name"] for t in main.AGENT_TOOLS}
+    assert {"review_quarter_spending", "get_savings_capacity", "plan_savings_goal"} <= ten

@@ -518,6 +518,284 @@ def quarterly_summary(
     }
 
 
+# ---- Lộ trình tiết kiệm cho mục tiêu lớn ------------------------------------
+#
+# Ba công cụ dưới đây phục vụ đúng một câu hỏi: "giúp tôi tiết kiệm N tiền trong
+# M năm tới". Trợ lý gọi lần lượt review quý → khả năng tiết kiệm → gói sản phẩm.
+# Tách làm ba chứ không gộp một vì mỗi bước trả lời được một câu hỏi riêng, và
+# vì trợ lý cần ĐỌC ĐƯỢC số ở bước trước rồi mới quyết định tham số bước sau.
+#
+# Ba rổ chi tiêu. Ranh giới này quyết định câu "bạn có thể cắt bớt ở đâu", nên
+# đặt ở service thay vì để mô hình tự phân loại mỗi lượt một kiểu:
+#   · THIẾT YẾU  — cắt là ảnh hưởng sinh hoạt, coi như sàn.
+#   · CAM KẾT    — không phải muốn cắt là cắt được (tiền gửi về gia đình, đầu tư
+#                  định kỳ), nhưng có thể thương lượng lại nên vẫn tách riêng.
+#   · CO GIÃN    — phần thực sự nằm trong tay khách.
+CHI_THIET_YEU = ("BILLS", "RENT", "HEALTH", "FOOD", "TRANSPORT")
+CHI_CAM_KET = ("FAMILY_SUPPORT", "INVESTMENT")
+CHI_CO_GIAN = ("SHOPPING", "OTHER")
+NHAN_RO = {"essential": "Thiết yếu", "committed": "Cam kết", "flexible": "Có thể co giãn"}
+
+
+def _ro_chi(category: str) -> str:
+    if category in CHI_THIET_YEU:
+        return "essential"
+    if category in CHI_CAM_KET:
+        return "committed"
+    return "flexible"
+
+
+def _ky_hien_tai() -> str:
+    return now_vn().strftime("%Y%m")
+
+
+def _trung_vi(values: list[float]) -> float:
+    """Trung vị, rỗng thì 0. Dùng thay trung bình ở mọi chỗ nói "một tháng điển hình"."""
+    return statistics.median(values) if values else 0.0
+
+
+def _thang_trong_ky(customer_id: int, months: int) -> list[dict]:
+    """Thu / chi / net từng tháng trong `months` tháng gần nhất.
+
+    Chuyển khoản đi KHÔNG tính là chi tiêu: chuyển sang tài khoản tiết kiệm của
+    chính mình mà bị tính thành chi thì càng để dành nhiều càng bị chấm là tiêu
+    hoang, đúng ngược với việc công cụ này đang đo.
+    """
+    start = (now_vn() - timedelta(days=31 * months)).strftime("%Y%m%d")
+    rows = query(
+        """
+        SELECT transaction_date, direction, amount, category
+        FROM transaction_history
+        WHERE customer_id = %s AND transaction_date >= %s AND status = 'POSTED'
+        ORDER BY transaction_date
+        """,
+        (customer_id, start),
+    )
+    theo_thang: dict[str, dict] = defaultdict(
+        lambda: {"income": 0.0, "expense": 0.0, "by_category": defaultdict(float), "count": 0}
+    )
+    for r in rows:
+        date = r.get("transaction_date") or ""
+        if len(date) < 6:
+            continue
+        b = theo_thang[date[:6]]
+        amount = float(num(r.get("amount")))
+        b["count"] += 1
+        if r.get("direction") == "IN":
+            b["income"] += amount
+            continue
+        category = r.get("category") or "OTHER"
+        if category in TRANSFER_CATEGORIES:
+            continue
+        b["expense"] += amount
+        b["by_category"][category] += amount
+    return [
+        {"period": k, "income": v["income"], "expense": v["expense"],
+         "net": v["income"] - v["expense"], "count": v["count"],
+         "by_category": dict(v["by_category"])}
+        for k, v in sorted(theo_thang.items())
+    ]
+
+
+@app.get("/transactions/{customer_id}/quarter-review", tags=["savings-goal"])
+def quarter_review(
+    customer_id: int,
+    quarter: str | None = Query(
+        None, description='Quý cần xem, dạng "2026Q2". Bỏ trống = quý GẦN NHẤT ĐÃ KẾT THÚC.'
+    ),
+):
+    """BƯỚC 1 của lộ trình tiết kiệm: mổ xẻ chi tiêu một quý.
+
+    Mặc định lấy quý gần nhất ĐÃ KẾT THÚC, không lấy quý đang chạy. Quý đang
+    chạy mới đi được một phần đường nên tổng chi của nó luôn thấp giả tạo; lấy
+    nó làm gốc cho kế hoạch ba năm sẽ hứa với khách một mức để dành không có
+    thật.
+
+    Mỗi nhóm chi được xếp vào một trong ba rổ (thiết yếu / cam kết / co giãn) để
+    bước sau biết phần nào thực sự cắt được. Các khoản một lần bất thường được
+    tách ra thay vì trộn vào trung bình — một lần viện phí 6 triệu không phải là
+    nhịp chi hằng tháng.
+    """
+    _require_customer(customer_id)
+    months = _thang_trong_ky(customer_id, 24)
+    if not months:
+        return {"customer_id": customer_id, "found": False,
+                "note": "Chưa có giao dịch nào trong 24 tháng gần đây."}
+
+    theo_quy: dict[str, list[dict]] = defaultdict(list)
+    for m in months:
+        year, q = _quarter_of(m["period"] + "01")
+        theo_quy[f"{year}Q{q}"].append(m)
+
+    ky_nay = _ky_hien_tai()
+    nam_nay, quy_nay = _quarter_of(ky_nay + "01")
+    quy_dang_chay = f"{nam_nay}Q{quy_nay}"
+    da_xong = [k for k in sorted(theo_quy) if k != quy_dang_chay]
+    chon = quarter or (da_xong[-1] if da_xong else sorted(theo_quy)[-1])
+    if chon not in theo_quy:
+        raise HTTPException(404, f"không có dữ liệu cho quý {chon}")
+
+    trong_quy = theo_quy[chon]
+    thu = sum(m["income"] for m in trong_quy)
+    chi = sum(m["expense"] for m in trong_quy)
+    so_thang = len(trong_quy) or 1
+
+    gop: dict[str, float] = defaultdict(float)
+    for m in trong_quy:
+        for c, v in m["by_category"].items():
+            gop[c] += v
+    tong = chi or 1
+
+    ro = {k: {"amount": 0.0, "categories": []} for k in NHAN_RO}
+    by_category = []
+    for c, v in sorted(gop.items(), key=lambda kv: kv[1], reverse=True):
+        r = _ro_chi(c)
+        ro[r]["amount"] += v
+        ro[r]["categories"].append(c)
+        by_category.append({
+            "category": c, "label": _nhan_nhom(c), "bucket": r,
+            "bucket_label": NHAN_RO[r], "amount": round(v),
+            "pct": round(v * 100 / tong), "monthly_avg": round(v / so_thang),
+        })
+
+    # Khoản một lần: giao dịch đơn lẻ lớn hơn 40% tổng chi của chính nhóm đó
+    # trong quý. Ngưỡng theo nhóm chứ không theo tổng, vì 3 triệu là bất thường
+    # với nhóm Ăn uống nhưng bình thường với nhóm Sức khoẻ.
+    dau, cuoi = trong_quy[0]["period"] + "01", trong_quy[-1]["period"] + "31"
+    lon = query(
+        """
+        SELECT transaction_date, amount, category, description
+        FROM transaction_history
+        WHERE customer_id = %s AND transaction_date BETWEEN %s AND %s
+          AND status = 'POSTED' AND direction = 'OUT'
+        ORDER BY amount DESC LIMIT 20
+        """,
+        (customer_id, dau, cuoi),
+    )
+    mot_lan = [
+        {"date": r["transaction_date"], "category": r.get("category"),
+         "label": _nhan_nhom(r.get("category") or "OTHER"),
+         "amount": round(float(num(r.get("amount")))),
+         "description": r.get("description") or ""}
+        for r in lon
+        if r.get("category") not in TRANSFER_CATEGORIES
+        and float(num(r.get("amount"))) > 0.4 * gop.get(r.get("category") or "OTHER", 0)
+    ][:5]
+
+    truoc = da_xong[da_xong.index(chon) - 1] if chon in da_xong and da_xong.index(chon) > 0 else None
+    chi_truoc = sum(m["expense"] for m in theo_quy[truoc]) if truoc else 0
+
+    return {
+        "customer_id": customer_id,
+        "period": chon,
+        "label": f"Quý {chon[-1]}/{chon[:4]}",
+        "is_completed_quarter": chon != quy_dang_chay,
+        "months": [m["period"] for m in trong_quy],
+        "income": round(thu),
+        "expense": round(chi),
+        "net": round(thu - chi),
+        "monthly_avg": {"income": round(thu / so_thang), "expense": round(chi / so_thang),
+                        "net": round((thu - chi) / so_thang)},
+        "by_category": by_category,
+        "buckets": [
+            {"bucket": k, "label": NHAN_RO[k], "amount": round(v["amount"]),
+             "pct": round(v["amount"] * 100 / tong),
+             "monthly_avg": round(v["amount"] / so_thang),
+             "categories": v["categories"]}
+            for k, v in ro.items()
+        ],
+        "one_off_transactions": mot_lan,
+        "prev_period": truoc,
+        "delta_expense_vs_prev_pct": round((chi - chi_truoc) * 100 / chi_truoc) if chi_truoc else None,
+        "note": ("Quý gần nhất đã kết thúc — dùng làm gốc cho kế hoạch tiết kiệm."
+                 if chon != quy_dang_chay else
+                 "CẢNH BÁO: đây là quý đang chạy, tổng chi chưa đủ nên đừng dùng làm gốc kế hoạch."),
+    }
+
+
+@app.get("/transactions/{customer_id}/savings-capacity", tags=["savings-goal"])
+def savings_capacity(
+    customer_id: int,
+    months: int = Query(12, ge=3, le=36, description="Cửa sổ dữ liệu để tính, tính bằng tháng"),
+):
+    """BƯỚC 2 của lộ trình tiết kiệm: một tháng khách để dành được bao nhiêu.
+
+    Lấy TRUNG VỊ chứ không lấy trung bình. Dữ liệu thật của khách demo có một
+    tháng nhận hơn 500 triệu; trung bình sẽ ra "để dành được 88 triệu/tháng",
+    sai hoàn toàn so với nhịp sống thường và sẽ đẻ ra một kế hoạch ba năm dựa
+    trên con số không bao giờ lặp lại.
+
+    Bỏ hai loại tháng không đại diện cho một chu kỳ sống, và trả lại danh sách
+    đã bỏ kèm lý do để bên gọi giải thích được với khách:
+      · Tháng đang chạy — chưa đủ ngày nên chưa đủ chi.
+      · Tháng không có đồng thu nhập nào — đó là tháng nằm ở mép cửa sổ dữ liệu
+        (bắt đầu từ giữa tháng, chưa kịp có kỳ lương). Tính vào sẽ thành một
+        tháng "âm mấy triệu" bịa ra, kéo mức để dành xuống gần một nửa.
+
+    Trả về hai mức: `realistic` là nhịp hiện tại, `stretch` là khi cắt phần chi
+    co giãn. Hai mức chứ không một, vì câu hỏi tiếp theo của khách luôn là
+    "thế nếu tôi tiêu tiết kiệm hơn thì sao".
+    """
+    _require_customer(customer_id)
+    tat_ca = _thang_trong_ky(customer_id, months)
+    ky_nay = _ky_hien_tai()
+
+    bo = []
+    dung = []
+    for m in tat_ca:
+        if m["period"] == ky_nay:
+            bo.append({"period": m["period"], "reason": "tháng đang chạy, chưa đủ ngày"})
+        elif m["income"] <= 0:
+            bo.append({"period": m["period"], "reason": "không ghi nhận thu nhập, nằm ở mép dữ liệu"})
+        else:
+            dung.append(m)
+
+    if not dung:
+        return {"customer_id": customer_id, "found": False, "months_used": 0,
+                "months_excluded": bo,
+                "note": "Không đủ tháng đầy đủ để tính khả năng tiết kiệm."}
+
+    thu = _trung_vi([m["income"] for m in dung])
+    chi = _trung_vi([m["expense"] for m in dung])
+    du = _trung_vi([m["net"] for m in dung])
+
+    # Phần co giãn lấy trung vị theo tháng, không lấy tổng chia đều: một tháng
+    # mua sắm lớn không được phép nâng mức "cắt được" của mọi tháng còn lại.
+    co_gian = _trung_vi([
+        sum(v for c, v in m["by_category"].items() if _ro_chi(c) == "flexible") for m in dung
+    ])
+    # Cắt tối đa 70% phần co giãn. Giả định cắt sạch là giả định không ai sống
+    # được, và một kế hoạch dựng trên đó sẽ vỡ ngay tháng thứ hai.
+    them = co_gian * 0.7
+    ty_le = round(du * 100 / thu) if thu else 0
+
+    return {
+        "customer_id": customer_id,
+        "found": True,
+        "basis": "median",
+        "window_months": months,
+        "months_used": len(dung),
+        "periods_used": [m["period"] for m in dung],
+        "months_excluded": bo,
+        "monthly": {"income": round(thu), "expense": round(chi), "net": round(du)},
+        "savings_rate_pct": ty_le,
+        "realistic": {
+            "monthly": round(du), "quarterly": round(du * 3), "annual": round(du * 12),
+            "label": "Giữ nguyên nhịp chi hiện tại",
+        },
+        "stretch": {
+            "monthly": round(du + them), "quarterly": round((du + them) * 3),
+            "annual": round((du + them) * 12),
+            "flexible_monthly": round(co_gian),
+            "cut_assumption_pct": 70,
+            "label": "Cắt 70% phần chi co giãn (mua sắm, khoản khác)",
+        },
+        "note": (f"Tính trên {len(dung)} tháng đầy đủ, dùng trung vị. "
+                 f"Đã bỏ {len(bo)} tháng không đại diện." if bo else
+                 f"Tính trên {len(dung)} tháng đầy đủ, dùng trung vị."),
+    }
+
+
 _MONTH_NAMES_VI = (
     "", "Tháng 1", "Tháng 2", "Tháng 3", "Tháng 4", "Tháng 5", "Tháng 6",
     "Tháng 7", "Tháng 8", "Tháng 9", "Tháng 10", "Tháng 11", "Tháng 12",
@@ -1221,6 +1499,134 @@ def savings_options(
     }
 
 
+def _fv_annuity(monthly: float, annual_pct: float, months: int) -> float:
+    """Giá trị tương lai của việc gửi đều `monthly` mỗi tháng trong `months` tháng.
+
+    Gửi cuối kỳ (ordinary annuity) chứ không phải đầu kỳ: khoản của tháng cuối
+    chưa kịp sinh lãi. Chọn hướng thận trọng vì đây là con số dùng để hứa với
+    khách bao giờ đạt mục tiêu.
+    """
+    r = annual_pct / 100 / 12
+    if r <= 0:
+        return monthly * months
+    return monthly * (((1 + r) ** months - 1) / r)
+
+
+def _pmt_for_goal(goal: float, annual_pct: float, months: int, initial: float = 0.0) -> float:
+    """Mỗi tháng phải gửi bao nhiêu để sau `months` tháng có đủ `goal`."""
+    r = annual_pct / 100 / 12
+    con_lai = goal - initial * ((1 + r) ** months if r > 0 else 1)
+    if con_lai <= 0:
+        return 0.0
+    if r <= 0:
+        return con_lai / months
+    return con_lai * r / ((1 + r) ** months - 1)
+
+
+@app.get("/products/savings-goal-plan", tags=["savings-goal"])
+def savings_goal_plan(
+    goal_amount: int = Query(..., gt=0, description="Số tiền mục tiêu (VND)"),
+    months: int = Query(..., ge=1, le=360, description="Số tháng muốn đạt mục tiêu"),
+    monthly_capacity: int = Query(
+        0, ge=0, description="Mỗi tháng khách để dành được bao nhiêu — lấy từ savings-capacity"
+    ),
+    initial_amount: int = Query(0, ge=0, description="Số vốn có sẵn để gửi ngay"),
+    limit: int = Query(3, ge=1, le=10),
+):
+    """BƯỚC 3 của lộ trình tiết kiệm: mục tiêu này có với tới được không, bằng gói nào.
+
+    Lãi suất lấy từ biểu niêm yết thật (v_interest_rate), kỳ hạn dài nhất không
+    vượt thời gian khách gửi — áp lãi kỳ 12 tháng cho người gửi 6 tháng là hứa
+    mức lãi khách không bao giờ nhận được.
+
+    Service tính hết phần số học và trả về `feasible` cùng `gap_*`. Mô hình chỉ
+    việc diễn đạt: giao cho LLM tự nhân lãi kép 36 kỳ là cách chắc chắn nhất để
+    có một kế hoạch tài chính sai số.
+
+    Khi không khả thi, phần `alternatives` đưa ba hướng đã tính sẵn — kéo dài
+    thời gian, hạ mục tiêu, hoặc nâng mức để dành — để câu trả lời không dừng ở
+    "bạn không làm được".
+    """
+    matrix = _rate_matrix("SAVINGS")
+    theo_sp: dict[str, list[dict]] = {}
+    for r in matrix["rates"]:
+        theo_sp.setdefault(r["product_id"], []).append(r)
+
+    goi = []
+    for pid, ky_han in theo_sp.items():
+        vua_du = [k for k in ky_han if k["term_months"] <= months]
+        k = max(vua_du, key=lambda x: x["term_months"]) if vua_du else None
+        if not k:
+            continue
+        rate = k["rate_pct"]
+        goi.append({
+            "product_id": pid, "product_name": k["product_name"],
+            "term_code": k["term_code"], "term_label": k["term_label"],
+            "rate_pct": rate,
+            "required_monthly": round(_pmt_for_goal(goal_amount, rate, months, initial_amount)),
+            "projected_amount": (
+                round(_fv_annuity(monthly_capacity, rate, months)
+                      + initial_amount * ((1 + rate / 100 / 12) ** months))
+                if monthly_capacity or initial_amount else None
+            ),
+        })
+    goi.sort(key=lambda g: g["rate_pct"], reverse=True)
+    goi = goi[:limit]
+
+    tot = goi[0] if goi else None
+    lai = tot["rate_pct"] if tot else 0.0
+    can_moi_thang = _pmt_for_goal(goal_amount, lai, months, initial_amount)
+    khong_lai = (goal_amount - initial_amount) / months
+
+    ra = {
+        "goal_amount": goal_amount,
+        "months": months,
+        "years": round(months / 12, 1),
+        "initial_amount": initial_amount,
+        "as_of": matrix["as_of"],
+        "best_rate_pct": lai,
+        "required_monthly_no_interest": round(khong_lai),
+        "required_monthly_with_interest": round(can_moi_thang),
+        "interest_saves_monthly": round(khong_lai - can_moi_thang),
+        "products": goi,
+    }
+
+    if not monthly_capacity:
+        ra["feasible"] = None
+        ra["note"] = ("Chưa có monthly_capacity nên chỉ tính được mức cần gửi. "
+                      "Gọi savings-capacity trước rồi truyền vào để biết có khả thi không.")
+        return ra
+
+    du_kien = _fv_annuity(monthly_capacity, lai, months) + initial_amount * ((1 + lai / 100 / 12) ** months)
+    thieu = goal_amount - du_kien
+    ra.update({
+        "monthly_capacity": monthly_capacity,
+        "projected_amount": round(du_kien),
+        "feasible": thieu <= 0,
+        "coverage_pct": round(du_kien * 100 / goal_amount),
+        "gap_amount": round(max(thieu, 0)),
+        "gap_monthly": round(max(can_moi_thang - monthly_capacity, 0)),
+        "capacity_multiple_needed": round(can_moi_thang / monthly_capacity, 1) if monthly_capacity else None,
+    })
+
+    if thieu > 0:
+        # Bao nhiêu tháng thì tới đích nếu giữ nguyên mức để dành. Cộng dồn từng
+        # tháng thay vì giải log: vòng lặp có trần rõ ràng và đọc ra ngay là
+        # "quá 50 năm thì đừng nói tiếp".
+        r = lai / 100 / 12
+        so_du, n = float(initial_amount), 0
+        while so_du < goal_amount and n < 600:
+            so_du = so_du * (1 + r) + monthly_capacity
+            n += 1
+        ra["alternatives"] = {
+            "keep_pace_months_needed": n if n < 600 else None,
+            "keep_pace_years_needed": round(n / 12, 1) if n < 600 else None,
+            "reachable_goal_same_months": round(du_kien),
+            "needed_monthly_to_hit_goal": round(can_moi_thang),
+        }
+    return ra
+
+
 def _best_rate(product_id: str, months: int = 12) -> float:
     """Lãi suất niêm yết của sản phẩm ở kỳ hạn gần nhất với `months`."""
     row = query_one(
@@ -1375,6 +1781,47 @@ AGENT_TOOLS = [
         params={"customer_id": "int", "quarters": "int, mặc định 8",
                 "include_transfers": "bool, mặc định false"},
         returns="summary[] theo quý với by_category[] kèm delta_vs_prev_pct, và category_totals[].",
+    ),
+    # Ba công cụ của lộ trình tiết kiệm. Mô tả cố ý nói rõ THỨ TỰ GỌI: trợ lý chỉ
+    # biết công cụ qua mô tả, không đọc được code, nên nếu không viết ra thì nó
+    # sẽ gọi tool 3 trước với một con số tự bịa cho monthly_capacity.
+    tool(
+        "review_quarter_spending",
+        "BƯỚC 1 khi khách đặt mục tiêu tiết kiệm: mổ xẻ chi tiêu của quý GẦN NHẤT "
+        "ĐÃ KẾT THÚC — thu, chi, từng nhóm, và xếp mỗi nhóm vào ba rổ thiết yếu / "
+        "cam kết / co giãn để biết phần nào cắt được. Tách sẵn các khoản chi một "
+        "lần bất thường. Gọi công cụ này TRƯỚC khi nói bất cứ điều gì về khả năng "
+        "tiết kiệm của khách.",
+        "GET", "/transactions/{customer_id}/quarter-review",
+        params={"customer_id": "int", "quarter": 'str tùy chọn, dạng "2026Q2"; bỏ trống = quý gần nhất đã kết thúc'},
+        returns="period, income, expense, monthly_avg, by_category[] kèm bucket, "
+                "buckets[] (thiết yếu/cam kết/co giãn), one_off_transactions[], delta_expense_vs_prev_pct.",
+    ),
+    tool(
+        "get_savings_capacity",
+        "BƯỚC 2: mỗi tháng / quý / năm khách thực sự để dành được bao nhiêu. Dùng "
+        "TRUNG VỊ và tự loại tháng đang chạy cùng tháng không có thu nhập, nên con "
+        "số này đáng tin hơn mọi phép chia trung bình. Trả về hai mức: realistic "
+        "(giữ nhịp hiện tại) và stretch (cắt 70% chi co giãn). Lấy số "
+        "realistic.monthly ở đây rồi truyền vào bước 3, ĐỪNG tự ước lượng.",
+        "GET", "/transactions/{customer_id}/savings-capacity",
+        params={"customer_id": "int", "months": "int, cửa sổ dữ liệu, mặc định 12"},
+        returns="monthly{income,expense,net}, savings_rate_pct, realistic{monthly,quarterly,annual}, "
+                "stretch{...}, months_used, months_excluded[] kèm lý do.",
+    ),
+    tool(
+        "plan_savings_goal",
+        "BƯỚC 3: mục tiêu của khách có đạt được không và bằng gói tiết kiệm nào. "
+        "Truyền monthly_capacity lấy từ bước 2. Service tính sẵn lãi kép, mức cần "
+        "gửi mỗi tháng, số tiền dự kiến đạt được, phần còn thiếu và các phương án "
+        "thay thế khi không khả thi — TUYỆT ĐỐI không tự nhân chia lãi suất, hãy "
+        "đọc thẳng các con số trả về.",
+        "GET", "/products/savings-goal-plan",
+        params={"goal_amount": "int, số tiền mục tiêu VND", "months": "int, số tháng",
+                "monthly_capacity": "int, lấy từ get_savings_capacity",
+                "initial_amount": "int, vốn có sẵn, mặc định 0", "limit": "int, mặc định 3"},
+        returns="feasible, required_monthly_with_interest, projected_amount, coverage_pct, "
+                "gap_amount, gap_monthly, products[] kèm rate_pct thật, alternatives{}.",
     ),
     tool(
         "get_monthly_comparison",
