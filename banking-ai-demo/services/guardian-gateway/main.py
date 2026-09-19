@@ -506,7 +506,10 @@ def _strip_markdown_for_plain(text: str) -> str:
 _GRID_SEP_RE = re.compile(r"^\s*\|?[\s:|-]*-[\s:|-]*\|?\s*$")
 # Ô toàn số: tiền, phần trăm, dấu +/-. Cột như vậy canh phải cho thẳng hàng.
 _GRID_SO_RE = re.compile(r"^[+\-−]?[\d.,%\s₫]+$")
-_GRID_MAX = 3          # ba bảng là hết chỗ trong một bong bóng chat
+# Bốn bảng: câu "tiết kiệm N tiền trong M năm" cần đúng bốn — tóm tắt con số,
+# rổ chi tiêu, phương án thay thế, gói sản phẩm. Để 3 thì mục cuối chỉ còn
+# cái tiêu đề trống, trông như trợ lý viết dở giữa chừng.
+_GRID_MAX = 4
 _GRID_MAX_ROWS = 15
 _GRID_MAX_COLS = 6
 

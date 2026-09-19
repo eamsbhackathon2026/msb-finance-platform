@@ -2125,3 +2125,15 @@ def test_tro_ly_hong_thi_bang_lo_trinh_cua_gateway_van_hien(monkeypatch):
     monkeypatch.setattr(main.domain, "agent_configured", lambda *a, **k: True)
     r = client.post("/api/copilot/chat", json={"message": "kế hoạch tiết kiệm mua ô tô 500 triệu"})
     assert "13092250" in r.text, "agent hỏng thì bảng gateway phải quay lại"
+
+
+def test_bon_bang_markdown_deu_duoc_dung():
+    """Câu mục tiêu tiết kiệm sinh đúng bốn bảng: con số, rổ chi, phương án, gói.
+    Cắt ở ba thì mục "Gói tiết kiệm phù hợp" chỉ còn tiêu đề trống."""
+    md = "\n\n".join(
+        f"## Mục {i}\n\n| Cột A | Cột B |\n|---|---:|\n| x{i} | {i}00 |"
+        for i in range(1, 5)
+    )
+    grids = main._parse_markdown_grids(md)
+    assert len(grids) == 4
+    assert [g.rows[0][0] for g in grids] == ["x1", "x2", "x3", "x4"]
