@@ -663,3 +663,20 @@ def test_review_quy_doc_dung_ten_cot_va_che_so_dien_thoai(monkeypatch):
     assert mot_lan and mot_lan[0]["amount"] == 6_000_000
     assert mot_lan[0]["label"] == "Sức khoẻ"
     assert "0912345678" not in mot_lan[0]["description"], "số điện thoại phải được che"
+
+
+def test_review_quy_khong_so_voi_quy_nam_o_mep_du_lieu(monkeypatch):
+    """Quý mép dữ liệu chỉ ghi được vài giao dịch. So với nó ra "+321% so với quý
+    trước" — đúng số học, vô nghĩa với khách, và trợ lý sẽ đọc nguyên con số đó."""
+    monkeypatch.setattr(main, "query_one", lambda *a, **k: {"x": 1})
+    monkeypatch.setattr(main, "query", lambda *a, **k: [])
+    monkeypatch.setattr(main, "_thang_trong_ky", lambda c, m: [
+        _thang("202603", 0, 4_588_000, {"FOOD": 4_588_000}),          # cả quý 1 chỉ có 1 tháng
+        _thang("202604", 7_600_000, 6_400_000, {"FOOD": 6_400_000}),
+        _thang("202605", 7_600_000, 6_400_000, {"FOOD": 6_400_000}),
+        _thang("202606", 7_600_000, 6_400_000, {"FOOD": 6_400_000}),
+    ])
+    b = client.get("/transactions/100001/quarter-review", params={"quarter": "2026Q2"}).json()
+    assert b["delta_expense_vs_prev_pct"] is None
+    assert b["prev_period"] is None
+    assert "mép dữ liệu" in b["prev_period_skipped"]

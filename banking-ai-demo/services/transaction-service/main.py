@@ -683,7 +683,13 @@ def quarter_review(
     ][:5]
 
     truoc = da_xong[da_xong.index(chon) - 1] if chon in da_xong and da_xong.index(chon) > 0 else None
-    chi_truoc = sum(m["expense"] for m in theo_quy[truoc]) if truoc else 0
+    # Quý liền trước chỉ dùng làm mốc khi nó ĐỦ ba tháng và có thu nhập. Quý nằm
+    # ở mép cửa sổ dữ liệu chỉ ghi được vài giao dịch: so với nó ra "+321% so
+    # với quý trước", một con số đúng về số học nhưng vô nghĩa, và trợ lý sẽ
+    # đọc nguyên nó cho khách.
+    quy_truoc = theo_quy.get(truoc) or []
+    du_tin = len(quy_truoc) == 3 and sum(m["income"] for m in quy_truoc) > 0
+    chi_truoc = sum(m["expense"] for m in quy_truoc) if du_tin else 0
 
     return {
         "customer_id": customer_id,
@@ -705,8 +711,13 @@ def quarter_review(
             for k, v in ro.items()
         ],
         "one_off_transactions": mot_lan,
-        "prev_period": truoc,
+        "prev_period": truoc if du_tin else None,
         "delta_expense_vs_prev_pct": round((chi - chi_truoc) * 100 / chi_truoc) if chi_truoc else None,
+        "prev_period_skipped": (
+            f"Bỏ qua so sánh với {truoc}: quý đó nằm ở mép dữ liệu, không đủ ba tháng "
+            "hoặc không có thu nhập nên mức tăng giảm tính ra sẽ sai lệch."
+            if truoc and not du_tin else None
+        ),
         "note": ("Quý gần nhất đã kết thúc — dùng làm gốc cho kế hoạch tiết kiệm."
                  if chon != quy_dang_chay else
                  "CẢNH BÁO: đây là quý đang chạy, tổng chi chưa đủ nên đừng dùng làm gốc kế hoạch."),
