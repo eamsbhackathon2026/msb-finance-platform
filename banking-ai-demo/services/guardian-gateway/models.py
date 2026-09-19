@@ -618,6 +618,17 @@ class ChatStep(Contract):
     duration_ms: int | None = None
 
 
+class ChatNotice(Contract):
+    """Cảnh báo gateway gắn vào một lượt chat, hiện cạnh câu trả lời.
+
+    Trợ lý vẫn trả lời bình thường: cảnh báo là để khách biết tin nhắn vừa gửi
+    mang một chỉ dẫn lạ, chứ không phải để chặn câu hỏi.
+    """
+    kind: Literal["prompt_injection"]
+    title: str
+    detail: str
+
+
 class ScamShieldVerdict(Contract):
     """Kết luận của agent Scam Shield về một lệnh chuyển tới stk mới."""
     level: Literal["safe", "suspect", "danger"]

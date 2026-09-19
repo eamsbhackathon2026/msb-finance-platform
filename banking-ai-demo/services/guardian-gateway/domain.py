@@ -22,6 +22,7 @@ import logging
 import re
 import os
 import time
+import unicodedata
 from contextvars import ContextVar
 from typing import Any, NamedTuple
 
@@ -531,6 +532,61 @@ class AgentBusy(Exception):
     """
 
 
+# Lời nhắn của khách tự xưng là hệ thống là hình dạng kinh điển của một cú tiêm chỉ
+# dẫn: kẻ lừa đảo đọc cho nạn nhân gõ vào khung chat để chính trợ lý của ngân hàng
+# nói câu dụ chuyển tiền.
+#
+# Bắt theo HÌNH DẠNG chứ không theo danh sách từ khoá, và thà bỏ sót còn hơn báo
+# nhầm: một banner đỏ trên câu hỏi thật làm hỏng lòng tin nhanh hơn là bỏ lọt. Vì
+# vậy nhãn hệ thống chỉ tính khi ĐÓNG NGOẶC — "Hệ thống: tôi không đăng nhập được"
+# là câu khách nói thật, còn "[HE THONG] ..." thì không ai gõ một cách vô tình.
+_IMPERSONATES_SYSTEM = re.compile(
+    r"(^|\n)\s*[\[<]\s*(he thong|system|instruction|prompt|admin)\b[^\]>\n]{0,40}[\]>]",
+    re.IGNORECASE,
+)
+# Dòng bối cảnh do gateway chèn, bị khách gõ lại để tự chọn mã khách. Bắt bất kể có
+# ngoặc hay không: đây là ca duy nhất mà lọt đồng nghĩa với đọc dữ liệu người khác.
+_FORGED_CUSTOMER_CONTEXT = re.compile(r"customer_id\s*[:=]\s*\d+", re.IGNORECASE)
+# Ranh giới từ là bắt buộc: thiếu nó thì "quen" khớp trong "quên/thói quen/làm quen"
+# và "lenh" khớp trong "lệnh chuyển tiền", tức là bắt nhầm đúng những câu ngân hàng
+# bình thường nhất.
+_OVERRIDES_INSTRUCTIONS = re.compile(
+    r"\b(bo qua|khong can theo)\b[^\n]{0,20}\b(huong dan|chi dan|quy tac|lenh)\b"
+    r"|\bignore\s+(all\s+|every\s+)?(previous|prior)\s+instructions?\b",
+    re.IGNORECASE,
+)
+
+
+def strip_diacritics(text: str) -> str:
+    """Bỏ dấu tiếng Việt: cú tiêm chỉ dẫn hay được gõ không dấu để né bộ lọc."""
+    thay = unicodedata.normalize("NFD", text)
+    thay = "".join(c for c in thay if unicodedata.category(c) != "Mn")
+    return thay.replace("đ", "d").replace("Đ", "D")
+
+
+def suspicious_instruction(question: str) -> str | None:
+    """Lý do ngắn nếu tin nhắn của khách mang chỉ dẫn mạo danh, ngược lại None."""
+    flat = strip_diacritics(question)
+    if _FORGED_CUSTOMER_CONTEXT.search(flat):
+        return "Tin nhắn chứa dòng bối cảnh hệ thống do người khác soạn sẵn."
+    if _IMPERSONATES_SYSTEM.search(flat):
+        return "Tin nhắn tự xưng là thông báo của hệ thống."
+    if _OVERRIDES_INSTRUCTIONS.search(flat):
+        return "Tin nhắn yêu cầu trợ lý bỏ qua hướng dẫn của ngân hàng."
+    return None
+
+
+def strip_forged_context(question: str) -> str:
+    """Bỏ các dòng khách tự gõ giả dòng bối cảnh của gateway.
+
+    Cảnh báo thôi là chưa đủ cho riêng ca này: `customer_id` đi vào thân prompt và
+    mô hình là bên điền nó vào đường dẫn công cụ, nên một dòng giả còn nằm trong
+    câu hỏi vẫn là một lời mời đọc dữ liệu khách khác. Cắt bỏ rồi mới chèn dòng thật.
+    """
+    giu = [d for d in question.split("\n") if not _FORGED_CUSTOMER_CONTEXT.search(strip_diacritics(d))]
+    return "\n".join(giu).strip()
+
+
 def with_customer_context(question: str, customer_id: int | None) -> str:
     """Gắn mã khách vào câu hỏi gửi agent.
 
@@ -544,7 +600,7 @@ def with_customer_context(question: str, customer_id: int | None) -> str:
     """
     if not customer_id:
         return question
-    return f"[Bối cảnh hệ thống: customer_id={customer_id}]\n{question}"
+    return f"[Bối cảnh hệ thống: customer_id={customer_id}]\n{strip_forged_context(question)}"
 
 
 # Nền tảng KHÔNG bao giờ gửi display_name rỗng: công cụ nào chưa đặt nhãn thì nó

@@ -35,6 +35,7 @@ import json
 import os
 import re
 import unicodedata
+import logging
 from datetime import datetime, timedelta, timezone
 from typing import AsyncIterator
 
@@ -53,6 +54,7 @@ from models import (
     ChatChartPoint,
     ChatGrid,
     ChatGridColumn,
+    ChatNotice,
     ChatRequest,
     ChatStep,
     ChatTable,
@@ -132,6 +134,8 @@ CHATBANKING_TIMEOUT_S = float(os.getenv("CHATBANKING_TIMEOUT_SECONDS", "9"))
 
 # Tốc độ phát lại token của chat, khớp với replayAsStream bên FE.
 CHAT_TOKEN_DELAY_MS = int(os.getenv("CHAT_TOKEN_DELAY_MS", "25"))
+
+logger = logging.getLogger("guardian-gateway")
 
 app = FastAPI(
     title="guardian-gateway",
@@ -1019,10 +1023,23 @@ async def copilot_chat(payload: ChatRequest) -> StreamingResponse:
             yield sse({"token": token})
             await asyncio.sleep(CHAT_TOKEN_DELAY_MS / 1000)
 
+    # Tin nhắn mang chỉ dẫn mạo danh vẫn được trả lời — trợ lý có luật riêng để
+    # không làm theo. Cái khách cần thấy là Guardian đã nhận ra, vì kịch bản lừa
+    # đảo ở đây là kẻ gian đọc cho khách gõ vào khung chat.
+    injection_reason = domain.suspicious_instruction(payload.message)
+
     async def stream() -> AsyncIterator[bytes]:
         # Phát THẲNG từ agent: chữ ra tới trình duyệt ngay khi mô hình sinh ra,
         # thay vì chờ trọn lần xử lý rồi mới phát lại. Bộ gỡ markdown chạy trên
         # dòng chảy vì FE render văn bản thuần.
+        if injection_reason:
+            logger.warning("copilot: chỉ dẫn lạ trong tin nhắn khách — %s", injection_reason)
+            yield sse({"notice": ChatNotice(
+                kind="prompt_injection",
+                title="Tin nhắn có chỉ dẫn lạ",
+                detail=f"{injection_reason} Trợ lý bỏ qua chỉ dẫn đó và chỉ trả lời theo dữ liệu ngân hàng. "
+                       "Nếu có người đang hướng dẫn bạn gõ nội dung này, hãy dừng lại và gọi 1900 6083.",
+            ).model_dump(by_alias=True)})
         plain = PlainTextStreamer()
         # Giữ NGUYÊN BẢN song song với phần đã gỡ: bảng markdown bị bộ gỡ bỏ
         # khỏi phần chữ, nhưng chính những dòng đó mới dựng được bảng thật.
