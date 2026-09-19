@@ -152,7 +152,13 @@ class NotificationStatusRequest(BaseModel):
 
 
 class LlmTraceRequest(BaseModel):
-    agent: Literal["copilot", "shield_explain", "shield_interview", "shield_advice"]
+    # `agent` là "kind" do gateway sinh (copilot, chat_banking, shield_verdict,
+    # shield_advice...), KHÔNG phải input người dùng. Trước đây để Literal cứng
+    # nên mỗi lần gateway thêm một kind mới là bản ghi bị 422 và rớt IM LẶNG —
+    # đã mất dấu vết của chat_banking và shield_verdict theo đúng cách đó. Với
+    # một bảng kiểm toán, mất một lượt gọi thật tệ hơn nhận một nhãn lạ, nên
+    # dùng str có ràng buộc thay vì enum: thêm kind mới không bao giờ làm mất bản ghi.
+    agent: str = Field(..., min_length=1, max_length=40, pattern=r"^[a-z][a-z0-9_]*$")
     model: str
     prompt_key: str = Field(..., description='Ví dụ "shield_explain@v3"')
     prompt_masked: str

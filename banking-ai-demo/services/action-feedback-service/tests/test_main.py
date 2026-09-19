@@ -435,3 +435,28 @@ def test_van_ban_tu_do_cua_server_bi_cat_ngan():
         message_primary='invalid input syntax for type uuid: "' + "A" * 500 + '"'))
     assert len(cau) < 200
     assert cau.endswith("…")
+
+
+def test_llm_trace_nhan_kind_moi_khong_con_422(monkeypatch):
+    """chat_banking và shield_verdict là kind gateway thật sự gửi. Literal cũ chặn
+    chúng bằng 422 rồi rớt bản ghi im lặng — hai luồng gọi agent thật mà biến mất
+    khỏi màn Nhật ký quyết định AI. Giờ mọi kind hợp lệ đều ghi được."""
+    monkeypatch.setattr(main, "execute_returning",
+                        lambda sql, params: {"trace_id": 1, "decision_id": None})
+    for kind in ("chat_banking", "shield_verdict", "copilot", "shield_advice"):
+        r = client.post("/llm-traces", json={
+            "agent": kind, "model": "agent-platform", "prompt_key": f"{kind}@01a0a9fa",
+            "prompt_masked": "cau hoi cua khach", "status": "ok", "latency_ms": 1000})
+        assert r.status_code == 201, f"{kind} phải ghi được, nhận {r.status_code}"
+
+
+def test_llm_trace_van_tu_choi_nhan_rac(monkeypatch):
+    """Nới thành str không có nghĩa nhận mọi thứ: nhãn rỗng, có dấu cách hay ký
+    tự lạ vẫn bị chặn để bảng audit không lẫn rác."""
+    monkeypatch.setattr(main, "execute_returning",
+                        lambda sql, params: {"trace_id": 1, "decision_id": None})
+    for xau in ("", "Chat Banking", "kind;drop", "CHATBANKING"):
+        r = client.post("/llm-traces", json={
+            "agent": xau, "model": "x", "prompt_key": "x@1",
+            "prompt_masked": "y", "status": "ok"})
+        assert r.status_code == 422, f"{xau!r} lẽ ra phải bị từ chối"
