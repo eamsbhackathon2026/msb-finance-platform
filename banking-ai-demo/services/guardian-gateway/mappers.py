@@ -147,7 +147,15 @@ def map_home(cust: dict, ins: dict | None, now: datetime) -> HomeContent:
         key=lambda i: (i.get("period") or "", -(i.get("rank_in_period") or 99)),
         reverse=True,
     )
-    hint = items[0]["insight_text"] if items else "Xem phân tích chi tiêu tháng này của bạn."
+    # Lấy insight đầu tiên CÓ CHỮ, không phải dòng đầu tiên. Những dòng sinh
+    # trước khi transaction-service biết tự viết câu có insight_text = NULL, mà
+    # HomeContent.assistant_hint là `str` — đưa None vào là ValidationError và cả
+    # màn Home trả 500. FE nuốt lỗi rồi hiện dữ liệu demo, nên nhìn ngoài vẫn
+    # đẹp: tên khách và lời gợi ý đều là đồ giả, không ai biết.
+    hint = next(
+        (i["insight_text"] for i in items if i.get("insight_text")),
+        "Xem phân tích chi tiêu tháng này của bạn.",
+    )
     return HomeContent(
         greeting=greeting,
         customer_name=cust.get("name_masked") or "—",

@@ -651,6 +651,35 @@ def test_noi_dung_man_home():
     assert body["customerName"] == "Nguyễn Minh Anh"
 
 
+def test_home_khong_do_vi_insight_chua_co_chu():
+    """Dòng insight sinh trước khi transaction-service biết tự viết câu có
+    insight_text = NULL. Lấy nguyên nó thì HomeContent (assistant_hint: str)
+    ném ValidationError và /api/home trả 500 — FE nuốt lỗi rồi hiện dữ liệu
+    demo nên màn Home vẫn trông đẹp, không ai biết tên khách là đồ giả."""
+    from datetime import datetime
+    import mappers
+    cust = {"name_masked": "Nguyễn Minh A***", "persona": "SALARY"}
+    ins = {"insights": [
+        {"period": "202609", "rank_in_period": 1, "insight_text": None},
+        {"period": "202609", "rank_in_period": 2, "insight_text": None},
+        {"period": "202608", "rank_in_period": 1, "insight_text": "Nhóm Ăn uống chiếm 34% tổng chi."},
+    ]}
+    out = mappers.map_home(cust, ins, datetime(2026, 9, 19, 9, 0))
+    # Bỏ qua kỳ mới nhất vì nó chưa có chữ, lấy câu thật gần nhất.
+    assert out.assistant_hint == "Nhóm Ăn uống chiếm 34% tổng chi."
+
+
+def test_home_khong_co_insight_nao_co_chu_thi_dung_cau_mac_dinh():
+    from datetime import datetime
+    import mappers
+    out = mappers.map_home(
+        {"name_masked": "A***", "persona": "SALARY"},
+        {"insights": [{"period": "202609", "rank_in_period": 1, "insight_text": None}]},
+        datetime(2026, 9, 19, 9, 0),
+    )
+    assert out.assistant_hint == "Xem phân tích chi tiêu tháng này của bạn."
+
+
 def test_phien_lam_viec_ops():
     body = client.get("/api/ops/session").json()
     assert set(body) == {"operator", "systemStatus", "nowLabel"}

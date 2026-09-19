@@ -26,6 +26,7 @@ from common import (
     COMMON_TAGS,
     agent_tools_payload,
     db_health,
+    execute,
     execute_returning,
     install_db_error_handlers,
     mask_free_text,
@@ -1302,6 +1303,20 @@ def generate_insights(
         if row is not None:
             row["label"] = _nhan_nhom(category)
         saved.append(row)
+
+    # Dọn nhóm không còn thuộc kỳ này. Upsert chỉ ghi đè nhóm nó viết ra, nên
+    # dòng cũ nằm lại vĩnh viễn: bản cache của khách demo còn một dòng
+    # TRANSFER_P2P 620 triệu xếp hạng 1 do lần sinh trước tính cả chuyển khoản
+    # đi là chi tiêu. Sinh lại vẫn để nguyên nó, thành ra kỳ đó có HAI dòng
+    # hạng 1, và ai đọc dòng đầu (màn Home lấy đúng dòng đầu) sẽ thấy "tổng chi
+    # 622 triệu" trong khi khách chỉ tiêu 2,4 triệu.
+    con_lai = [c for c, _, _ in rows_out]
+    execute(
+        "DELETE FROM spending_insight WHERE customer_id = %s AND period = %s "
+        "AND NOT (category = ANY(%s))",
+        (customer_id, period, con_lai),
+    )
+
     return {
         "customer_id": customer_id,
         "period": period,

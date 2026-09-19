@@ -457,6 +457,9 @@ def test_sinh_insight_loai_chuyen_khoan_va_tu_viet_cau(monkeypatch):
     monkeypatch.setattr(main, "query", lambda *a, **k: tong_theo_nhom)
     monkeypatch.setattr(main, "execute_returning",
                         lambda sql, params: ghi.append(params) or {"category": params[2]})
+    # Bước dọn nhóm cũ cũng chạm database — không chặn thì test đi thẳng vào
+    # kết nối thật rồi trả về payload lỗi thay vì payload insight.
+    monkeypatch.setattr(main, "execute", lambda sql, params: 0)
     body = client.post("/customers/100001/insights/generate",
                        params={"period": "202608"}).json()
 
@@ -680,3 +683,30 @@ def test_review_quy_khong_so_voi_quy_nam_o_mep_du_lieu(monkeypatch):
     assert b["delta_expense_vs_prev_pct"] is None
     assert b["prev_period"] is None
     assert "mép dữ liệu" in b["prev_period_skipped"]
+
+
+def test_sinh_lai_insight_don_nhom_khong_con_thuoc_ky(monkeypatch):
+    """Upsert chỉ ghi đè nhóm nó viết ra, nên nhóm cũ nằm lại vĩnh viễn. Bản
+    cache của khách demo còn một dòng TRANSFER_P2P 620 triệu hạng 1 do lần sinh
+    trước tính cả chuyển khoản đi là chi tiêu — kỳ đó thành ra có HAI dòng hạng
+    1, và màn Home lấy dòng đầu nên báo "tổng chi 622 triệu" cho một khách chỉ
+    tiêu 2,4 triệu."""
+    xoa: list[tuple] = []
+    monkeypatch.setattr(main, "query_one", lambda *a, **k: {"x": 1})
+    monkeypatch.setattr(main, "query", lambda *a, **k: [
+        {"category": "FOOD", "total": "3000000"},
+        {"category": "TRANSFER_P2P", "total": "620150000"},
+    ])
+    monkeypatch.setattr(main, "execute_returning", lambda sql, params: {"category": params[2]})
+    monkeypatch.setattr(main, "execute", lambda sql, params: xoa.append((sql, params)) or 1)
+
+    main_body = client.post("/customers/100001/insights/generate", params={"period": "202609"}).json()
+    assert [i["category"] for i in main_body["insights"]] == ["TOTAL", "FOOD"]
+
+    assert len(xoa) == 1, "phải có đúng một lệnh dọn"
+    sql, params = xoa[0]
+    assert "DELETE FROM spending_insight" in sql
+    assert params[0] == 100001 and params[1] == "202609"
+    # TRANSFER_P2P không nằm trong danh sách giữ lại nên sẽ bị dọn.
+    assert "TRANSFER_P2P" not in params[2]
+    assert set(params[2]) == {"TOTAL", "FOOD"}
