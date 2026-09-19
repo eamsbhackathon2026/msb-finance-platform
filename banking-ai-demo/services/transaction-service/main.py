@@ -664,7 +664,7 @@ def quarter_review(
     dau, cuoi = trong_quy[0]["period"] + "01", trong_quy[-1]["period"] + "31"
     lon = query(
         """
-        SELECT transaction_date, amount, category, description
+        SELECT transaction_date, amount, category, transaction_description
         FROM transaction_history
         WHERE customer_id = %s AND transaction_date BETWEEN %s AND %s
           AND status = 'POSTED' AND direction = 'OUT'
@@ -676,7 +676,7 @@ def quarter_review(
         {"date": r["transaction_date"], "category": r.get("category"),
          "label": _nhan_nhom(r.get("category") or "OTHER"),
          "amount": round(float(num(r.get("amount")))),
-         "description": r.get("description") or ""}
+         "description": mask_free_text(r.get("transaction_description")) or ""}
         for r in lon
         if r.get("category") not in TRANSFER_CATEGORIES
         and float(num(r.get("amount"))) > 0.4 * gop.get(r.get("category") or "OTHER", 0)

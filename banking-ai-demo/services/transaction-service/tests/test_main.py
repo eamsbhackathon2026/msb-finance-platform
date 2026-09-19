@@ -644,3 +644,22 @@ def test_ke_hoach_khong_co_kha_nang_thi_bao_chua_ket_luan_duoc(monkeypatch):
 def test_ba_tool_moi_co_trong_danh_muc_agent():
     ten = {t["name"] for t in main.AGENT_TOOLS}
     assert {"review_quarter_spending", "get_savings_capacity", "plan_savings_goal"} <= ten
+
+
+def test_review_quy_doc_dung_ten_cot_va_che_so_dien_thoai(monkeypatch):
+    """Cột nội dung trong transaction_history tên là `transaction_description`.
+    Test cũ mock query trả rỗng nên SQL không bao giờ chạy và lỗi tên cột chỉ lộ
+    ra khi đã lên cụm — nên ở đây phải trả về đúng hình dạng dòng thật."""
+    monkeypatch.setattr(main, "query_one", lambda *a, **k: {"x": 1})
+    monkeypatch.setattr(main, "query", lambda *a, **k: [
+        {"transaction_date": "20260415", "amount": "6000000", "category": "HEALTH",
+         "transaction_description": "VIEN PHI LH 0912345678"},
+    ])
+    monkeypatch.setattr(main, "_thang_trong_ky", lambda c, m: [
+        _thang("202604", 10_000_000, 8_000_000, {"HEALTH": 8_000_000}),
+    ])
+    b = client.get("/transactions/100001/quarter-review", params={"quarter": "2026Q2"}).json()
+    mot_lan = b["one_off_transactions"]
+    assert mot_lan and mot_lan[0]["amount"] == 6_000_000
+    assert mot_lan[0]["label"] == "Sức khoẻ"
+    assert "0912345678" not in mot_lan[0]["description"], "số điện thoại phải được che"
