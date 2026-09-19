@@ -808,6 +808,268 @@ def savings_capacity(
     }
 
 
+# ---- Sức khỏe tài chính & sức chống chịu -----------------------------------
+#
+# Hai công cụ dưới đây trả lời hai câu mở của một cố vấn: "tình hình của tôi có
+# ổn không" (chẩn đoán hiện tại) và "lỡ có biến cố thì sao" (mô phỏng tương
+# lai). Cả hai đều cần dòng tiền điển hình của khách, nên tách chung ở đây.
+#
+# SỐ DƯ đến từ customer-profile (get_portfolio), KHÔNG nằm ở service này. Thay
+# vì gọi chéo service, hai tool nhận số dư qua tham số — trợ lý gọi get_portfolio
+# trước rồi truyền vào, đúng như plan_savings_goal nhận monthly_capacity từ
+# bước trước. Nhờ vậy phần tính vẫn tất định và không phụ thuộc mạng nội bộ.
+
+# Lãi suất tiết kiệm dùng để quy ra "lãi cơ hội" của tiền để không. Không hardcode
+# vì biểu lãi đổi theo tuần; lấy mức cao nhất quanh kỳ 12 tháng từ biểu thật.
+def _lai_tiet_kiem_tot_nhat(months: float = 12) -> float:
+    matrix = _rate_matrix("SAVINGS")
+    gan = [r for r in matrix["rates"] if abs(r["term_months"] - months) <= 6]
+    nguon = gan or matrix["rates"]
+    return max((r["rate_pct"] for r in nguon), default=0.0)
+
+
+def _dong_tien_dien_hinh(customer_id: int, months: int = 12) -> dict | None:
+    """Thu / chi / chi thiết yếu / chi cố định điển hình MỘT tháng, theo trung vị.
+
+    Cùng cách loại tháng như savings-capacity: bỏ tháng đang chạy (chưa đủ ngày)
+    và tháng không có thu nhập (nằm ở mép dữ liệu, chưa kịp có kỳ lương). Đây là
+    nền cho cả điểm sức khỏe lẫn số tháng trụ được, nên phải là nhịp sống thật
+    chứ không phải trung bình bị một tháng bất thường kéo lệch.
+    """
+    tat_ca = _thang_trong_ky(customer_id, months)
+    ky_nay = _ky_hien_tai()
+    dung = [m for m in tat_ca if m["period"] != ky_nay and m["income"] > 0]
+    if not dung:
+        return None
+
+    def ro(m: dict, ten_ro: str) -> float:
+        return sum(v for c, v in m["by_category"].items() if _ro_chi(c) == ten_ro)
+
+    return {
+        "months_used": len(dung),
+        "income": _trung_vi([m["income"] for m in dung]),
+        "expense": _trung_vi([m["expense"] for m in dung]),
+        "net": _trung_vi([m["net"] for m in dung]),
+        "essential": _trung_vi([ro(m, "essential") for m in dung]),
+        "committed": _trung_vi([ro(m, "committed") for m in dung]),
+        "flexible": _trung_vi([ro(m, "flexible") for m in dung]),
+    }
+
+
+@app.get("/customers/{customer_id}/financial-health", tags=["advisor"])
+def financial_health(
+    customer_id: int,
+    liquid_balance: int = Query(0, ge=0, description="Số dư tài khoản thanh toán, lấy từ portfolio.total_working_balance"),
+    deposit_balance: int = Query(0, ge=0, description="Tổng tiền gửi tiết kiệm, từ portfolio.total_deposit"),
+    loan_outstanding: int = Query(0, ge=0, description="Dư nợ vay, từ portfolio.total_loan_outstanding"),
+):
+    """Khám sức khỏe tài chính: điểm tổng + 5 trụ cột, mỗi trụ một đèn.
+
+    ĐIỂM DO SERVICE CHẤM, không để mô hình tự cho điểm — cùng lý do với điểm rủi
+    ro ở precheck và mức verdict ở Scam Shield: một con số sai một cái là khách
+    quyết định sai. Trợ lý chỉ diễn giải và xếp thứ tự việc cần làm.
+
+    Năm trụ cột (mỗi trụ 0–100, gộp lại theo trọng số thành điểm tổng):
+      1. Tỷ lệ tiết kiệm   — net / thu nhập.
+      2. Quỹ dự phòng      — số dư lỏng đủ mấy tháng chi thiết yếu (chuẩn 3–6).
+      3. Gánh nặng cố định — (thiết yếu + cam kết) / thu nhập.
+      4. Tiền nhàn rỗi     — phần vượt quỹ dự phòng mà không sinh lời, quy ra lãi mất/năm.
+      5. Đa dạng tài sản   — đã có tiền gửi/đầu tư hay 100% tiền mặt.
+    """
+    _require_customer(customer_id)
+    dt = _dong_tien_dien_hinh(customer_id)
+    if dt is None:
+        return {"customer_id": customer_id, "found": False,
+                "note": "Chưa đủ tháng đầy đủ để đánh giá sức khỏe tài chính."}
+
+    thu = dt["income"] or 1
+    thiet_yeu_thang = dt["essential"] or 1
+    co_dinh_thang = dt["essential"] + dt["committed"]
+    lai = _lai_tiet_kiem_tot_nhat()
+
+    tru_cot = []
+
+    # 1. Tỷ lệ tiết kiệm
+    ty_le = dt["net"] / thu * 100
+    d = ("good" if ty_le >= 20 else "warn" if ty_le >= 10 else "poor")
+    tru_cot.append({
+        "key": "savings_rate", "label": "Tỷ lệ tiết kiệm", "status": d,
+        "score": max(0, min(100, round(ty_le * 5))),
+        "value": round(ty_le),
+        "detail": f"Mỗi tháng để dành {round(dt['net']):,} ₫, bằng {round(ty_le)}% thu nhập.".replace(",", "."),
+    })
+
+    # 2. Quỹ dự phòng (số tháng chi thiết yếu mà số dư lỏng gánh được)
+    thang_du_phong = liquid_balance / thiet_yeu_thang
+    d = ("good" if thang_du_phong >= 6 else "warn" if thang_du_phong >= 3 else "poor")
+    tru_cot.append({
+        "key": "emergency_fund", "label": "Quỹ dự phòng", "status": d,
+        "score": max(0, min(100, round(thang_du_phong / 6 * 100))),
+        "value": round(thang_du_phong, 1),
+        "detail": f"Số dư hiện tại đủ chi thiết yếu trong khoảng {round(thang_du_phong,1)} tháng "
+                  f"(chuẩn khuyến nghị 3–6 tháng).",
+    })
+
+    # 3. Gánh nặng chi cố định
+    ganh = co_dinh_thang / thu * 100
+    d = ("good" if ganh <= 50 else "warn" if ganh <= 70 else "poor")
+    tru_cot.append({
+        "key": "fixed_burden", "label": "Gánh nặng chi cố định", "status": d,
+        "score": max(0, min(100, round((100 - ganh) * 1.4))),
+        "value": round(ganh),
+        "detail": f"Chi thiết yếu và cam kết chiếm {round(ganh)}% thu nhập "
+                  f"({round(co_dinh_thang):,} ₫/tháng).".replace(",", "."),
+    })
+
+    # 4. Tiền nhàn rỗi: phần số dư vượt 6 tháng chi thiết yếu, để không sinh lời
+    nguong_du_phong = thiet_yeu_thang * 6
+    nhan_roi = max(0, liquid_balance - nguong_du_phong)
+    lai_mat_nam = round(nhan_roi * lai / 100)
+    d = ("good" if nhan_roi < thiet_yeu_thang else "warn" if nhan_roi < nguong_du_phong else "poor")
+    tru_cot.append({
+        "key": "idle_cash", "label": "Tiền nhàn rỗi", "status": d,
+        "score": max(0, min(100, 100 - round(nhan_roi / (nguong_du_phong or 1) * 50))),
+        "value": round(nhan_roi),
+        "detail": (f"Khoảng {round(nhan_roi):,} ₫ để trong tài khoản thanh toán không sinh lời — "
+                   f"mỗi năm lỡ mất khoảng {lai_mat_nam:,} ₫ tiền lãi nếu gửi ở mức {lai}%/năm."
+                   ).replace(",", ".") if nhan_roi > 0 else
+                  "Không có tiền để không đáng kể — số dư đang ở mức quỹ dự phòng hợp lý.",
+    })
+
+    # 5. Đa dạng tài sản
+    tong_ts = liquid_balance + deposit_balance
+    ty_gui = deposit_balance / tong_ts * 100 if tong_ts else 0
+    d = ("good" if ty_gui >= 40 else "warn" if ty_gui > 0 else "poor")
+    tru_cot.append({
+        "key": "diversification", "label": "Đa dạng tài sản", "status": d,
+        "score": max(0, min(100, round(ty_gui * 2))),
+        "value": round(ty_gui),
+        "detail": (f"Tiền gửi có kỳ hạn chiếm {round(ty_gui)}% tài sản." if deposit_balance else
+                   "Toàn bộ tài sản đang là tiền mặt, chưa có khoản gửi có kỳ hạn hay đầu tư nào."),
+    })
+
+    # Điểm tổng: trung bình có trọng số. Quỹ dự phòng và tỷ lệ tiết kiệm nặng
+    # hơn vì đó là hai chân của an toàn tài chính.
+    trong_so = {"savings_rate": 0.25, "emergency_fund": 0.25, "fixed_burden": 0.2,
+                "idle_cash": 0.15, "diversification": 0.15}
+    diem = round(sum(tc["score"] * trong_so[tc["key"]] for tc in tru_cot))
+    xep = ("Tốt" if diem >= 75 else "Khá" if diem >= 55 else "Cần cải thiện" if diem >= 35 else "Yếu")
+
+    uu_tien = [
+        {"pillar": tc["label"], "detail": tc["detail"]}
+        for tc in sorted(tru_cot, key=lambda x: x["score"])
+        if tc["status"] != "good"
+    ][:3]
+
+    return {
+        "customer_id": customer_id,
+        "found": True,
+        "score": diem,
+        "grade": xep,
+        "months_used": dt["months_used"],
+        "monthly": {"income": round(dt["income"]), "expense": round(dt["expense"]),
+                    "net": round(dt["net"]), "essential": round(dt["essential"]),
+                    "committed": round(dt["committed"])},
+        "liquid_balance": liquid_balance,
+        "deposit_balance": deposit_balance,
+        "loan_outstanding": loan_outstanding,
+        "opportunity_cost_annual": lai_mat_nam,
+        "savings_rate_used_pct": lai,
+        "pillars": tru_cot,
+        "priority_actions": uu_tien,
+    }
+
+
+@app.get("/customers/{customer_id}/resilience", tags=["advisor"])
+def resilience_check(
+    customer_id: int,
+    liquid_balance: int = Query(0, ge=0, description="Số dư tài khoản thanh toán, từ portfolio.total_working_balance"),
+    deposit_balance: int = Query(0, ge=0, description="Tổng tiền gửi tiết kiệm có thể tất toán, từ portfolio.total_deposit"),
+    shock_type: str = Query("income_loss", description="income_loss (mất thu nhập) | expense_shock (chi đột xuất)"),
+    income_loss_months: int = Query(0, ge=0, le=60, description="Số tháng mất thu nhập, cho income_loss"),
+    expense_amount: int = Query(0, ge=0, description="Số tiền cần gấp, cho expense_shock"),
+):
+    """Mô phỏng một cú sốc và tính khách trụ được đến đâu.
+
+    Nhìn về TƯƠNG LAI BẤT ĐỊNH thay vì tổng kết quá khứ. Hai kịch bản:
+
+      · income_loss  — mất thu nhập vài tháng: số dư lỏng gánh được bao lâu nếu
+        chỉ chi thiết yếu, và nếu giữ nguyên nếp chi hiện tại.
+      · expense_shock — một khoản cần gấp (viện phí, sửa nhà): có đủ tiền lỏng
+        không, thiếu bao nhiêu, có phải động tới tiền gửi/đi vay không.
+
+    Mọi con số do service tính; trợ lý diễn giải và trấn an đúng mức, không tô
+    hồng cũng không dọa.
+    """
+    _require_customer(customer_id)
+    dt = _dong_tien_dien_hinh(customer_id)
+    if dt is None:
+        return {"customer_id": customer_id, "found": False,
+                "note": "Chưa đủ tháng đầy đủ để mô phỏng."}
+
+    thiet_yeu = dt["essential"] or 1
+    toan_phan = dt["expense"] or 1
+
+    ra = {
+        "customer_id": customer_id, "found": True, "shock_type": shock_type,
+        "liquid_balance": liquid_balance, "deposit_balance": deposit_balance,
+        "monthly_essential": round(thiet_yeu), "monthly_expense": round(toan_phan),
+    }
+
+    if shock_type == "expense_shock":
+        thieu_long = expense_amount - liquid_balance
+        thieu_ca_gui = expense_amount - (liquid_balance + deposit_balance)
+        if thieu_long <= 0:
+            verdict, khuyen = "đủ sức", (
+                f"Khoản {expense_amount:,} ₫ nằm gọn trong số dư khả dụng. Sau khi chi vẫn còn "
+                f"khoảng {liquid_balance - expense_amount:,} ₫."
+            )
+        elif thieu_ca_gui <= 0:
+            verdict, khuyen = "cần chú ý", (
+                f"Tiền trong tài khoản thanh toán còn thiếu {thieu_long:,} ₫; phải tất toán bớt "
+                f"tiền gửi có kỳ hạn để bù. Cân nhắc tất toán một phần thay vì toàn bộ để không mất hết lãi."
+            )
+        else:
+            verdict, khuyen = "rủi ro", (
+                f"Toàn bộ tài sản khả dụng ({liquid_balance + deposit_balance:,} ₫) vẫn thiếu "
+                f"{thieu_ca_gui:,} ₫ so với khoản cần. Nên cân nhắc vay cầm cố sổ tiết kiệm hoặc "
+                f"khoản vay ngắn hạn thay vì bán tháo tài sản."
+            )
+        ra.update({
+            "expense_amount": expense_amount,
+            "shortfall_liquid": max(0, thieu_long),
+            "shortfall_total": max(0, thieu_ca_gui),
+            "verdict": verdict,
+            "recommendation": khuyen.replace(",", "."),
+        })
+        return ra
+
+    # income_loss (mặc định)
+    runway_thiet_yeu = liquid_balance / thiet_yeu
+    runway_toan_phan = liquid_balance / toan_phan
+    n = income_loss_months
+    verdict = ("đủ sức" if runway_thiet_yeu >= max(n, 6)
+               else "cần chú ý" if runway_thiet_yeu >= max(n, 3) else "rủi ro")
+    khuyen = (
+        f"Nếu mất thu nhập, số dư hiện tại đủ chi thiết yếu trong khoảng {round(runway_thiet_yeu,1)} tháng "
+        f"(hoặc {round(runway_toan_phan,1)} tháng nếu giữ nguyên nếp chi). "
+    )
+    if n:
+        con_lai = liquid_balance - thiet_yeu * n
+        khuyen += (f"Qua {n} tháng như giả định, "
+                   + (f"vẫn còn khoảng {round(con_lai):,} ₫." if con_lai >= 0
+                      else f"sẽ thiếu khoảng {round(-con_lai):,} ₫ và cần tới tiền gửi hoặc nguồn khác.")
+                   ).replace(",", ".")
+    ra.update({
+        "income_loss_months": n,
+        "runway_essential_months": round(runway_thiet_yeu, 1),
+        "runway_full_months": round(runway_toan_phan, 1),
+        "verdict": verdict,
+        "recommendation": khuyen,
+    })
+    return ra
+
+
 _MONTH_NAMES_VI = (
     "", "Tháng 1", "Tháng 2", "Tháng 3", "Tháng 4", "Tháng 5", "Tháng 6",
     "Tháng 7", "Tháng 8", "Tháng 9", "Tháng 10", "Tháng 11", "Tháng 12",
@@ -1834,6 +2096,37 @@ AGENT_TOOLS = [
         params={"customer_id": "int", "months": "int, cửa sổ dữ liệu, mặc định 12"},
         returns="monthly{income,expense,net}, savings_rate_pct, realistic{monthly,quarterly,annual}, "
                 "stretch{...}, months_used, months_excluded[] kèm lý do.",
+    ),
+    tool(
+        "check_financial_health",
+        "Khám sức khỏe tài chính tổng thể: điểm số và 5 trụ cột (tỷ lệ tiết kiệm, quỹ dự "
+        "phòng, gánh nặng chi cố định, tiền nhàn rỗi, đa dạng tài sản), mỗi trụ một đèn "
+        "tốt/cảnh báo/kém kèm việc nên làm. Dùng khi khách hỏi 'tình hình tài chính của tôi "
+        "có ổn không', 'đánh giá tài chính giúp tôi'. GỌI get_portfolio TRƯỚC để lấy số dư "
+        "rồi truyền vào liquid_balance / deposit_balance / loan_outstanding — điểm do service "
+        "chấm, ĐỪNG tự cho điểm, chỉ diễn giải các con số trả về.",
+        "GET", "/customers/{customer_id}/financial-health",
+        params={"customer_id": "int",
+                "liquid_balance": "int, = portfolio.total_working_balance",
+                "deposit_balance": "int, = portfolio.total_deposit, mặc định 0",
+                "loan_outstanding": "int, = portfolio.total_loan_outstanding, mặc định 0"},
+        returns="score, grade, pillars[] kèm status/detail, priority_actions[], opportunity_cost_annual.",
+    ),
+    tool(
+        "check_resilience",
+        "Mô phỏng một cú sốc tài chính và tính khách trụ được đến đâu. Dùng khi khách hỏi "
+        "'nếu tôi mất thu nhập/ốm thì sao', 'lỡ cần gấp X tiền thì lấy đâu'. Hai kịch bản: "
+        "shock_type=income_loss (mất thu nhập, truyền income_loss_months) hoặc "
+        "shock_type=expense_shock (chi đột xuất, truyền expense_amount). GỌI get_portfolio "
+        "TRƯỚC để lấy số dư rồi truyền vào. Mọi con số do service tính, đọc thẳng đừng tự nhẩm.",
+        "GET", "/customers/{customer_id}/resilience",
+        params={"customer_id": "int",
+                "liquid_balance": "int, = portfolio.total_working_balance",
+                "deposit_balance": "int, = portfolio.total_deposit, mặc định 0",
+                "shock_type": "income_loss | expense_shock",
+                "income_loss_months": "int, số tháng mất thu nhập (cho income_loss)",
+                "expense_amount": "int, số tiền cần gấp (cho expense_shock)"},
+        returns="verdict, recommendation, và runway_*_months (income_loss) hoặc shortfall_* (expense_shock).",
     ),
     tool(
         "plan_savings_goal",

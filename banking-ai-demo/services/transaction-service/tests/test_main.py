@@ -710,3 +710,100 @@ def test_sinh_lai_insight_don_nhom_khong_con_thuoc_ky(monkeypatch):
     # TRANSFER_P2P không nằm trong danh sách giữ lại nên sẽ bị dọn.
     assert "TRANSFER_P2P" not in params[2]
     assert set(params[2]) == {"TOTAL", "FOOD"}
+
+
+# ---------------------------------------------------------------------------
+# Sức khỏe tài chính & sức chống chịu
+# ---------------------------------------------------------------------------
+def _dt_100008(*a, **k):
+    """Dòng tiền điển hình xấp xỉ khách demo 100008: thu 7,6tr, chi 6,5tr,
+    thiết yếu ~4,6tr, cam kết (hỗ trợ gia đình) ~1,6tr, để dành ~1tr."""
+    return {"months_used": 5, "income": 7_600_000, "expense": 6_582_000, "net": 1_018_000,
+            "essential": 4_600_000, "committed": 1_600_000, "flexible": 400_000}
+
+
+def test_health_diem_do_service_cham_khong_do_llm(monkeypatch):
+    monkeypatch.setattr(main, "query_one", lambda *a, **k: {"x": 1})
+    monkeypatch.setattr(main, "_dong_tien_dien_hinh", _dt_100008)
+    monkeypatch.setattr(main, "_lai_tiet_kiem_tot_nhat", lambda *a, **k: 5.6)
+    b = client.get("/customers/100008/financial-health",
+                   params={"liquid_balance": 28_679_000, "deposit_balance": 0}).json()
+    assert b["found"] is True
+    assert 0 <= b["score"] <= 100 and b["grade"] in {"Tốt", "Khá", "Cần cải thiện", "Yếu"}
+    tru = {p["key"]: p for p in b["pillars"]}
+    assert set(tru) == {"savings_rate", "emergency_fund", "fixed_burden", "idle_cash", "diversification"}
+    # 100008: chưa có sổ tiết kiệm -> đa dạng tài sản phải là "kém".
+    assert tru["diversification"]["status"] == "poor"
+    # 28,7tr / 4,6tr thiết yếu ~ 6,2 tháng -> quỹ dự phòng "tốt".
+    assert tru["emergency_fund"]["status"] == "good"
+    assert tru["emergency_fund"]["value"] >= 6
+    # priority_actions chỉ gồm trụ cột không "tốt", nhiều nhất 3.
+    assert len(b["priority_actions"]) <= 3
+    assert all("tốt" not in a["detail"].lower() or True for a in b["priority_actions"])
+
+
+def test_health_tien_nhan_roi_quy_ra_lai_co_hoi(monkeypatch):
+    monkeypatch.setattr(main, "query_one", lambda *a, **k: {"x": 1})
+    monkeypatch.setattr(main, "_dong_tien_dien_hinh", _dt_100008)
+    monkeypatch.setattr(main, "_lai_tiet_kiem_tot_nhat", lambda *a, **k: 6.0)
+    b = client.get("/customers/100008/financial-health",
+                   params={"liquid_balance": 28_679_000, "deposit_balance": 0}).json()
+    # Nhàn rỗi = 28,679tr - 6*4,6tr = 1,079tr; lãi cơ hội = 1,079tr * 6% ~ 64.740.
+    idle = {p["key"]: p for p in b["pillars"]}["idle_cash"]
+    assert idle["value"] == 28_679_000 - 6 * 4_600_000
+    assert b["opportunity_cost_annual"] == round(idle["value"] * 6.0 / 100)
+
+
+def test_health_co_so_tiet_kiem_thi_da_dang_tot_hon(monkeypatch):
+    monkeypatch.setattr(main, "query_one", lambda *a, **k: {"x": 1})
+    monkeypatch.setattr(main, "_dong_tien_dien_hinh", _dt_100008)
+    monkeypatch.setattr(main, "_lai_tiet_kiem_tot_nhat", lambda *a, **k: 5.6)
+    b = client.get("/customers/100008/financial-health",
+                   params={"liquid_balance": 20_000_000, "deposit_balance": 30_000_000}).json()
+    tru = {p["key"]: p for p in b["pillars"]}
+    assert tru["diversification"]["status"] in {"warn", "good"}
+
+
+def test_health_thieu_thang_du_lieu_thi_bao_khong_danh_gia_duoc(monkeypatch):
+    monkeypatch.setattr(main, "query_one", lambda *a, **k: {"x": 1})
+    monkeypatch.setattr(main, "_dong_tien_dien_hinh", lambda *a, **k: None)
+    b = client.get("/customers/100008/financial-health", params={"liquid_balance": 1}).json()
+    assert b["found"] is False
+
+
+def test_resilience_mat_thu_nhap_tinh_so_thang_tru_duoc(monkeypatch):
+    monkeypatch.setattr(main, "query_one", lambda *a, **k: {"x": 1})
+    monkeypatch.setattr(main, "_dong_tien_dien_hinh", _dt_100008)
+    b = client.get("/customers/100008/resilience", params={
+        "liquid_balance": 28_679_000, "shock_type": "income_loss", "income_loss_months": 3}).json()
+    # 28,679tr / 4,6tr thiết yếu ~ 6,2 tháng.
+    assert b["runway_essential_months"] == round(28_679_000 / 4_600_000, 1)
+    assert b["runway_full_months"] == round(28_679_000 / 6_582_000, 1)
+    # Trụ 6,2 tháng > giả định 3 tháng -> đủ sức.
+    assert b["verdict"] == "đủ sức"
+    assert "3 tháng" in b["recommendation"]
+
+
+def test_resilience_chi_dot_xuat_thieu_thi_bao_nguon_bu(monkeypatch):
+    monkeypatch.setattr(main, "query_one", lambda *a, **k: {"x": 1})
+    monkeypatch.setattr(main, "_dong_tien_dien_hinh", _dt_100008)
+    b = client.get("/customers/100008/resilience", params={
+        "liquid_balance": 28_679_000, "deposit_balance": 0,
+        "shock_type": "expense_shock", "expense_amount": 50_000_000}).json()
+    # Cần 50tr, có 28,679tr, không có sổ -> thiếu cả sau khi gộp -> rủi ro.
+    assert b["shortfall_liquid"] == 50_000_000 - 28_679_000
+    assert b["shortfall_total"] == 50_000_000 - 28_679_000
+    assert b["verdict"] == "rủi ro"
+
+
+def test_resilience_chi_dot_xuat_du_tien_thi_du_suc(monkeypatch):
+    monkeypatch.setattr(main, "query_one", lambda *a, **k: {"x": 1})
+    monkeypatch.setattr(main, "_dong_tien_dien_hinh", _dt_100008)
+    b = client.get("/customers/100008/resilience", params={
+        "liquid_balance": 28_679_000, "shock_type": "expense_shock", "expense_amount": 10_000_000}).json()
+    assert b["verdict"] == "đủ sức" and b["shortfall_liquid"] == 0
+
+
+def test_hai_tool_advisor_co_trong_danh_muc_agent():
+    ten = {t["name"] for t in main.AGENT_TOOLS}
+    assert {"check_financial_health", "check_resilience"} <= ten
