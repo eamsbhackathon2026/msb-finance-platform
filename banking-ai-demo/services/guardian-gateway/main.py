@@ -132,11 +132,15 @@ RISK_ASSESS_DELAY_MS = int(os.getenv("RISK_ASSESS_DELAY_MS", "2000"))
 # luật regex, thà kém thông minh còn hơn đứng hình.
 CHATBANKING_TIMEOUT_S = float(os.getenv("CHATBANKING_TIMEOUT_SECONDS", "9"))
 
-# Trần chờ agent Scam Shield viết lại khuyến cáo ở LƯỢT 2 màn Guardian. Lượt này
-# agent không gọi công cụ nên đo được 5,0–10,2s (trung vị 6,5s, 6 lượt liên
-# tiếp trên qwen3.6-flash); để 8s thì 1/3 số lượt rơi về playbook ngay giữa
-# buổi demo. Quá ngưỡng vẫn có lời playbook nên khách không bao giờ thấy màn trống.
-SHIELD_ADVICE_TIMEOUT = float(os.getenv("SHIELD_ADVICE_TIMEOUT_SECONDS", "12"))
+# Trần chờ agent Scam Shield viết lại khuyến cáo ở LƯỢT 2 màn Guardian.
+#
+# Độ trễ là của provider và dao động theo giờ, không phải của kiến trúc: đo lại
+# vào buổi tối được 4,7–8,1s ở lượt này nhưng có lúc vọt lên 17–22s, và agent
+# KHÔNG gắn công cụ (Chat Banking) cũng chậm y hệt nên bỏ công cụ không cứu
+# được. Ở 12s thì 2/6 lượt rơi về playbook; 15s ôm trọn vùng thường gặp mà vẫn
+# không bắt khách ngồi đợi quá lâu. Quá ngưỡng vẫn có lời playbook viết sẵn cho
+# đúng kịch bản, nên khách không bao giờ thấy màn trống.
+SHIELD_ADVICE_TIMEOUT = float(os.getenv("SHIELD_ADVICE_TIMEOUT_SECONDS", "15"))
 
 # Trần chờ agent Scam Shield điều tra đầy đủ (POST /api/scamshield/verdict).
 # Lượt này agent gọi 3 công cụ thật — hồ sơ khách, hồ sơ người nhận, đối chiếu
@@ -1543,23 +1547,42 @@ def _fallback_verdict(s: ScamShieldSignals) -> ScamShieldVerdict:
 
 async def _scamshield_verdict(bank_code: str, account_no: str, amount: int, note: str,
                               signals: ScamShieldSignals) -> ScamShieldVerdict:
-    """Hỏi agent Scam Shield; agent lỗi thì suy từ tín hiệu.
+    """Mức độ do TÍN HIỆU quyết định; agent chỉ viết lời cho khách đọc.
 
     Đường gọi là `POST /api/scamshield/verdict`. Cố ý KHÔNG nằm trong
-    `transfer_precheck`: precheck phải trả dưới 300 ms theo wireframe, còn một
-    lượt điều tra của agent mất 25–37 giây vì có ba lần gọi công cụ.
+    `transfer_precheck`: precheck phải trả dưới 300 ms theo wireframe.
 
-    Câu hỏi phải kèm mã khách vì công cụ của agent nhận customer_id trên đường
-    dẫn (`/customers/{customer_id}/beneficiaries/resolve`). Thiếu nó thì agent
-    không tra được người nhận và chỉ đoán theo câu chữ — đúng thứ Scam Shield
-    sinh ra để tránh.
+    VÌ SAO AGENT KHÔNG ĐƯỢC CHẤM MỨC. Bản trước để agent tự kết luận từ kết quả
+    công cụ. Hỏi bốn lần CÙNG một lệnh chuyển — 5 triệu tiền ăn trưa cho người
+    thân đã chuyển 28 lần trong 430 ngày — nhận về bốn mức khác nhau: suspect,
+    danger, safe, suspect. Lượt "danger" còn viết là khớp kịch bản lừa đảo sàn
+    đầu tư. Nguyên nhân: `match_scam` luôn trả `candidates[]` kèm điểm, kể cả
+    khi `matched=false`, và mô hình đọc ứng viên thành kịch bản đã khớp; câu
+    "không khớp cũng là kết quả hợp lệ" trong system prompt không giữ nổi nó.
+
+    Gateway vốn đã có sẵn dữ liệu ấy: `_collect_signals` gọi đúng
+    resolve_beneficiary và scam_match mà agent gọi lại. Nên mức và lý do lấy từ
+    `_fallback_verdict` (thuần luật, chạy đi chạy lại ra cùng một kết quả), còn
+    agent nhận sẵn kết luận và chỉ viết lại cho dễ nghe. Cùng nguyên tắc với
+    điểm rủi ro ở precheck và số tiền ở Chat Banking: phần nào sai một cái là
+    hại khách thì phần đó không giao cho mô hình.
+
+    Câu hỏi vẫn kèm mã khách để agent tra thêm chi tiết (tuổi tài khoản, tên
+    kịch bản) mà tín hiệu của gateway không có.
     """
+    goc = _fallback_verdict(signals)
     if not domain.agent_configured(domain.SCAMSHIELD_AGENT_ID):
-        return _fallback_verdict(signals)
+        return goc
+
     question = (
         f"Khách chuẩn bị chuyển {amount:,} đồng tới tài khoản {account_no} tại ngân hàng "
-        f"{bank_code}, nội dung chuyển khoản: \"{note}\". Hãy dùng công cụ kiểm tra dấu hiệu "
-        "lừa đảo cho tài khoản này rồi kết luận."
+        f"{bank_code}, nội dung chuyển khoản: \"{note}\".\n"
+        f"Hệ thống đã chấm mức: {goc.level.upper()}. Các dấu hiệu ghi nhận được:\n"
+        + ("\n".join(f"- {r}" for r in goc.reasons) or "- Không có dấu hiệu bất thường nào.")
+        + "\n\nHãy tra cứu thêm để làm rõ, rồi viết lại phần giải thích cho khách đọc. "
+        "Giữ NGUYÊN mức hệ thống đã chấm, không tự đổi sang mức khác. "
+        "Trả về đúng khuôn: dòng đầu là mức, các dòng sau mỗi lý do một dòng bắt đầu bằng \"- \", "
+        "dòng cuối bắt đầu bằng \"Khuyến nghị: \"."
     ).replace(",", ".")
     try:
         answer, steps = await asyncio.wait_for(
@@ -1574,12 +1597,19 @@ async def _scamshield_verdict(bank_code: str, account_no: str, amount: int, note
         )
     except Exception:
         answer, steps = None, []
-    if answer and (parsed := _parse_verdict(answer)):
-        # Kết luận của agent đi kèm những gì nó đã tra, để màn verdict hiện
-        # được vì sao nó nói tài khoản kia đáng ngờ.
-        return parsed.model_copy(update={"steps": [_chat_step(b) for b in steps]})
-    # Nhánh dự phòng suy từ tín hiệu, agent không chạy bước nào nên không kể bước nào.
-    return _fallback_verdict(signals)
+
+    parsed = _parse_verdict(answer) if answer else None
+    if parsed is None:
+        return goc
+    # Chỉ nhận CHỮ của agent. Mức, tiêu đề và nguồn vẫn của hệ thống — agent trả
+    # sai mức (đã đo được) thì cũng không lọt ra tới khách.
+    return goc.model_copy(update={
+        "summary": parsed.summary or goc.summary,
+        "reasons": parsed.reasons or goc.reasons,
+        "recommendation": parsed.recommendation or goc.recommendation,
+        "source": "agent",
+        "steps": [_chat_step(b) for b in steps],
+    })
 
 
 @app.get("/api/transfer/beneficiaries", response_model=list[TransferBeneficiary], tags=["risk"],

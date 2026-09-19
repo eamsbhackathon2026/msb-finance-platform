@@ -2166,3 +2166,45 @@ def test_bon_bang_markdown_deu_duoc_dung():
     grids = main._parse_markdown_grids(md)
     assert len(grids) == 4
     assert [g.rows[0][0] for g in grids] == ["x1", "x2", "x3", "x4"]
+
+
+def test_verdict_giu_muc_cua_he_thong_du_agent_phan_khac(monkeypatch):
+    """Hỏi bốn lần CÙNG một lệnh chuyển (5 triệu tiền ăn trưa cho người thân đã
+    chuyển 28 lần) nhận về bốn mức khác nhau: suspect, danger, safe, suspect —
+    lượt "danger" còn viết là khớp kịch bản lừa đảo sàn đầu tư. match_scam luôn
+    trả candidates[] kèm điểm kể cả khi matched=false, và mô hình đọc ứng viên
+    thành kịch bản đã khớp. Mức phải do luật giữ, agent chỉ được viết chữ."""
+    import asyncio
+    from models import ScamShieldSignals
+    s = ScamShieldSignals(bank_code="VCB", account_no="3028127210", account_masked="3028 ****",
+                          known=True, is_new=False, relationship="FAMILY", status="ACTIVE",
+                          age_days=430, tx_count=28, amount=5_000_000, note="tra tien an trua")
+
+    async def agent_phan_bua(*a, **k):
+        return ("NGUY_HIEM\n- Khớp kịch bản lừa đảo sàn đầu tư.\nKhuyến nghị: Dừng ngay.", [])
+
+    monkeypatch.setattr(main.domain, "agent_answer_with_steps", agent_phan_bua)
+    monkeypatch.setattr(main.domain, "agent_configured", lambda *a, **k: True)
+    v = asyncio.run(main._scamshield_verdict("VCB", "3028127210", 5_000_000, "tra tien an trua", s))
+
+    assert v.level == "safe", "người quen, không dấu hiệu nào — agent phán NGUY_HIEM cũng không được lọt"
+    assert v.title == "Chưa thấy dấu hiệu bất thường"
+    # Chữ của agent vẫn được dùng, chỉ mức là không.
+    assert v.source == "agent"
+    assert "sàn đầu tư" in v.reasons[0]
+
+
+def test_verdict_agent_hong_thi_van_co_ket_luan_theo_luat(monkeypatch):
+    import asyncio
+    from models import ScamShieldSignals
+    s = ScamShieldSignals(bank_code="ACB", account_no="x", account_masked="x", known=True, is_new=True,
+                          relationship="UNKNOWN", status="SUSPECTED", age_days=0, tx_count=0,
+                          amount=85_000_000, note="", scenario_match="Giả danh công an")
+
+    async def hong(*a, **k):
+        raise RuntimeError("agent chết")
+
+    monkeypatch.setattr(main.domain, "agent_answer_with_steps", hong)
+    monkeypatch.setattr(main.domain, "agent_configured", lambda *a, **k: True)
+    v = asyncio.run(main._scamshield_verdict("ACB", "x", 85_000_000, "", s))
+    assert v.level == "danger" and v.source == "fallback" and v.steps == []
