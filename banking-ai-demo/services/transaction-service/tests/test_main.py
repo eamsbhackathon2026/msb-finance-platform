@@ -823,3 +823,86 @@ def test_advisor_khong_nuot_dau_phay_van_ban(monkeypatch):
     r = client.get("/customers/100008/resilience", params={
         "liquid_balance": 28_679_000, "shock_type": "income_loss", "income_loss_months": 3}).json()
     assert "giả định, vẫn" in r["recommendation"] and "giả định. vẫn" not in r["recommendation"]
+
+
+# ---------------------------------------------------------------------------
+# Cố vấn: đánh thức tiền nhàn rỗi · khả năng vay · lập ngân sách
+# ---------------------------------------------------------------------------
+def _bieu_lai_full():
+    return {"as_of": "2026-09-01", "rates": [
+        {"product_id": "TK1", "product_name": "Tiết kiệm cao nhất", "term_code": "T12",
+         "term_label": "12 tháng", "term_months": 12.0, "rate_pct": 6.2},
+        {"product_id": "TK2", "product_name": "Tiết kiệm thường", "term_code": "T06",
+         "term_label": "6 tháng", "term_months": 6.0, "rate_pct": 4.2},
+    ]}
+def _bieu_lai_vay():
+    return {"as_of": "2026-09-01", "rates": [
+        {"product_id": "VAY1", "product_name": "Vay tiêu dùng", "term_code": "T12",
+         "term_label": "12 tháng", "term_months": 12.0, "rate_pct": 12.0},
+        {"product_id": "VAY2", "product_name": "Vay tín chấp", "term_code": "T24",
+         "term_label": "24 tháng", "term_months": 24.0, "rate_pct": 13.5},
+    ]}
+
+
+def test_idle_cash_giu_quy_du_phong_roi_moi_gui(monkeypatch):
+    """Giữ 6 tháng chi thiết yếu làm quỹ dự phòng, phần dư mới đem gửi — không
+    khuyên khách khoá sạch tiền."""
+    monkeypatch.setattr(main, "query_one", lambda *a, **k: {"x": 1})
+    monkeypatch.setattr(main, "_dong_tien_dien_hinh", _dt_100008)
+    monkeypatch.setattr(main, "_rate_matrix", lambda g: _bieu_lai_full())
+    b = client.get("/customers/100008/idle-cash-plan",
+                   params={"liquid_balance": 28_679_000, "term_months": 12}).json()
+    # thiết yếu 4,6tr -> quỹ dự phòng 27,6tr; nhàn rỗi = 28,679 - 27,6 = 1,079tr
+    assert b["emergency_fund_keep"] == 6 * 4_600_000
+    assert b["idle_amount"] == 28_679_000 - 6 * 4_600_000
+    assert b["products"][0]["rate_pct"] == 6.2      # gói lãi cao nhất đứng đầu
+
+
+def test_idle_cash_chi_du_quy_du_phong_thi_khong_gui(monkeypatch):
+    monkeypatch.setattr(main, "query_one", lambda *a, **k: {"x": 1})
+    monkeypatch.setattr(main, "_dong_tien_dien_hinh", _dt_100008)
+    monkeypatch.setattr(main, "_rate_matrix", lambda g: _bieu_lai_full())
+    b = client.get("/customers/100008/idle-cash-plan", params={"liquid_balance": 20_000_000}).json()
+    assert b["idle_amount"] == 0
+    assert "chưa nên khoá" in b["note"]
+
+
+def test_loan_afford_bao_qua_suc_kem_muc_an_toan(monkeypatch):
+    """Dư 1tr/tháng mà trả góp 5,3tr là quá sức; phải nói thẳng + mức vay an toàn."""
+    monkeypatch.setattr(main, "query_one", lambda *a, **k: {"x": 1})
+    monkeypatch.setattr(main, "_dong_tien_dien_hinh", _dt_100008)
+    monkeypatch.setattr(main, "_rate_matrix", lambda g: _bieu_lai_vay())
+    b = client.get("/customers/100008/loan-affordability",
+                   params={"amount": 60_000_000, "months": 12}).json()
+    assert b["rate_pct"] == 12.0                    # lãi thấp nhất khớp kỳ
+    assert b["verdict"] == "quá sức" and b["affordable"] is False
+    assert b["dti_pct"] >= 60
+    # mức vay an toàn = trả góp ~40% thu nhập; nhỏ hơn khoản hỏi
+    assert 0 < b["max_affordable_loan"] < 60_000_000
+    assert main._monthly_payment(b["max_affordable_loan"], 12.0, 12) <= 7_600_000 * 0.4 + 1
+
+
+def test_loan_afford_khoan_nho_thi_du_suc(monkeypatch):
+    monkeypatch.setattr(main, "query_one", lambda *a, **k: {"x": 1})
+    monkeypatch.setattr(main, "_dong_tien_dien_hinh", _dt_100008)
+    monkeypatch.setattr(main, "_rate_matrix", lambda g: _bieu_lai_vay())
+    b = client.get("/customers/100008/loan-affordability",
+                   params={"amount": 5_000_000, "months": 12}).json()
+    assert b["verdict"] == "đủ sức" and b["affordable"] is True and b["dti_pct"] <= 40
+
+
+def test_budget_muc_tieu_tiet_kiem_20_phan_tram(monkeypatch):
+    monkeypatch.setattr(main, "query_one", lambda *a, **k: {"x": 1})
+    monkeypatch.setattr(main, "_dong_tien_dien_hinh", _dt_100008)
+    b = client.get("/customers/100008/budget-plan").json()
+    assert b["target_savings"] == round(7_600_000 * 0.2)
+    assert b["target_savings_pct"] == 20
+    assert b["current_savings_pct"] == round(1_018_000 * 100 / 7_600_000)   # 13%
+    ro = {x["bucket"]: x for x in b["buckets"]}
+    assert set(ro) == {"essential", "committed", "flexible"}
+    assert ro["essential"]["current"] == 4_600_000
+
+
+def test_ba_tool_advisor_moi_co_trong_danh_muc():
+    ten = {t["name"] for t in main.AGENT_TOOLS}
+    assert {"optimize_idle_cash", "check_loan_affordability", "make_budget_plan"} <= ten

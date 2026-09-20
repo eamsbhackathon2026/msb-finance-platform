@@ -1920,6 +1920,189 @@ def savings_goal_plan(
     return ra
 
 
+@app.get("/customers/{customer_id}/idle-cash-plan", tags=["advisor"])
+def idle_cash_plan(
+    customer_id: int,
+    liquid_balance: int = Query(0, ge=0, description="Số dư tài khoản thanh toán, từ portfolio.total_working_balance"),
+    deposit_balance: int = Query(0, ge=0, description="Tiền gửi hiện có, từ portfolio.total_deposit"),
+    term_months: int = Query(12, ge=1, le=60, description="Kỳ hạn muốn gửi, mặc định 12 tháng"),
+):
+    """Đánh thức tiền nhàn rỗi: giữ lại quỹ dự phòng, phần dư gợi ý gửi gói nào.
+
+    Bước hành động nối tiếp check_financial_health (trụ cột "tiền nhàn rỗi").
+    Giữ 6 tháng chi thiết yếu làm quỹ dự phòng linh hoạt, phần vượt mới đem gửi
+    có kỳ hạn — không khuyên khách khoá sạch tiền rồi kẹt khi cần gấp.
+
+    Lãi và tiền nhận về do service tính trên biểu lãi thật; đừng để mô hình tự
+    nhân lãi.
+    """
+    _require_customer(customer_id)
+    dt = _dong_tien_dien_hinh(customer_id)
+    if dt is None:
+        return {"customer_id": customer_id, "found": False,
+                "note": "Chưa đủ dữ liệu để tính quỹ dự phòng nên tạm chưa gợi ý được."}
+
+    thiet_yeu = dt["essential"] or 1
+    quy_du_phong = round(thiet_yeu * 6)
+    nhan_roi = max(0, liquid_balance - quy_du_phong)
+
+    matrix = _rate_matrix("SAVINGS")
+    theo_sp: dict[str, list[dict]] = {}
+    for r in matrix["rates"]:
+        theo_sp.setdefault(r["product_id"], []).append(r)
+    goi = []
+    for pid, ky_han in theo_sp.items():
+        # Gửi tiết kiệm: lấy kỳ hạn dài nhất KHÔNG vượt thời gian khách gửi —
+        # áp lãi kỳ dài hơn là hứa mức khách không được nhận (như savings_options).
+        vua_du = [t for t in ky_han if t["term_months"] <= term_months]
+        if not vua_du:
+            continue
+        k = max(vua_du, key=lambda x: x["term_months"])
+        rate = k["rate_pct"]
+        lai = nhan_roi * rate / 100 * term_months / 12
+        goi.append({
+            "product_id": pid, "product_name": k["product_name"],
+            "term_label": k["term_label"], "rate_pct": rate,
+            "interest_amount": round(lai), "maturity_amount": round(nhan_roi + lai),
+        })
+    goi.sort(key=lambda g: g["rate_pct"], reverse=True)
+    goi = goi[:3]
+    tot = goi[0] if goi else None
+
+    return {
+        "customer_id": customer_id, "found": True,
+        "liquid_balance": liquid_balance,
+        "emergency_fund_keep": quy_du_phong,
+        "emergency_fund_months": 6,
+        "idle_amount": nhan_roi,
+        "term_months": term_months,
+        "as_of": matrix["as_of"],
+        "best_interest_year": round(nhan_roi * (tot["rate_pct"] if tot else 0) / 100),
+        "products": goi,
+        "note": (f"Nên giữ khoảng {_tien_vi(quy_du_phong)} làm quỹ dự phòng (6 tháng chi thiết yếu) "
+                 f"và đem {_tien_vi(nhan_roi)} đi gửi có kỳ hạn." if nhan_roi > 0 else
+                 "Số dư hiện chỉ vừa đủ quỹ dự phòng, chưa nên khoá vào tiền gửi có kỳ hạn."),
+    }
+
+
+@app.get("/customers/{customer_id}/loan-affordability", tags=["advisor"])
+def loan_affordability(
+    customer_id: int,
+    amount: int = Query(..., gt=0, description="Số tiền muốn vay (VND)"),
+    months: int = Query(..., ge=1, le=360, description="Số tháng trả góp"),
+):
+    """Khoản vay này có kham nổi không: trả góp mỗi tháng bao nhiêu so với khả năng dư.
+
+    Trả góp tính theo dư nợ giảm dần trên lãi vay NIÊM YẾT THẬT. Khả năng dư lấy
+    từ dòng tiền điển hình (trung vị). Kết luận theo tỷ lệ trả nợ trên thu nhập
+    (DTI): <=40% thu nhập là an toàn, 40-60% là căng, trên 60% là quá sức.
+
+    Cùng tinh thần cố vấn trung thực như plan_savings_goal: không vẽ ra khoản vay
+    khách không gánh nổi.
+    """
+    _require_customer(customer_id)
+    dt = _dong_tien_dien_hinh(customer_id)
+    if dt is None:
+        return {"customer_id": customer_id, "found": False,
+                "note": "Chưa đủ dữ liệu thu nhập để đánh giá khả năng vay."}
+
+    thu = dt["income"] or 1
+    du = dt["net"]
+    matrix = _rate_matrix("LOAN")
+    theo_sp: dict[str, list[dict]] = {}
+    for r in matrix["rates"]:
+        theo_sp.setdefault(r["product_id"], []).append(r)
+    # Lãi đại diện: gói có kỳ hạn khớp, chọn mức thấp nhất (có lợi cho khách) để
+    # không thổi phồng gánh nặng; nếu không gói nào đủ kỳ thì mức thấp nhất hiện có.
+    ung_vien = []
+    for pid, ky_han in theo_sp.items():
+        k = _pick_term(ky_han, months)
+        if k:
+            ung_vien.append({"product_id": pid, "product_name": k["product_name"],
+                             "term_label": k["term_label"], "rate_pct": k["rate_pct"]})
+    if not ung_vien:
+        return {"customer_id": customer_id, "found": False,
+                "note": "Chưa có biểu lãi vay phù hợp kỳ hạn này."}
+    ung_vien.sort(key=lambda x: x["rate_pct"])
+    tot = ung_vien[0]
+    lai = tot["rate_pct"]
+    tra_gop = _monthly_payment(amount, lai, months)
+    dti = tra_gop / thu * 100
+    verdict = ("đủ sức" if dti <= 40 else "căng" if dti <= 60 else "quá sức")
+    # Số vay tối đa để trả góp còn trong ngưỡng an toàn 40% thu nhập.
+    tran = thu * 0.4
+    r = lai / 100 / 12
+    vay_toi_da = round(tran * (1 - (1 + r) ** -months) / r) if r > 0 else round(tran * months)
+
+    return {
+        "customer_id": customer_id, "found": True,
+        "loan_amount": amount, "months": months,
+        "rate_pct": lai, "product_name": tot["product_name"], "as_of": matrix["as_of"],
+        "monthly_payment": round(tra_gop),
+        "monthly_income": round(thu),
+        "monthly_surplus": round(du),
+        "surplus_after_repay": round(du - tra_gop),
+        "dti_pct": round(dti),
+        "affordable": dti <= 60,
+        "verdict": verdict,
+        "max_affordable_loan": max(0, vay_toi_da),
+        "note": (f"Vay {_tien_vi(amount)} trong {months} tháng, trả góp khoảng "
+                 f"{_tien_vi(round(tra_gop))}/tháng ở lãi {lai}%/năm — bằng {round(dti)}% thu nhập. "
+                 + {"đủ sức": "Nằm trong ngưỡng an toàn.",
+                    "căng": "Khá căng, nên cân nhắc vay ít hơn hoặc kéo dài kỳ hạn.",
+                    "quá sức": f"Vượt khả năng trả nợ; mức vay an toàn hơn khoảng {_tien_vi(max(0, vay_toi_da))}."}[verdict]),
+    }
+
+
+@app.get("/customers/{customer_id}/budget-plan", tags=["advisor"])
+def budget_plan(customer_id: int):
+    """Kê ngân sách hàng tháng theo nhóm: hiện tại đang tiêu bao nhiêu vs nên bao nhiêu.
+
+    Khung điều chỉnh cho thực tế Việt Nam thay vì 50/30/20 cứng: mục tiêu để dành
+    ít nhất 20% thu nhập, phần còn lại chia cho thiết yếu và cam kết/co giãn. Chỉ
+    ra nhóm nào đang vượt để khách biết cắt ở đâu.
+
+    Con số nền lấy trung vị dòng tiền (loại tháng đang chạy và tháng mép dữ liệu),
+    nên là nhịp sống thật.
+    """
+    _require_customer(customer_id)
+    dt = _dong_tien_dien_hinh(customer_id)
+    if dt is None:
+        return {"customer_id": customer_id, "found": False,
+                "note": "Chưa đủ dữ liệu để lập ngân sách."}
+
+    thu = dt["income"] or 1
+    muc_tieu_tiet_kiem = round(thu * 0.2)
+    con_de_chi = thu - muc_tieu_tiet_kiem
+    # Trần đề xuất: thiết yếu tối đa 55% thu nhập, cam kết + co giãn chia phần còn lại.
+    de_xuat = {
+        "essential": min(round(dt["essential"]), round(thu * 0.55)),
+        "committed": round(dt["committed"]),
+        "flexible": max(0, con_de_chi - round(dt["essential"]) - round(dt["committed"])),
+    }
+    hien_tai = {"essential": round(dt["essential"]), "committed": round(dt["committed"]),
+                "flexible": round(dt["flexible"])}
+    rows = []
+    for key, nhan in (("essential", "Thiết yếu"), ("committed", "Cam kết"), ("flexible", "Có thể co giãn")):
+        rows.append({
+            "bucket": key, "label": nhan,
+            "current": hien_tai[key], "recommended": de_xuat[key],
+            "over_by": max(0, hien_tai[key] - de_xuat[key]),
+        })
+    tiet_kiem_hien = round(dt["net"])
+    return {
+        "customer_id": customer_id, "found": True,
+        "monthly_income": round(thu),
+        "current_savings": tiet_kiem_hien,
+        "current_savings_pct": round(tiet_kiem_hien * 100 / thu),
+        "target_savings": muc_tieu_tiet_kiem,
+        "target_savings_pct": 20,
+        "buckets": rows,
+        "note": (f"Với thu nhập {_tien_vi(thu)}/tháng, nên để dành ít nhất {_tien_vi(muc_tieu_tiet_kiem)} "
+                 f"(20%). Hiện để dành {_tien_vi(tiet_kiem_hien)} ({round(tiet_kiem_hien*100/thu)}%)."),
+    }
+
+
 def _best_rate(product_id: str, months: int = 12) -> float:
     """Lãi suất niêm yết của sản phẩm ở kỳ hạn gần nhất với `months`."""
     row = query_one(
@@ -2101,6 +2284,38 @@ AGENT_TOOLS = [
         params={"customer_id": "int", "months": "int, cửa sổ dữ liệu, mặc định 12"},
         returns="monthly{income,expense,net}, savings_rate_pct, realistic{monthly,quarterly,annual}, "
                 "stretch{...}, months_used, months_excluded[] kèm lý do.",
+    ),
+    tool(
+        "optimize_idle_cash",
+        "Đánh thức tiền để không: giữ lại quỹ dự phòng rồi gợi ý phần dư nên gửi gói tiết "
+        "kiệm nào, kèm lãi và tiền nhận về. Dùng khi khách hỏi 'tôi có tiền để không nên làm "
+        "gì', 'nên gửi tiết kiệm thế nào', hoặc nối tiếp sau khi check_financial_health báo "
+        "trụ cột tiền nhàn rỗi kém. GỌI get_portfolio TRƯỚC để lấy số dư, truyền vào "
+        "liquid_balance / deposit_balance. Lãi do service tính, đọc thẳng.",
+        "GET", "/customers/{customer_id}/idle-cash-plan",
+        params={"customer_id": "int", "liquid_balance": "int, = portfolio.total_working_balance",
+                "deposit_balance": "int, = portfolio.total_deposit, mặc định 0",
+                "term_months": "int, kỳ hạn muốn gửi, mặc định 12"},
+        returns="idle_amount, emergency_fund_keep, products[] kèm rate_pct/interest_amount, note.",
+    ),
+    tool(
+        "check_loan_affordability",
+        "Khoản vay có kham nổi không: trả góp mỗi tháng bao nhiêu trên lãi vay thật, so với "
+        "khả năng dư, kết luận đủ sức/căng/quá sức kèm mức vay an toàn tối đa. Dùng khi khách "
+        "hỏi 'tôi vay X trả trong Y tháng có nổi không', 'vay được bao nhiêu'. Truyền amount và "
+        "months. Số liệu do service tính; ĐỪNG tự tính trả góp.",
+        "GET", "/customers/{customer_id}/loan-affordability",
+        params={"customer_id": "int", "amount": "int, số tiền muốn vay VND", "months": "int, số tháng trả góp"},
+        returns="monthly_payment, rate_pct, dti_pct, affordable, verdict, max_affordable_loan, note.",
+    ),
+    tool(
+        "make_budget_plan",
+        "Lập ngân sách hàng tháng theo nhóm: đang tiêu bao nhiêu vs nên bao nhiêu, chỉ nhóm nào "
+        "vượt. Dùng khi khách hỏi 'giúp tôi lập ngân sách', 'tôi nên chi tiêu thế nào cho hợp lý'. "
+        "Không cần tham số ngoài customer_id; số nền là trung vị dòng tiền.",
+        "GET", "/customers/{customer_id}/budget-plan",
+        params={"customer_id": "int"},
+        returns="monthly_income, current_savings_pct, target_savings, buckets[] kèm current/recommended/over_by, note.",
     ),
     tool(
         "check_financial_health",
