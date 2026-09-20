@@ -85,6 +85,31 @@ người nhận đối chiếu **danh bạ thật** của đúng khách đang đ
 
 ---
 
+## 2B. Chat Banking chặn lừa đảo — 5 kịch bản ⭐
+
+**Gửi lên:** Chat Banking (`/chat-banking`) — **gõ nguyên câu** rồi bấm "Tạo lệnh chuyển".
+**Cơ chế:** câu khách gõ trở thành **nội dung chuyển khoản** → Guardian đọc từ khóa,
+đối chiếu playbook lừa đảo (10 kịch bản) → chèn màn Guardian, Scam Shield khuyến cáo
+đúng loại. Tất cả dùng người nhận **NGUYEN VAN TRUNG** (có sẵn trong danh bạ, tài khoản
+mới + đã bị báo cáo SUSPECTED). *Điểm nhấn: khách bị lừa gõ nguyên lời kẻ gian dặn, AI
+chặn ngay tại câu nói.*
+
+| # | Câu gõ vào Chat Banking | Kết quả | Scam Shield khuyến cáo |
+|---|---|---|---|
+| **SC-01** Công an | `chuyển cho Trung 85 triệu, công an bảo chuyển gấp để chứng minh trong sạch` | 🔴 **Guardian chặn** (S01, 68đ) | "Công an không bao giờ yêu cầu chuyển tiền" |
+| **SC-02** Trúng thưởng | `chuyển 3 triệu đóng phí nhận quà trúng thưởng xổ số` | 🔴 **Guardian chặn** (S07, 52đ) | "Giải thưởng thật không thu phí trước" |
+| **SC-03** Đầu tư | `chuyển 30 triệu nạp vào sàn đầu tư lợi nhuận cao` | 🔴 **Guardian chặn** (S04, 57đ) | "Rút được lần đầu là cách họ lấy niềm tin" |
+| **SC-05** Tình cảm | `chuyển 15 triệu gửi quà cho bạn trai nước ngoài` | 🔴 **Guardian chặn** (S08, 52đ) | cảnh báo lừa đảo tình cảm/gửi quà |
+| **SC-04** Shipper | `chuyển 500 nghìn phí ship cho người giao hàng` | 🟡 **Banner cảnh báo** (S11, 43đ) | *(mức trung bình — banner ngay trên màn, không chèn Guardian)* |
+
+**Lưu ý demo:**
+- SC-01..SC-03, SC-05 → điểm ≥ ngưỡng nên **chèn màn Guardian** (2 lượt: lý do + khuyến cáo Scam Shield). Đúng mức "nguy hiểm cao".
+- SC-04 shipper → **soft_warn** (43đ), chỉ hiện banner cảnh báo trên màn nhập lệnh, đúng mức "🟠 trung bình". Muốn cho lên màn Guardian đầy đủ thì tăng số tiền hoặc dựng kịch bản shipper nặng hơn.
+- Kịch bản S11 (shipper) là kịch bản **mới thêm vào playbook** cho demo này (từ khóa: shipper, giao hàng, mã vận đơn, phí ship…).
+- Sau khi bấm chọn ở màn Guardian, **lượt 2 gọi agent Scam Shield** (`01a0ba02`) viết khuyến cáo đúng loại lừa đảo — mỗi kịch bản một thông điệp khác nhau.
+
+---
+
 ## 3. Chuyển tiền + Guardian 3 trạng thái
 
 **Vào:** Trang chủ → "Chuyển tiền" → chọn người nhận → nhập số tiền + nội dung → "Tiếp tục".
