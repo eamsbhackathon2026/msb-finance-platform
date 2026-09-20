@@ -194,6 +194,10 @@ class ProtectionLayer(Contract):
     label: str
     description: str
     enabled: bool
+    # Lớp cho khách tự đặt ngưỡng (vd hạn mức chi cảnh báo). editable=True thì FE
+    # hiện ô nhập số; threshold là giá trị hiện tại (VND). None = lớp bật/tắt thường.
+    editable: bool = False
+    threshold: int | None = None
 
 
 class SafetyCenter(Contract):
@@ -738,7 +742,9 @@ class InterveneAdvice(Contract):
 
 
 class ProtectionToggleRequest(Contract):
-    enabled: bool
+    # Cả hai tùy chọn: bật/tắt lớp (enabled) HOẶC đặt ngưỡng (threshold VND).
+    enabled: bool | None = None
+    threshold: int | None = None
 
 
 # ---- Thống kê theo quý --------------------------------------------------------

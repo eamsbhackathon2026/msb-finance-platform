@@ -204,6 +204,10 @@ _decisions: dict[str, str] = {}
 # trong catalog; cùng vòng đời với _decisions nên cũng mất khi pod khởi động lại.
 _protections: dict[str, bool] = {}
 
+# Ngưỡng khách tự đặt cho các lớp editable (vd "spending_warn": 15_000_000).
+# Cùng vòng đời in-memory với _protections.
+_thresholds: dict[str, int] = {}
+
 # Các bước do hành động của khách sinh ra, chèn vào dòng thời gian của case.
 # Đây là mắt xích khép vòng: khách bấm huỷ ở màn Scam Shield thì chuyên viên
 # vận hành nhìn thấy ngay trong case, thay vì chỉ đổi màn hình phía khách.
@@ -1412,20 +1416,38 @@ async def safety_center() -> SafetyCenter:
                 "reported_count": sum(1 for h in history if h.status == "processing"),
             })
 
-    if not _protections:
+    if not _protections and not _thresholds:
         return base
-    # Trả về trạng thái khách đã bật/tắt, không phải giá trị mặc định.
-    layers = [p.model_copy(update={"enabled": _protections.get(p.key, p.enabled)})
-              for p in base.protections]
+    # Trả về trạng thái khách đã bật/tắt và ngưỡng khách đã đặt, không phải mặc định.
+    layers = [
+        p.model_copy(update={
+            "enabled": _protections.get(p.key, p.enabled),
+            "threshold": _thresholds.get(p.key, p.threshold),
+        })
+        for p in base.protections
+    ]
     return base.model_copy(update={"protections": layers})
 
 
 @app.patch("/api/safety-center/protections/{key}", response_model=OkResponse, tags=["risk"],
            summary="Bật/tắt một lớp bảo vệ")
 async def toggle_protection(key: str, payload: ProtectionToggleRequest) -> OkResponse:
-    if all(p.key != key for p in catalog.SAFETY_CENTER.protections):
+    """Bật/tắt một lớp bảo vệ, hoặc đặt ngưỡng cho lớp cho phép chỉnh (editable).
+
+    Một request có thể mang `enabled`, `threshold`, hoặc cả hai. Chỉ nhận ngưỡng
+    cho lớp `editable=True`; ngưỡng phải dương và không quá 10 tỷ để tránh số vô lý.
+    """
+    layer = next((p for p in catalog.SAFETY_CENTER.protections if p.key == key), None)
+    if layer is None:
         raise HTTPException(status_code=404, detail=f"Không có lớp bảo vệ '{key}'")
-    _protections[key] = payload.enabled
+    if payload.enabled is not None:
+        _protections[key] = payload.enabled
+    if payload.threshold is not None:
+        if not layer.editable:
+            raise HTTPException(status_code=400, detail=f"Lớp '{key}' không đặt được ngưỡng")
+        if not (0 < payload.threshold <= 10_000_000_000):
+            raise HTTPException(status_code=400, detail="Ngưỡng phải trong khoảng 1 – 10.000.000.000 ₫")
+        _thresholds[key] = payload.threshold
     return OkResponse(ok=True)
 
 

@@ -380,7 +380,7 @@ def test_man_giai_thich_rui_ro():
 def test_trung_tam_an_toan():
     body = client.get("/api/safety-center").json()
     assert set(body) == SAFETY_CENTER_KEYS
-    assert len(body["protections"]) == 4
+    assert len(body["protections"]) == 5
     # store.ts dựng map protections theo key nên key phải là duy nhất.
     keys = [p["key"] for p in body["protections"]]
     assert len(keys) == len(set(keys))
@@ -641,6 +641,30 @@ def test_bat_tat_lop_bao_ve_duoc_luu():
 
 def test_lop_bao_ve_khong_ton_tai_tra_404():
     assert client.patch("/api/safety-center/protections/khong-co", json={"enabled": True}).status_code == 404
+
+
+def test_dat_nguong_han_muc_chi_an_toan():
+    """Khách tự đặt ngưỡng cảnh báo chi. Lớp spending_warn editable, threshold lưu lại."""
+    main._thresholds.clear()
+    r = client.patch("/api/safety-center/protections/spending_warn", json={"threshold": 15_000_000})
+    assert r.status_code == 200
+    layers = {p["key"]: p for p in client.get("/api/safety-center").json()["protections"]}
+    sw = layers["spending_warn"]
+    assert sw["editable"] is True and sw["threshold"] == 15_000_000
+    main._thresholds.clear()
+
+
+def test_nguong_chi_nhan_lop_editable():
+    """Đặt ngưỡng cho một lớp KHÔNG editable (vd biometric) phải bị từ chối."""
+    r = client.patch("/api/safety-center/protections/biometric", json={"threshold": 5_000_000})
+    assert r.status_code == 400
+
+
+def test_nguong_vo_ly_bi_tu_choi():
+    for xau in (0, -1, 20_000_000_000):
+        r = client.patch("/api/safety-center/protections/spending_warn", json={"threshold": xau})
+        assert r.status_code == 400, f"ngưỡng {xau} lẽ ra bị từ chối"
+    main._thresholds.clear()
 
 
 # ---- Dữ liệu còn lại của các màn ---------------------------------------------

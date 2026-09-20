@@ -417,6 +417,10 @@ SAFETY_CENTER = SafetyCenter(
         ProtectionLayer(key="beneficiary", label="Kiểm tra tài khoản nhận", description="Đối chiếu danh sách cảnh báo liên ngân hàng", enabled=True),
         ProtectionLayer(key="limit", label="Giới hạn giao dịch lớn", description="Xác nhận thêm với giao dịch trên 50.000.000 ₫", enabled=True),
         ProtectionLayer(key="biometric", label="Xác thực sinh trắc học", description="Face ID cho mọi giao dịch chuyển tiền", enabled=False),
+        # Khách tự đặt: cảnh báo khi một giao dịch chuyển tiền vượt ngưỡng này.
+        ProtectionLayer(key="spending_warn", label="Hạn mức chi an toàn",
+                        description="Cảnh báo khi một giao dịch vượt ngưỡng bạn đặt",
+                        enabled=True, editable=True, threshold=10_000_000),
     ],
 )
 
