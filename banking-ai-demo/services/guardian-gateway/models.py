@@ -687,6 +687,11 @@ class ChatBankingDraft(Contract):
     recipient: str | None = None
     # Danh bạ khớp: 0 = không thấy, 1 = soạn lệnh luôn, nhiều = hỏi khách chọn.
     matches: list[TransferBeneficiary] = []
+    # Nội dung chuyển khoản = NGUYÊN câu khách gõ. Đây là điểm mấu chốt để Guardian
+    # nhận ra kịch bản lừa đảo: kẻ gian đọc cho khách gõ "chuyển gấp theo hướng
+    # dẫn công an" thì chính câu đó thành memo, precheck khớp playbook và chặn.
+    # Không có nó thì memo mặc định trung tính và mọi kịch bản lọt lưới.
+    note: str | None = None
     # "agent" = LLM hiểu câu; "fallback" = agent lỗi/chậm, FE tự dùng regex.
     source: Literal["agent", "fallback"] = "agent"
     steps: list[ChatStep] = []

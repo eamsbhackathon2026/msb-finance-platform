@@ -2208,3 +2208,22 @@ def test_verdict_agent_hong_thi_van_co_ket_luan_theo_luat(monkeypatch):
     monkeypatch.setattr(main.domain, "agent_configured", lambda *a, **k: True)
     v = asyncio.run(main._scamshield_verdict("ACB", "x", 85_000_000, "", s))
     assert v.level == "danger" and v.source == "fallback" and v.steps == []
+
+
+def test_chat_banking_mang_cau_noi_thanh_noi_dung(monkeypatch):
+    """Nội dung chuyển khoản phải là NGUYÊN câu khách gõ, để precheck/Scam Shield
+    đọc được ngữ cảnh và nhận ra kịch bản lừa đảo. Không có nó thì memo trung
+    tính và mọi kịch bản (công an, đầu tư, shipper...) lọt lưới qua chatpay."""
+    _gia_lap_agent_dong_bo(monkeypatch, '{"intent": "transfer", "recipient": "Trung"}', [])
+    cau = "chuyển cho Trung 85 triệu, công an bảo chuyển gấp để chứng minh trong sạch"
+    b = client.post("/api/chat-banking/parse", json={"message": cau}).json()
+    assert b["source"] == "agent"
+    assert b["note"] == cau            # nguyên câu, để Guardian bắt "công an"
+    assert "công an" in b["note"]
+
+
+def test_chat_banking_khong_phai_transfer_thi_khong_co_noi_dung(monkeypatch):
+    """Xem danh bạ / câu linh tinh không phải lệnh chuyển thì không đặt nội dung."""
+    _gia_lap_agent_dong_bo(monkeypatch, '{"intent": "list_beneficiaries"}', [])
+    b = client.post("/api/chat-banking/parse", json={"message": "danh bạ của tôi"}).json()
+    assert b.get("note") is None

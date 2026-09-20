@@ -1936,9 +1936,13 @@ async def chat_banking_parse(payload: ChatBankingRequest) -> ChatBankingDraft:
         goi_y = got.get("amount")
         so_tien = goi_y if isinstance(goi_y, int) and goi_y > 0 else None
     nguoi_nhan = got.get("recipient") if isinstance(got.get("recipient"), str) else None
+    # Nội dung chuyển khoản mang NGUYÊN câu khách nói (cắt gọn), để màn chuyển
+    # tiền và precheck đọc được ngữ cảnh — Guardian mới nhận ra kịch bản lừa đảo.
+    noi_dung = payload.message.strip()[:140] if y_dinh == "transfer" else None
     return ChatBankingDraft(
         intent=y_dinh, amount=so_tien, recipient=nguoi_nhan,
         matches=_khop_nguoi_nhan(nguoi_nhan, danh_ba) if nguoi_nhan else [],
+        note=noi_dung,
         source="agent", steps=[_chat_step(b) for b in buoc],
     )
 
