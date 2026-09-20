@@ -2073,7 +2073,7 @@ def budget_plan(customer_id: int):
 
     thu = dt["income"] or 1
     muc_tieu_tiet_kiem = round(thu * 0.2)
-    con_de_chi = thu - muc_tieu_tiet_kiem
+    con_de_chi = round(thu) - muc_tieu_tiet_kiem
     # Trần đề xuất: thiết yếu tối đa 55% thu nhập, cam kết + co giãn chia phần còn lại.
     de_xuat = {
         "essential": min(round(dt["essential"]), round(thu * 0.55)),

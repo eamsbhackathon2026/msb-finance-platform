@@ -906,3 +906,14 @@ def test_budget_muc_tieu_tiet_kiem_20_phan_tram(monkeypatch):
 def test_ba_tool_advisor_moi_co_trong_danh_muc():
     ten = {t["name"] for t in main.AGENT_TOOLS}
     assert {"optimize_idle_cash", "check_loan_affordability", "make_budget_plan"} <= ten
+
+
+def test_budget_khong_tra_so_thuc_le(monkeypatch):
+    """recommended của nhóm co giãn từng là float (247000.0) do thu nhập trung vị
+    là float. Mọi con số tiền trả ra API phải là số nguyên."""
+    monkeypatch.setattr(main, "query_one", lambda *a, **k: {"x": 1})
+    monkeypatch.setattr(main, "_dong_tien_dien_hinh", _dt_100008)
+    b = client.get("/customers/100008/budget-plan").json()
+    for r in b["buckets"]:
+        for k in ("current", "recommended", "over_by"):
+            assert isinstance(r[k], int), f"{r['bucket']}.{k} = {r[k]!r} không phải int"
