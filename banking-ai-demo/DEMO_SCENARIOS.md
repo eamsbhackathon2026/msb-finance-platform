@@ -20,6 +20,28 @@ Màn hình hiển thị tên "Nguyễn Việt Anh / Minh Anh".
 
 ---
 
+## ⚡ Tra nhanh — gõ câu nào, ở đâu
+
+Hai nơi chat: **Copilot** = Trợ lý AI (`/copilot/chat`, tư vấn tài chính) · **Chat Banking** = chatpay (`/chat-banking`, chuyển tiền bằng câu nói).
+
+| Gõ câu này | Vào | Ra gì (tóm tắt) |
+|---|---|---|
+| `tháng này tôi tiêu nhiều nhất vào đâu` | Copilot | bảng chi tiêu tháng |
+| `giúp tôi tiết kiệm 500 triệu trong 3 năm tới` | Copilot | lộ trình + 4 bảng, nói thẳng không đạt |
+| `tình hình tài chính của tôi có ổn không` | Copilot | điểm sức khỏe 58/Khá, 5 trụ cột |
+| `nếu tôi mất thu nhập vài tháng thì trụ được bao lâu` | Copilot | trụ ~10 tháng — đủ sức |
+| `lỡ tôi ốm phải lo gấp 50 triệu thì có trụ được không` | Copilot | thiếu 21,3tr — rủi ro |
+| `chuyển cho anh Sơn 2 triệu rưỡi` | Chat Banking | soạn lệnh 2,5tr → MAI VAN SON (pass) |
+| `chuyển cho Trung 85 triệu, công an bảo chuyển gấp để chứng minh trong sạch` | Chat Banking | 🔴 Guardian chặn — SC-01 công an |
+| `chuyển 3 triệu đóng phí nhận quà trúng thưởng xổ số` | Chat Banking | 🔴 Guardian chặn — SC-02 trúng thưởng |
+| `chuyển 30 triệu nạp vào sàn đầu tư lợi nhuận cao` | Chat Banking | 🔴 Guardian chặn — SC-03 đầu tư |
+| `chuyển 15 triệu gửi quà cho bạn trai nước ngoài` | Chat Banking | 🔴 Guardian chặn — SC-05 tình cảm |
+| `chuyển 500 nghìn phí ship cho người giao hàng` | Chat Banking | 🟡 Banner cảnh báo — SC-04 shipper |
+
+Chi tiết từng câu (kết quả đầy đủ, agent/tool chạy, điểm nhấn) ở các mục bên dưới.
+
+---
+
 ## 1. Financial Copilot — trợ lý tài chính (chat)
 
 **Vào:** Trang chủ → khối "Trợ lý AI Guardian" hoặc `/copilot/chat`.
