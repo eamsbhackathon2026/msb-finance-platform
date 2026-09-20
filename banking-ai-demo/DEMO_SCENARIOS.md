@@ -195,6 +195,24 @@ Agent **Scam Shield** (`01a0ba02`, `qwen3.6-flash`) gọi 4 công cụ thật
 
 ---
 
+## 4B. Trung tâm an toàn — Hạn mức chi an toàn (khách tự đặt) ⭐
+
+**Vào:** `/safety-center` → mục **Lớp bảo vệ** → **Hạn mức chi an toàn**.
+Đây là thao tác UI (không phải câu chat) — khách tự đặt ngưỡng cảnh báo.
+
+Kịch bản demo (thao tác, không gõ chat):
+1. Vào Trung tâm an toàn → Lớp bảo vệ → bấm dòng **"Cảnh báo khi một giao dịch vượt …"**
+   → nhập ngưỡng, ví dụ **3.000.000 ₫** → **Lưu**.
+2. Vào Chuyển tiền → chọn người nhận → nhập số tiền **trên ngưỡng** (vd 5.000.000 ₫).
+3. Ngay dưới ô số tiền hiện banner: *"Giao dịch này vượt **hạn mức chi an toàn** bạn đặt
+   (3.000.000 ₫). Hãy kiểm tra kỹ trước khi chuyển."*
+
+- **Điểm nhấn:** lớp bảo vệ do **chính khách chủ động** đặt, độc lập với engine Guardian —
+  ngưỡng lưu ở gateway (`PATCH /api/safety-center/protections/spending_warn`), màn chuyển
+  tiền đọc lại và cảnh báo tức thì client-side. Mặc định 10.000.000 ₫, đổi được bất kỳ lúc nào.
+
+---
+
 ## 5. Ops — màn giám sát nội bộ (ngân hàng)
 
 **Vào:** `/ops` (đăng nhập vận hành riêng, tách khỏi phiên khách).
