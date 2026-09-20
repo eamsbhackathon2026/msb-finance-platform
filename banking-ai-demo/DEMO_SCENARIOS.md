@@ -31,6 +31,9 @@ Hai nơi chat: **Copilot** = Trợ lý AI (`/copilot/chat`, tư vấn tài chín
 | `tình hình tài chính của tôi có ổn không` | Copilot | điểm sức khỏe 58/Khá, 5 trụ cột |
 | `nếu tôi mất thu nhập vài tháng thì trụ được bao lâu` | Copilot | trụ ~10 tháng — đủ sức |
 | `lỡ tôi ốm phải lo gấp 50 triệu thì có trụ được không` | Copilot | thiếu 21,3tr — rủi ro |
+| `tôi có tiền để không trong tài khoản, nên gửi tiết kiệm thế nào` | Copilot | giữ 16,7tr + gửi 11,957tr, lãi 705k/năm |
+| `tôi muốn vay 60 triệu trả trong 12 tháng, có kham nổi không` | Copilot | quá sức (69% thu nhập), an toàn ~34,8tr |
+| `giúp tôi lập ngân sách chi tiêu hàng tháng` | Copilot | bảng 3 nhóm, tiết kiệm 13% vs mục tiêu 20% |
 | `chuyển cho anh Sơn 2 triệu rưỡi` | Chat Banking | soạn lệnh 2,5tr → MAI VAN SON (pass) |
 | `chuyển cho Trung 85 triệu, công an bảo chuyển gấp để chứng minh trong sạch` | Chat Banking | 🔴 Guardian chặn — SC-01 công an |
 | `chuyển 3 triệu đóng phí nhận quà trúng thưởng xổ số` | Chat Banking | 🔴 Guardian chặn — SC-02 trúng thưởng |
@@ -86,7 +89,31 @@ gọi 19 công cụ domain. Mỗi câu trả lời có bảng số do gateway/ag
 - **Agent gọi:** `get_portfolio` → `check_resilience`.
 - **Điểm nhấn:** mô phỏng tương lai bất định, rất chạm với khách cao tuổi.
 
-### 1.5. Câu phụ (nếu còn thời gian)
+### 1.6. Đánh thức tiền nhàn rỗi ⭐
+- **Gửi lên:** Copilot. **Gõ:** `tôi có tiền để không trong tài khoản, nên gửi tiết kiệm thế nào`
+- **Agent gọi:** `get_portfolio` → `optimize_idle_cash`.
+- **Kết quả:** giữ **16.722.000 ₫** làm quỹ dự phòng (6 tháng chi thiết yếu), đem gửi
+  **11.957.000 ₫** kỳ 12 tháng; gói lãi cao nhất 5,9% → nhận thêm **705.463 ₫**. Nhấn: tiền
+  đang để không mỗi năm lỡ mất đúng khoản lãi đó.
+- **Điểm nhấn:** biến phát hiện "tiền nhàn rỗi" ở khám sức khỏe (1.3) thành hành động cụ
+  thể; giữ quỹ dự phòng trước, không khuyên khoá sạch tiền.
+
+### 1.7. Vay bao nhiêu thì kham nổi ⭐
+- **Gửi lên:** Copilot. **Gõ:** `tôi muốn vay 60 triệu trả trong 12 tháng, có kham nổi không`
+- **Agent gọi:** `check_loan_affordability`.
+- **Kết quả:** nói thẳng **quá sức** — trả góp ~**5.233.187 ₫/tháng** (lãi 8,5%), bằng **69%
+  thu nhập**; mức vay an toàn hơn ~**34,8 triệu**, hoặc kéo dài kỳ hạn để giảm trả góp.
+- **Điểm nhấn:** cố vấn có trách nhiệm — trả góp tính theo dư nợ giảm dần trên lãi thật,
+  không cổ vũ khoản vay khách gánh không nổi.
+
+### 1.8. Lập ngân sách hàng tháng
+- **Gửi lên:** Copilot. **Gõ:** `giúp tôi lập ngân sách chi tiêu hàng tháng`
+- **Agent gọi:** `make_budget_plan`.
+- **Kết quả:** bảng 3 nhóm (Thiết yếu 2,79tr · Cam kết 3,05tr · Co giãn 0,25tr) — đang tiêu
+  vs nên tiêu; đang để dành **13%**, mục tiêu **20%** thu nhập.
+- **Điểm nhấn:** kê đơn cụ thể (khác chẩn đoán ở 1.3); chỉ rõ nhóm nào vượt và nên tiết kiệm thêm.
+
+### 1.9. Câu phụ (nếu còn thời gian)
 - `so sánh chi tiêu mấy tháng gần đây` — bảng nhiều tháng.
 - `dự báo số dư cuối tháng` — `get_cashflow_forecast`.
 
