@@ -35,6 +35,7 @@ Hai nơi chat: **Copilot** = Trợ lý AI (`/copilot/chat`, tư vấn tài chín
 | `tôi muốn vay 60 triệu trả trong 12 tháng, có kham nổi không` | Copilot | quá sức (69% thu nhập), an toàn ~34,8tr |
 | `giúp tôi lập ngân sách chi tiêu hàng tháng` | Copilot | bảng 3 nhóm, tiết kiệm 13% vs mục tiêu 20% |
 | `chuyển cho anh Sơn 2 triệu rưỡi` | Chat Banking | soạn lệnh 2,5tr → MAI VAN SON (pass) |
+| `công an vừa gọi phạt vi phạm giao thông 3 triệu, gửi Nguyễn Văn Bình VCB` | Chat Banking | 🔴 cảnh báo ngay — người nhận **lạ**, giả danh công an |
 | `chuyển cho Trung 85 triệu, công an bảo chuyển gấp để chứng minh trong sạch` | Chat Banking | 🔴 Guardian chặn — SC-01 công an |
 | `chuyển 3 triệu đóng phí nhận quà trúng thưởng xổ số` | Chat Banking | 🔴 Guardian chặn — SC-02 trúng thưởng |
 | `chuyển 30 triệu nạp vào sàn đầu tư lợi nhuận cao` | Chat Banking | 🔴 Guardian chặn — SC-03 đầu tư |
@@ -150,6 +151,12 @@ chặn ngay tại câu nói.*
 | **SC-03** Đầu tư | `chuyển 30 triệu nạp vào sàn đầu tư lợi nhuận cao` | 🔴 **Guardian chặn** (S04, 57đ) | "Rút được lần đầu là cách họ lấy niềm tin" |
 | **SC-05** Tình cảm | `chuyển 15 triệu gửi quà cho bạn trai nước ngoài` | 🔴 **Guardian chặn** (S08, 52đ) | cảnh báo lừa đảo tình cảm/gửi quà |
 | **SC-04** Shipper | `chuyển 500 nghìn phí ship cho người giao hàng` | 🟡 **Banner cảnh báo** (S11, 43đ) | *(mức trung bình — banner ngay trên màn, không chèn Guardian)* |
+
+### 2B-bis. Người nhận LẠ (không có trong danh bạ) — vẫn bắt ⭐
+Giả danh công an luôn dùng **tài khoản lạ**. Chatpay bắt ngay tại câu nói, không cần người nhận có trong danh bạ:
+- **Gõ:** `công an vừa gọi phạt vi phạm giao thông 3 triệu, gửi Nguyễn Văn Bình ngân hàng VCB`
+- **Kết quả:** bot **tạm dừng và hiện thẻ cảnh báo đỏ** ngay trong chat — *"Công an không bao giờ yêu cầu chuyển tiền…"* + *"Guardian khuyên: không chuyển, gọi 1900 6083"*. Không soạn lệnh.
+- **Cơ chế:** gateway đối chiếu **nội dung câu** với playbook (`match_scam`), chỉ cảnh báo khi khớp **từ khóa** (không kêu oan giao dịch thường tới người lạ như "gửi Hoa 2 triệu ăn trưa").
 
 **Lưu ý demo:**
 - SC-01..SC-03, SC-05 → điểm ≥ ngưỡng nên **chèn màn Guardian** (2 lượt: lý do + khuyến cáo Scam Shield). Đúng mức "nguy hiểm cao".
