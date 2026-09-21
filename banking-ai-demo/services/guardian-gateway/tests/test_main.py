@@ -260,6 +260,7 @@ def test_openapi_phuc_vu_dung_cac_endpoint_fe_goi():
         "/api/invest/maturing-deposits",
         "/api/invest/open",
         "/api/chat-banking/parse",
+        "/api/chat-banking/parse/stream",
         "/api/transfer/intervene",
         "/api/transfer/intervene/{decision_id}",
         "/api/products/rates",
@@ -2058,6 +2059,231 @@ def test_chat_banking_hong_thi_khong_kem_buoc(monkeypatch):
     b = r.json()
     # Nhánh dự phòng do gateway dựng, không có bước nào của agent để kể.
     assert b["source"] == "fallback" and b.get("steps", []) == []
+
+
+# ---- POST /api/chat-banking/parse/stream (SSE) -------------------------------
+#
+# Agent Chat Banking cố ý không gắn công cụ, nên nó không có bước nào để kể. Thứ
+# khách thấy trên dòng chờ là việc CỦA GATEWAY; các test dưới đây canh đúng chỗ đó.
+
+def _doc_chatpay_stream(body: str) -> tuple[list[dict], list[str], dict | None, bool]:
+    """Giải mã stream chatpay đúng như bộ parse trong src/lib/api.ts."""
+    buoc, nghi, draft, xong = [], [], None, False
+    for line in body.split("\n"):
+        if not line.startswith("data:"):
+            continue
+        payload = line[5:].strip()
+        if payload == "[DONE]":
+            xong = True
+            continue
+        parsed = json.loads(payload)
+        if "step" in parsed:
+            buoc.append(parsed["step"])
+        elif "reasoning" in parsed:
+            nghi.append(parsed["reasoning"])
+        elif "draft" in parsed:
+            draft = parsed["draft"]
+    return buoc, nghi, draft, xong
+
+
+def _gia_lap_chatpay_stream(monkeypatch, su_kien):
+    """Thay domain.agent_events cho đường chatpay và bật cờ đã cấu hình agent.
+
+    `su_kien` là danh sách tuple (loại, giá trị) đúng như agent_events phát ra.
+    """
+    async def fake(question, agent_id=None, kind="copilot", customer_id=None,
+                   session_key=None, decision_id=None):
+        for loai, gia_tri in su_kien:
+            yield loai, gia_tri
+
+    monkeypatch.setattr(main.domain, "agent_events", fake)
+    monkeypatch.setattr(main.domain, "agent_configured", lambda *a, **k: True)
+
+
+def _nhan_buoc(buoc: list[dict], call_id: str) -> list[str]:
+    return [b["status"] for b in buoc if b["callId"] == call_id]
+
+
+def test_chatpay_stream_ke_tung_viec_gateway_dang_lam(monkeypatch):
+    """Khách phải thấy trợ lý đang làm gì thay vì ba chấm trống."""
+    _gia_lap_chatpay_stream(monkeypatch, [("output", '{"intent": "transfer", "recipient": "Khanh"}')])
+    r = client.post("/api/chat-banking/parse/stream",
+                    json={"message": "chuyen 500k cho anh Khanh"})
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("text/event-stream")
+    buoc, _, draft, xong = _doc_chatpay_stream(r.text)
+    assert xong, "thiếu dòng kết thúc data: [DONE]"
+    # Mỗi việc kể hai nhịp: đang làm rồi xong — đúng cách FE gộp theo callId.
+    assert _nhan_buoc(buoc, "gw-book") == ["running", "done"]
+    assert _nhan_buoc(buoc, "gw-parse") == ["running", "done"]
+    assert _nhan_buoc(buoc, "gw-scam") == ["running", "done"]
+    # Nhãn là cụm động từ không chủ ngữ để FE ghép "Em đang …" / "Em đã …".
+    assert all(not b["label"][0].isupper() for b in buoc)
+    assert draft["source"] == "agent"
+
+
+def test_chatpay_stream_va_json_ra_cung_mot_draft(monkeypatch):
+    """Hai đường phải cho cùng một kết quả, nếu không FE rơi về JSON là đổi hành vi."""
+    cau_tra_loi = '{"intent": "transfer", "recipient": "Khanh"}'
+    cau_hoi = {"message": "chuyen 500k cho anh Khanh"}
+
+    _gia_lap_agent_dong_bo(monkeypatch, cau_tra_loi, [])
+    json_draft = client.post("/api/chat-banking/parse", json=cau_hoi).json()
+
+    _gia_lap_chatpay_stream(monkeypatch, [("output", cau_tra_loi)])
+    _, _, stream_draft, _ = _doc_chatpay_stream(
+        client.post("/api/chat-banking/parse/stream", json=cau_hoi).text)
+    assert stream_draft == json_draft
+
+
+def test_chatpay_stream_chuyen_tiep_suy_nghi_cua_model(monkeypatch):
+    """Model có kể suy nghĩ thì dòng chờ nói lời của nó, không phải câu chống trống."""
+    _gia_lap_chatpay_stream(monkeypatch, [
+        ("reasoning", "Người nhận là "),
+        ("reasoning", "anh Khánh."),
+        ("output", '{"intent": "transfer", "recipient": "Khanh"}'),
+    ])
+    _, nghi, draft, _ = _doc_chatpay_stream(
+        client.post("/api/chat-banking/parse/stream",
+                    json={"message": "chuyen 500k cho anh Khanh"}).text)
+    assert nghi == ["Người nhận là ", "anh Khánh."]
+    assert draft["source"] == "agent"
+
+
+def test_chatpay_stream_agent_hong_van_ra_draft_fallback(monkeypatch):
+    """Agent chết giữa chừng thì chat vẫn phải đi tiếp bằng bộ luật của FE."""
+    async def hong(question, agent_id=None, kind="copilot", customer_id=None,
+                   session_key=None, decision_id=None):
+        raise RuntimeError("agent chết")
+        yield  # pragma: no cover — giữ hàm là generator
+
+    monkeypatch.setattr(main.domain, "agent_events", hong)
+    monkeypatch.setattr(main.domain, "agent_configured", lambda *a, **k: True)
+    buoc, _, draft, xong = _doc_chatpay_stream(
+        client.post("/api/chat-banking/parse/stream",
+                    json={"message": "chuyen 500k cho anh Khanh"}).text)
+    assert xong and draft["source"] == "fallback"
+    # Bước hiểu câu phải hiện là CHƯA xong, đừng báo xanh cho việc đã hỏng.
+    assert _nhan_buoc(buoc, "gw-parse") == ["running", "error"]
+    # Chống lừa đảo không phụ thuộc agent nên vẫn chạy.
+    assert _nhan_buoc(buoc, "gw-scam") == ["running", "done"]
+
+
+def test_chatpay_stream_cau_lua_dao_co_them_buoc_cham_diem(monkeypatch):
+    """Câu giả danh công an tốn thêm một nhịp chấm điểm — nói ra để khách biết vì sao chờ."""
+    _gia_lap_chatpay_stream(monkeypatch, [
+        ("output", '{"intent": "transfer", "recipient": "Nguyễn Văn Bình"}')])
+    _gia_lap_scam_match(monkeypatch, True, ["từ khóa: cong an", "người nhận mới"],
+                        {"scenario_id": "S01", "advice_title": "Công an không bao giờ yêu cầu chuyển tiền",
+                         "advice_body": "...", "recommended_action": "cancel"})
+    buoc, _, draft, _ = _doc_chatpay_stream(
+        client.post("/api/chat-banking/parse/stream",
+                    json={"message": "công an vừa gọi phạt vi phạm giao thông 3 triệu, gửi Nguyễn Văn Bình VCB"}).text)
+    assert _nhan_buoc(buoc, "gw-risk") == ["running", "done"]
+    assert draft["scamWarning"]["scenarioId"] == "S01"
+
+
+def test_chatpay_stream_agent_treo_van_ra_draft_va_done(monkeypatch):
+    """Agent kể vài câu rồi treo: lượt phải tự dừng đúng hạn và vẫn về đích."""
+    import asyncio as _asyncio
+
+    async def treo(question, agent_id=None, kind="copilot", customer_id=None,
+                   session_key=None, decision_id=None):
+        yield "reasoning", "đang xem câu này…"
+        await _asyncio.sleep(30)
+        yield "output", '{"intent": "transfer"}'   # không bao giờ tới
+
+    monkeypatch.setattr(main.domain, "agent_events", treo)
+    monkeypatch.setattr(main.domain, "agent_configured", lambda *a, **k: True)
+    monkeypatch.setattr(main, "CHATBANKING_TIMEOUT_S", 0.2)
+    buoc, nghi, draft, xong = _doc_chatpay_stream(
+        client.post("/api/chat-banking/parse/stream",
+                    json={"message": "chuyen 500k cho anh Khanh"}).text)
+    assert xong, "stream bị cắt giữa chừng, thiếu [DONE]"
+    assert draft is not None and draft["source"] == "fallback"
+    assert nghi == ["đang xem câu này…"]            # câu kịp nghĩ vẫn tới được khách
+    assert _nhan_buoc(buoc, "gw-parse") == ["running", "error"]
+
+
+def test_chatpay_su_kien_nguoi_doc_cham_van_ra_draft(monkeypatch):
+    """Hết trần chờ lúc người đọc đang chậm thì lượt vẫn phải về đích.
+
+    Trần chờ phải đặt trên TỪNG sự kiện. Bọc `asyncio.timeout` quanh cả vòng lặp
+    có `yield` thì lúc hết giờ lệnh hủy bắn vào TASK — mà task ấy đang nằm trong
+    chỗ ghi SSE ra socket của khách, không nằm trong generator. Kết quả: hàm bị
+    cắt ngang, khách không nhận được draft lẫn [DONE], và cả lượt agent chạy lại
+    từ đầu. Mạng khách chậm đúng lúc mô hình kể nhiều là đủ để gặp.
+
+    Đi thẳng vào generator thay vì qua TestClient: TestClient đọc tức thì nên
+    không bao giờ dựng lại được cảnh người đọc chậm.
+    """
+    import asyncio as _asyncio
+
+    async def treo(question, agent_id=None, kind="copilot", customer_id=None,
+                   session_key=None, decision_id=None):
+        yield "reasoning", "đang xem câu này…"
+        await _asyncio.sleep(30)
+
+    monkeypatch.setattr(main.domain, "agent_events", treo)
+    monkeypatch.setattr(main.domain, "agent_configured", lambda *a, **k: True)
+    monkeypatch.setattr(main, "CHATBANKING_TIMEOUT_S", 0.2)
+
+    async def doc_cham() -> list[str]:
+        thay = []
+        async for loai, gia_tri in main._chat_banking_events(
+                "chuyen 500k cho anh Khanh", live=True):
+            thay.append(loai)
+            if loai == "reasoning":
+                # Khách đọc chậm hơn trần chờ: generator đang dừng ở `yield`
+                # đúng lúc hết giờ.
+                await _asyncio.sleep(0.5)
+        return thay
+
+    thay = _asyncio.run(doc_cham())
+    assert "draft" in thay, "lượt bị cắt trước khi kịp trả kết quả"
+
+
+def test_chatpay_stream_playbook_chet_thi_noi_la_chua_doi_chieu(monkeypatch):
+    """Không được khoe đã đối chiếu kịch bản lừa đảo khi playbook không trả lời.
+
+    Đây là nhánh dựng ra để chống lừa đảo: báo xanh lúc scam-knowledge-service
+    chết là trấn an khách sai ở đúng chỗ nguy hiểm nhất.
+    """
+    _gia_lap_chatpay_stream(monkeypatch, [
+        ("output", '{"intent": "transfer", "recipient": "Nguyễn Văn Bình"}')])
+    # Domain BẬT (khác chế độ demo offline) nhưng playbook im — tức là sự cố.
+    # Danh bạ chặn riêng để test không ngồi chờ hết trần gọi service thật.
+    monkeypatch.setattr(main.domain, "DOMAIN_ENABLED", True)
+    async def khong_co(*a, **k):
+        return None
+    monkeypatch.setattr(main.domain, "beneficiaries", khong_co)
+    monkeypatch.setattr(main.domain, "scam_match", khong_co)
+    buoc, _, draft, _ = _doc_chatpay_stream(
+        client.post("/api/chat-banking/parse/stream",
+                    json={"message": "công an vừa gọi phạt 3 triệu, gửi Nguyễn Văn Bình VCB"}).text)
+    assert _nhan_buoc(buoc, "gw-scam") == ["running", "error"]
+    assert draft.get("scamWarning") is None
+
+
+def test_chatpay_stream_agent_noi_lac_de_thi_bao_chua_hieu_cau(monkeypatch):
+    """Agent phát chữ nhưng không bóc được ý định → draft rơi fallback, nên bước
+    hiểu câu phải báo chưa xong thay vì xanh."""
+    _gia_lap_chatpay_stream(monkeypatch, [("text", "   ")])
+    buoc, _, draft, _ = _doc_chatpay_stream(
+        client.post("/api/chat-banking/parse/stream",
+                    json={"message": "chuyen 500k cho anh Khanh"}).text)
+    assert _nhan_buoc(buoc, "gw-parse") == ["running", "error"]
+    assert draft["source"] == "fallback"
+
+
+def test_chatpay_stream_giao_dich_thuong_khong_cham_diem(monkeypatch):
+    """Không có dấu hiệu lừa đảo thì không kể một bước chưa từng chạy."""
+    _gia_lap_chatpay_stream(monkeypatch, [
+        ("output", '{"intent": "transfer", "recipient": "Khanh"}')])
+    buoc, _, _, _ = _doc_chatpay_stream(
+        client.post("/api/chat-banking/parse/stream",
+                    json={"message": "chuyen 500k cho anh Khanh"}).text)
+    assert _nhan_buoc(buoc, "gw-risk") == []
 
 
 def test_scamshield_ket_luan_kem_buoc_da_tra(monkeypatch):

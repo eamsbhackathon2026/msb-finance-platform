@@ -132,6 +132,15 @@ người nhận đối chiếu **danh bạ thật** của đúng khách đang đ
 - **Gõ:** `gửi Trung 20 triệu` → 20.000.000 ₫ → NGUYEN VAN TRUNG.
 - **Gõ:** `danh bạ của tôi` → liệt kê người thụ hưởng.
 - **Điểm nhấn:** hiểu tiếng lóng số tiền ("rưỡi", "củ", "2tr5"), khớp tên có dấu/không dấu.
+- **Dòng suy nghĩ:** trong lúc chờ, chat kể từng việc đang làm — tra danh bạ, hiểu
+  câu, đối chiếu kịch bản lừa đảo, chấm điểm rủi ro — rồi gấp lại thành mục
+  "Thinking step" dưới câu trả lời. Đây là việc của **gateway** (`POST
+  /api/chat-banking/parse/stream`), không phải công cụ của agent: agent này cố ý
+  không gắn công cụ để giữ tốc độ. Stream hỏng thì tự rơi về `POST
+  /api/chat-banking/parse` và chat chạy như cũ.
+- **Đọc được lúc hệ thống yếu:** bước nào không xong sẽ hiện dấu cảnh báo kèm chữ
+  "Em chưa…". Nếu scam-knowledge-service chết, bước "đối chiếu kịch bản lừa đảo"
+  báo đỏ thay vì lặng lẽ báo xanh — đừng bỏ qua dấu hiệu này khi demo.
 
 ---
 

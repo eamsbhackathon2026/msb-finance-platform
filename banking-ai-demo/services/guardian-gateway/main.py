@@ -34,6 +34,7 @@ import asyncio
 import json
 import os
 import re
+import time
 import unicodedata
 import logging
 from datetime import datetime, timedelta, timezone
@@ -1006,6 +1007,11 @@ async def _spending_visual(question: str) -> tuple[ChatTable | None, ChatChart |
     return None, None, False
 
 
+def _sse(obj: dict) -> bytes:
+    """Một sự kiện SSE. FE bỏ qua mọi dòng không mở đầu bằng `data:`."""
+    return f"data: {json.dumps(obj, ensure_ascii=False)}\n\n".encode()
+
+
 def _chat_step(step: domain.AgentStep) -> ChatStep:
     """Đổi bước của domain sang hợp đồng FE. Nhãn giữ NGUYÊN VĂN.
 
@@ -1053,9 +1059,6 @@ async def copilot_chat(payload: ChatRequest) -> StreamingResponse:
     if data_chart is not None:
         chart = data_chart
 
-    def sse(obj: dict) -> bytes:
-        return f"data: {json.dumps(obj, ensure_ascii=False)}\n\n".encode()
-
     async def replay(text: str) -> AsyncIterator[bytes]:
         """Phát lại một câu đã có sẵn theo nhịp token, cho nhánh dự phòng.
 
@@ -1063,7 +1066,7 @@ async def copilot_chat(payload: ChatRequest) -> StreamingResponse:
         không mất dấu cách.
         """
         for token in (t for t in re.split(r"(\s+)", text) if t):
-            yield sse({"token": token})
+            yield _sse({"token": token})
             await asyncio.sleep(CHAT_TOKEN_DELAY_MS / 1000)
 
     # Tin nhắn mang chỉ dẫn mạo danh vẫn được trả lời — trợ lý có luật riêng để
@@ -1077,7 +1080,7 @@ async def copilot_chat(payload: ChatRequest) -> StreamingResponse:
         # dòng chảy vì FE render văn bản thuần.
         if injection_reason:
             logger.warning("copilot: chỉ dẫn lạ trong tin nhắn khách — %s", injection_reason)
-            yield sse({"notice": ChatNotice(
+            yield _sse({"notice": ChatNotice(
                 kind="prompt_injection",
                 title="Tin nhắn có chỉ dẫn lạ",
                 detail=f"{injection_reason} Trợ lý bỏ qua chỉ dẫn đó và chỉ trả lời theo dữ liệu ngân hàng. "
@@ -1103,12 +1106,12 @@ async def copilot_chat(payload: ChatRequest) -> StreamingResponse:
                 if loai == "reasoning":
                     # Tóm tắt suy nghĩ đi cùng đường với bước: cùng là chuyện trợ
                     # lý đang làm gì, và FE hiện chúng trên cùng một dòng.
-                    yield sse({"reasoning": gia_tri})
+                    yield _sse({"reasoning": gia_tri})
                     continue
                 if loai == "step":
                     # Phát NGAY, xen giữa token: giá trị của bước nằm ở chỗ khách
                     # thấy trợ lý đang làm gì trong lúc chờ, không phải sau khi xong.
-                    yield sse({"step": _chat_step(gia_tri).model_dump(by_alias=True)})
+                    yield _sse({"step": _chat_step(gia_tri).model_dump(by_alias=True)})
                     continue
                 if loai != "text":
                     continue
@@ -1117,11 +1120,11 @@ async def copilot_chat(payload: ChatRequest) -> StreamingResponse:
                 clean = plain.feed(piece)
                 if clean:
                     emitted = True
-                    yield sse({"token": clean})
+                    yield _sse({"token": clean})
             rest = plain.close()
             if rest:
                 emitted = True
-                yield sse({"token": rest})
+                yield _sse({"token": rest})
         except domain.AgentBusy:
             # Hỏi dồn khi câu trước chưa trả lời xong. Nói thành lời, đừng im
             # lặng rơi về kịch bản — người dùng cần biết mình chỉ phải đợi.
@@ -1155,11 +1158,11 @@ async def copilot_chat(payload: ChatRequest) -> StreamingResponse:
         if bang is not None:
             # Sự kiện bảng phát sau khi hết token, trước biểu đồ. FE bỏ qua object
             # không có "token" nếu chưa hỗ trợ, nên không làm hỏng client cũ.
-            yield sse({"table": bang.model_dump(by_alias=True)})
+            yield _sse({"table": bang.model_dump(by_alias=True)})
         for g in grids:
-            yield sse({"grid": g.model_dump(by_alias=True)})
+            yield _sse({"grid": g.model_dump(by_alias=True)})
         if do_thi is not None:
-            yield sse({"chart": do_thi.model_dump(by_alias=True)})
+            yield _sse({"chart": do_thi.model_dump(by_alias=True)})
         yield b"data: [DONE]\n\n"
 
     return StreamingResponse(
@@ -1916,38 +1919,134 @@ def _doc_json_agent(raw: str) -> dict | None:
         return None
 
 
-@app.post("/api/chat-banking/parse", response_model=ChatBankingDraft, tags=["risk"],
-          response_model_exclude_none=True,
-          summary="Hiểu câu chuyển tiền của khách (agent) và khớp danh bạ thật")
-async def chat_banking_parse(payload: ChatBankingRequest) -> ChatBankingDraft:
-    """Chia việc rõ ràng: agent HIỂU CÂU, gateway TRA DANH BẠ.
+# Bước của CHÍNH GATEWAY trong một lượt chatpay.
+#
+# Khác bước công cụ: nhãn của công cụ do người vận hành đặt bên Agent Platform và
+# gateway phát lại nguyên văn (xem `_chat_step`). Bốn việc dưới đây là việc
+# gateway tự làm, không agent nào biết tới, nên nhãn phải nằm ở đây. Viết thành
+# cụm động từ KHÔNG chủ ngữ để FE ghép được cả "Em đang …" lẫn "Em đã …".
+_BUOC_CHATPAY = {
+    "gw-book": "tra danh bạ người nhận của anh/chị",
+    "gw-parse": "hiểu câu chuyển tiền của anh/chị",
+    "gw-scam": "đối chiếu kịch bản lừa đảo",
+    "gw-risk": "chấm điểm rủi ro giao dịch",
+}
+
+
+def _buoc_chatpay(call_id: str, status: str, bat_dau: float | None = None) -> ChatStep:
+    """Một bước của gateway. Có `bat_dau` nghĩa là bước đã xong, kèm thời gian tốn."""
+    return ChatStep(
+        call_id=call_id, label=_BUOC_CHATPAY[call_id], status=status,
+        duration_ms=None if bat_dau is None else round((time.monotonic() - bat_dau) * 1000),
+    )
+
+
+async def _chat_banking_events(message: str, *, live: bool) -> AsyncIterator[tuple[str, object]]:
+    """Dựng ý định chuyển tiền cho một câu chatpay, kể lại từng việc trong lúc làm.
+
+    Chia việc rõ ràng: agent HIỂU CÂU, gateway TRA DANH BẠ.
 
     Không để mô hình tự trả về người nhận kèm số tài khoản — nó sẽ bịa ra một
     số trông rất thật. Agent chỉ đưa tên, gateway đối chiếu danh bạ thật của
     đúng khách đang đăng nhập rồi mới dựng thẻ soạn lệnh.
 
-    Agent lỗi hoặc quá chậm thì trả source="fallback" để FE dùng bộ luật regex
-    sẵn có — màn chuyển tiền không bao giờ đứng vì agent.
+    Phát ra:
+
+        ("step", ChatStep)       — việc gateway/agent đang làm
+        ("reasoning", "mẩu")     — suy nghĩ của mô hình, chỉ khi `live`
+        ("draft", ChatBankingDraft)  — kết quả, luôn là thứ cuối cùng
+
+    `live=True` đi bằng `domain.agent_events` để suy nghĩ của mô hình tới được
+    màn hình NGAY lúc nó nghĩ. `live=False` giữ nguyên `agent_answer_with_steps`
+    như trước, nên endpoint JSON không đổi một chút hành vi nào.
+
+    Agent lỗi hoặc quá chậm thì draft mang source="fallback" để FE dùng bộ luật
+    regex sẵn có — màn chuyển tiền không bao giờ đứng vì agent.
     """
+    moc = time.monotonic()
+    yield "step", _buoc_chatpay("gw-book", "running")
     danh_ba = await transfer_beneficiaries()
-    raw, buoc = None, []
+    yield "step", _buoc_chatpay("gw-book", "done", moc)
+
+    raw, buoc, da_hoi_agent = None, [], False
     if domain.agent_configured(domain.CHATBANKING_AGENT_ID):
-        try:
-            raw, buoc = await asyncio.wait_for(
-                domain.agent_answer_with_steps(payload.message,
-                                               agent_id=domain.CHATBANKING_AGENT_ID,
-                                               kind="chat_banking"),
-                timeout=CHATBANKING_TIMEOUT_S)
-        except Exception:
-            raw, buoc = None, []
+        moc = time.monotonic()
+        yield "step", _buoc_chatpay("gw-parse", "running")
+        if live:
+            # Đường stream đọc thẳng dòng sự kiện: chỉ ở đây mới có `reasoning`,
+            # thứ mà `agent_answer_with_steps` gom xong rồi vứt đi.
+            #
+            # Trần chờ đặt trên TỪNG sự kiện, không bọc cả vòng lặp. `asyncio.timeout`
+            # quanh một khối có `yield` sẽ hủy TASK đang chạy: hết giờ đúng lúc hàm
+            # này đang dừng ở `yield` (bên gọi còn ghi SSE ra socket) thì lệnh hủy
+            # rơi vào chỗ khác, response đứt giữa chừng — khách không nhận được
+            # draft lẫn `[DONE]` và cả lượt agent phải chạy lại từ đầu.
+            mau: list[str] = []
+            theo_id: dict[str, domain.AgentStep] = {}
+            su_kien = domain.agent_events(message, agent_id=domain.CHATBANKING_AGENT_ID,
+                                          kind="chat_banking")
+            han = time.monotonic() + CHATBANKING_TIMEOUT_S
+            try:
+                while True:
+                    con_lai = han - time.monotonic()
+                    if con_lai <= 0:
+                        logger.warning("chat-banking: agent quá %ss, dùng bộ luật dự phòng",
+                                       CHATBANKING_TIMEOUT_S)
+                        break
+                    try:
+                        loai, gia_tri = await asyncio.wait_for(anext(su_kien), con_lai)
+                    except StopAsyncIteration:
+                        break
+                    if loai == "reasoning":
+                        yield "reasoning", gia_tri
+                    elif loai == "step":
+                        # Bước công cụ của agent vẫn phát nguyên văn nhãn nền
+                        # tảng. Agent Chat Banking cố ý không gắn công cụ nên
+                        # thực tế hiếm khi có, nhưng gắn thêm ngày nào là
+                        # hiện được ngày đó.
+                        theo_id[gia_tri.call_id] = gia_tri
+                        yield "step", _chat_step(gia_tri)
+                    elif loai == "text":
+                        mau.append(gia_tri)
+                    elif loai == "output":
+                        raw = gia_tri
+            except Exception as err:
+                # Nuốt lỗi là đúng — chat còn bộ luật dự phòng để đi tiếp — nhưng
+                # nuốt im lặng thì người trực demo không biết agent đang hỏng.
+                logger.warning("chat-banking: dòng sự kiện agent hỏng (%s: %s)",
+                               type(err).__name__, err)
+            finally:
+                # Hủy giữa chừng để lại một generator dở: không đóng tay thì lần
+                # chạy bên Agent Platform còn treo và httpx giữ kết nối.
+                try:
+                    await su_kien.aclose()
+                except Exception:
+                    pass
+            raw = raw or "".join(mau) or None
+            buoc = list(theo_id.values())
+        else:
+            try:
+                raw, buoc = await asyncio.wait_for(
+                    domain.agent_answer_with_steps(message,
+                                                   agent_id=domain.CHATBANKING_AGENT_ID,
+                                                   kind="chat_banking"),
+                    timeout=CHATBANKING_TIMEOUT_S)
+            except Exception:
+                raw, buoc = None, []
+        da_hoi_agent = True
     got = _doc_json_agent(raw or "")
+    if da_hoi_agent:
+        # Xanh khi BÓC ĐƯỢC ý định, không phải khi agent có phát chữ: mô hình trả
+        # vài khoảng trắng hay một câu ngoài lề thì draft đã rơi về "fallback",
+        # lúc đó nói "em đã hiểu câu" là nói sai.
+        yield "step", _buoc_chatpay("gw-parse", "done" if got else "error", moc)
 
     # SỐ TIỀN TÍNH BẰNG CODE, không lấy số của mô hình.
     # qwen3.6-flash trả "3 triệu rưỡi" = 4.500.000 và "20 triệu rưỡi" =
     # 30.000.000 — sai một chữ số ở đây là khách chuyển nhầm tiền thật. Ưu tiên
     # đọc thẳng từ câu gốc; chỉ khi câu không có dạng số nào nhận ra được mới
     # dùng con số mô hình đưa (nếu có), và vẫn phải là số nguyên dương.
-    so_tien = _tien_tu_chu(payload.message)
+    so_tien = _tien_tu_chu(message)
     if so_tien is None and got:
         goi_y = got.get("amount")
         so_tien = goi_y if isinstance(goi_y, int) and goi_y > 0 else None
@@ -1973,23 +2072,89 @@ async def chat_banking_parse(payload: ChatBankingRequest) -> ChatBankingDraft:
     # gate theo intent của agent nên lọt. Nội dung mang NGUYÊN câu khách nói (cắt
     # gọn) để precheck + playbook đọc được ngữ cảnh.
     la_lenh_chuyen = y_dinh == "transfer" or bool(so_tien)
-    noi_dung = payload.message.strip()[:140] if la_lenh_chuyen else None
-    canh_bao = await _canh_bao_lua_dao(
+    noi_dung = message.strip()[:140] if la_lenh_chuyen else None
+    moc = time.monotonic()
+    yield "step", _buoc_chatpay("gw-scam", "running")
+    canh_bao, tra_duoc = await _canh_bao_lua_dao(
         "transfer" if la_lenh_chuyen else y_dinh, noi_dung, so_tien, khop)
+    # Playbook không trả lời (service chết hoặc quá hạn) thì phải nói là CHƯA đối
+    # chiếu được. Báo xanh ở đây là trấn an sai ngay tại nhánh dựng ra để chống
+    # lừa đảo: khách thấy "em đã đối chiếu kịch bản lừa đảo" rồi yên tâm chuyển.
+    yield "step", _buoc_chatpay("gw-scam", "done" if tra_duoc else "error", moc)
     guardian = None
     if canh_bao:
         # Có dấu hiệu lừa đảo → tạo sẵn quyết định để chat dẫn vào MÀN GUARDIAN
         # đầy đủ (4 nút + Scam Shield lượt 2), thay vì chỉ thẻ cảnh báo tĩnh.
-        guardian = await _guardian_tu_chat(payload.message, noi_dung, so_tien, nguoi_nhan)
+        moc = time.monotonic()
+        yield "step", _buoc_chatpay("gw-risk", "running")
+        guardian = await _guardian_tu_chat(message, noi_dung, so_tien, nguoi_nhan)
+        # Không có handoff nghĩa là chưa tới mức intervene — đó là một kết quả
+        # bình thường của việc chấm điểm, không phải bước hỏng.
+        yield "step", _buoc_chatpay("gw-risk", "done", moc)
         # Agent lỡ gắn nhãn "other" cho câu lừa đảo → nâng lên "transfer" cho nhất
         # quán; FE cũng ưu tiên guardian handoff bất kể source.
         if y_dinh == "other":
             y_dinh = "transfer"
 
-    return ChatBankingDraft(
+    yield "draft", ChatBankingDraft(
         intent=y_dinh, amount=so_tien, recipient=nguoi_nhan,
         matches=khop, note=noi_dung, scam_warning=canh_bao, guardian=guardian,
         source=nguon, steps=buoc_out,
+    )
+
+
+@app.post("/api/chat-banking/parse", response_model=ChatBankingDraft, tags=["risk"],
+          response_model_exclude_none=True,
+          summary="Hiểu câu chuyển tiền của khách (agent) và khớp danh bạ thật")
+async def chat_banking_parse(payload: ChatBankingRequest) -> ChatBankingDraft:
+    """Đường JSON một nhịp: chỉ lấy kết quả, bỏ qua phần kể việc đang làm.
+
+    Giữ nguyên làm đường lui cho FE khi stream không dùng được.
+    """
+    su_kien = _chat_banking_events(payload.message, live=False)
+    try:
+        async for loai, gia_tri in su_kien:
+            if loai == "draft":
+                return gia_tri
+    finally:
+        await su_kien.aclose()
+    raise HTTPException(status_code=500, detail="không dựng được ý định chuyển tiền")
+
+
+@app.post("/api/chat-banking/parse/stream", tags=["risk"],
+          summary="Như /api/chat-banking/parse nhưng kể việc đang làm (SSE)")
+async def chat_banking_parse_stream(payload: ChatBankingRequest) -> StreamingResponse:
+    """Cùng kết quả với đường JSON, nhưng nói ra từng việc trong lúc còn làm.
+
+    Agent Chat Banking cố ý không gắn công cụ để một lượt chỉ 1–5 giây, nên nó
+    không có bước nào để kể. Thứ khách thấy ở đây là việc CỦA GATEWAY — tra danh
+    bạ, hiểu câu, đối chiếu kịch bản lừa đảo, chấm điểm rủi ro — cộng suy nghĩ
+    của mô hình nếu nhà cung cấp có phát.
+
+    Sự kiện: `{"step": {...}}`, `{"reasoning": "..."}`, rồi đúng một
+    `{"draft": {...}}` và `[DONE]`. Draft khớp từng trường với response của
+    đường JSON.
+
+    Header `X-Guardian-Data-Source` của lượt này không phản ánh các lời gọi
+    domain bên trong: chúng chạy sau khi response đã bắt đầu chảy. Cần đóng dấu
+    nguồn dữ liệu thì đọc ở đường JSON.
+    """
+    async def stream() -> AsyncIterator[bytes]:
+        async for loai, gia_tri in _chat_banking_events(payload.message, live=True):
+            if loai == "reasoning":
+                yield _sse({"reasoning": gia_tri})
+            elif loai == "step":
+                yield _sse({"step": gia_tri.model_dump(by_alias=True)})
+            elif loai == "draft":
+                # exclude_none khớp `response_model_exclude_none` của đường JSON,
+                # để hai đường trả về đúng một hình dạng.
+                yield _sse({"draft": gia_tri.model_dump(by_alias=True, exclude_none=True)})
+        yield b"data: [DONE]\n\n"
+
+    return StreamingResponse(
+        stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
 
 
@@ -2053,7 +2218,7 @@ async def _guardian_tu_chat(message: str, note: str | None, amount: int | None,
 
 
 async def _canh_bao_lua_dao(intent: str, note: str | None, amount: int | None,
-                            matches: list) -> ChatScamWarning | None:
+                            matches: list) -> tuple[ChatScamWarning | None, bool]:
     """Đối chiếu câu khách gõ với playbook lừa đảo, cảnh báo ngay trong chat.
 
     Bắt được cả khi người nhận KHÔNG có trong danh bạ — giả danh công an luôn
@@ -2062,28 +2227,38 @@ async def _canh_bao_lua_dao(intent: str, note: str | None, amount: int | None,
 
     Chỉ cảnh báo khi playbook khớp bằng TỪ KHÓA nội dung, không phải chỉ vì
     "người nhận mới" — nếu không, mọi lần chuyển cho người lạ đều bị kêu oan.
+
+    Trả thêm cờ ĐÃ ĐỐI CHIẾU ĐƯỢC hay chưa. "Không khớp kịch bản nào" và "không
+    hỏi được playbook" cùng cho `None`, nhưng với người đang chờ trên màn hình
+    thì hai điều đó khác hẳn nhau — `domain.scam_match` trả `None` khi
+    scam-knowledge-service chết hoặc quá hạn.
     """
     if intent != "transfer" or not note:
-        return None
+        return None, True          # không phải lệnh chuyển thì không có gì để đối chiếu
     is_new = not any(getattr(b, "trusted", False) for b in matches)
     match = await domain.scam_match({
         "persona": "SENIOR", "memo": note, "amount": amount or 0,
         "is_new_beneficiary": is_new,
-    }) or {}
+    })
+    if match is None:
+        # Tắt hẳn domain là một CHẾ ĐỘ (demo offline chạy bằng catalog), không
+        # phải sự cố — báo lỗi ở đó chỉ là tiếng ồn. Còn khi domain đang bật mà
+        # playbook vẫn im thì đúng là service chết hoặc quá hạn, phải nói ra.
+        return None, not domain.DOMAIN_ENABLED
     if not match.get("matched"):
-        return None
+        return None, True
     cand = (match.get("candidates") or [{}])[0]
     if not any("từ khóa" in str(s) for s in (cand.get("signals") or [])):
-        return None
+        return None, True
     scen = match.get("scenario") or {}
     if not scen.get("advice_title"):
-        return None
+        return None, True
     return ChatScamWarning(
         title=scen.get("advice_title") or "Giao dịch có dấu hiệu lừa đảo",
         body=scen.get("advice_body") or "",
         scenario_id=scen.get("scenario_id") or "",
         recommended_action=scen.get("recommended_action") or "hold",
-    )
+    ), True
 
 
 # ---- Guardian 3 mức: pass · soft-warn · intervene (wireframe màn Transfer) ----
