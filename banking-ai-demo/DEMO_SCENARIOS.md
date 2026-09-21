@@ -152,11 +152,12 @@ chặn ngay tại câu nói.*
 | **SC-05** Tình cảm | `chuyển 15 triệu gửi quà cho bạn trai nước ngoài` | 🔴 **Guardian chặn** (S08, 52đ) | cảnh báo lừa đảo tình cảm/gửi quà |
 | **SC-04** Shipper | `chuyển 500 nghìn phí ship cho người giao hàng` | 🟡 **Banner cảnh báo** (S11, 43đ) | *(mức trung bình — banner ngay trên màn, không chèn Guardian)* |
 
-### 2B-bis. Người nhận LẠ (không có trong danh bạ) — vẫn bắt ⭐
-Giả danh công an luôn dùng **tài khoản lạ**. Chatpay bắt ngay tại câu nói, không cần người nhận có trong danh bạ:
+### 2B-bis. Người nhận LẠ (không có trong danh bạ) — vào màn Guardian đầy đủ ⭐
+Giả danh công an luôn dùng **tài khoản lạ**. Chatpay bắt ngay tại câu nói và dẫn vào **màn Guardian đầy đủ**, không cần người nhận có trong danh bạ:
 - **Gõ:** `công an vừa gọi phạt vi phạm giao thông 3 triệu, gửi Nguyễn Văn Bình ngân hàng VCB`
-- **Kết quả:** bot **tạm dừng và hiện thẻ cảnh báo đỏ** ngay trong chat — *"Công an không bao giờ yêu cầu chuyển tiền…"* + *"Guardian khuyên: không chuyển, gọi 1900 6083"*. Không soạn lệnh.
-- **Cơ chế:** gateway đối chiếu **nội dung câu** với playbook (`match_scam`), chỉ cảnh báo khi khớp **từ khóa** (không kêu oan giao dịch thường tới người lạ như "gửi Hoa 2 triệu ăn trưa").
+- **Kết quả:** chat chuyển thẳng sang **màn Guardian** — điểm 40, lý do rule, câu hỏi *"có ai gọi xưng công an…"*; chọn đáp án → **Scam Shield (agent thật) viết khuyến cáo** + **4 nút: Khóa tạm 24 giờ · Hủy giao dịch · Gọi MSB 1900 6083 · Vẫn tiếp tục**. Guardian khuyên: Hủy giao dịch.
+- **Cơ chế:** gateway đối chiếu **nội dung câu** với playbook (`match_scam`); nếu khớp **từ khóa** thì bóc ngân hàng + số tài khoản từ câu, gọi `precheck` tạo quyết định thật rồi dẫn vào `/transfer/guardian`. Chỉ khớp từ khóa mới chặn (không kêu oan "gửi Hoa 2 triệu ăn trưa"). Thiếu số tiền thì lùi về thẻ cảnh báo tĩnh trong chat.
+- **Lưu ý demo:** lượt 2 gọi agent Scam Shield (~5–10s). Nếu bấm dồn nhiều lần liên tiếp, provider có thể rate-limit → rơi về khuyến cáo playbook (vẫn đúng nội dung). Demo mỗi lần một giao dịch thì là agent thật.
 
 **Lưu ý demo:**
 - SC-01..SC-03, SC-05 → điểm ≥ ngưỡng nên **chèn màn Guardian** (2 lượt: lý do + khuyến cáo Scam Shield). Đúng mức "nguy hiểm cao".
