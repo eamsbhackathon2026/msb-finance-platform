@@ -1927,7 +1927,9 @@ def _doc_json_agent(raw: str) -> dict | None:
 # cụm động từ KHÔNG chủ ngữ để FE ghép được cả "Em đang …" lẫn "Em đã …".
 _BUOC_CHATPAY = {
     "gw-book": "tra danh bạ người nhận của anh/chị",
-    "gw-parse": "hiểu câu chuyển tiền của anh/chị",
+    # "hiểu" là động từ trạng thái: "Em đang hiểu…" nghe sai. Nhãn phải đứng được
+    # trong cả ba khung câu của FE — đang / đã / chưa.
+    "gw-parse": "xem anh/chị muốn chuyển cho ai, bao nhiêu tiền",
     "gw-scam": "đối chiếu kịch bản lừa đảo",
     "gw-risk": "chấm điểm rủi ro giao dịch",
 }
