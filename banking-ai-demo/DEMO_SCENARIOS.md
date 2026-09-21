@@ -157,6 +157,7 @@ Giả danh công an luôn dùng **tài khoản lạ**. Chatpay bắt ngay tại 
 - **Gõ:** `công an vừa gọi phạt vi phạm giao thông 3 triệu, gửi Nguyễn Văn Bình ngân hàng VCB`
 - **Kết quả:** chat chuyển thẳng sang **màn Guardian** — điểm 40, lý do rule, câu hỏi *"có ai gọi xưng công an…"*; chọn đáp án → **Scam Shield (agent thật) viết khuyến cáo** + **4 nút: Khóa tạm 24 giờ · Hủy giao dịch · Gọi MSB 1900 6083 · Vẫn tiếp tục**. Guardian khuyên: Hủy giao dịch.
 - **Cơ chế:** gateway đối chiếu **nội dung câu** với playbook (`match_scam`); nếu khớp **từ khóa** thì bóc ngân hàng + số tài khoản từ câu, gọi `precheck` tạo quyết định thật rồi dẫn vào `/transfer/guardian`. Chỉ khớp từ khóa mới chặn (không kêu oan "gửi Hoa 2 triệu ăn trưa"). Thiếu số tiền thì lùi về thẻ cảnh báo tĩnh trong chat.
+- **Bền với câu dài / agent hỏng:** phần chống lừa đảo chạy theo **số tiền (code tính)** + từ khóa, **KHÔNG phụ thuộc agent Chat Banking**. Nên câu tường thuật lộn xộn kèm số tài khoản vẫn bắt được dù mô hình xếp nhầm ý định, và cả khi đồng đội lỡ đổi model Chat Banking sang provider hỏng (rơi `fallback`) thì scam shield vẫn không lọt. Biến thể đã kiểm chứng: `có người công an vừa gọi điện cho tôi, phạt vi phạm giao thông 3tr đồng, gửi tới số tài khoản Nguyễn Văn Bình, ngân hàng VCB, Số tài khoản 235235 số tiền 3000000`.
 - **Lưu ý demo:** lượt 2 gọi agent Scam Shield (~5–10s). Nếu bấm dồn nhiều lần liên tiếp, provider có thể rate-limit → rơi về khuyến cáo playbook (vẫn đúng nội dung). Demo mỗi lần một giao dịch thì là agent thật.
 
 **Lưu ý demo:**
