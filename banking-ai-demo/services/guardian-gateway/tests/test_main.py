@@ -2251,3 +2251,37 @@ def test_chat_banking_khong_phai_transfer_thi_khong_co_noi_dung(monkeypatch):
     _gia_lap_agent_dong_bo(monkeypatch, '{"intent": "list_beneficiaries"}', [])
     b = client.post("/api/chat-banking/parse", json={"message": "danh bạ của tôi"}).json()
     assert b.get("note") is None
+
+
+def _gia_lap_scam_match(monkeypatch, matched, signals, scenario):
+    async def fake(payload):
+        return {"matched": matched, "candidates": [{"scenario_id": "S01", "signals": signals}],
+                "scenario": scenario}
+    monkeypatch.setattr(main.domain, "scam_match", fake)
+
+
+def test_chat_banking_canh_bao_gia_danh_cong_an_nguoi_nhan_la(monkeypatch):
+    """Giả danh công an luôn dùng tài khoản LẠ (không trong danh bạ). Nhánh
+    người nhận mới của chat đá sang màn khác làm rơi ngữ cảnh — cảnh báo phải
+    dựa vào NỘI DUNG câu nên vẫn bắt được dù matches rỗng."""
+    _gia_lap_agent_dong_bo(monkeypatch, '{"intent": "transfer", "recipient": "Nguyễn Văn Bình"}', [])
+    _gia_lap_scam_match(monkeypatch, True, ["từ khóa: cong an", "người nhận mới"],
+                        {"scenario_id": "S01", "advice_title": "Công an không bao giờ yêu cầu chuyển tiền",
+                         "advice_body": "...", "recommended_action": "cancel"})
+    b = client.post("/api/chat-banking/parse",
+                    json={"message": "công an vừa gọi phạt vi phạm giao thông 3 triệu, gửi Nguyễn Văn Bình VCB"}).json()
+    assert b["matches"] == []                       # Bình không trong danh bạ
+    assert b["scamWarning"] is not None
+    assert b["scamWarning"]["scenarioId"] == "S01"
+    assert "Công an" in b["scamWarning"]["title"]
+
+
+def test_chat_banking_khong_canh_bao_giao_dich_thuong_nguoi_moi(monkeypatch):
+    """Chuyển cho người mới với nội dung vô hại chỉ khớp 'người nhận mới' (không
+    từ khóa) — KHÔNG được kêu oan là lừa đảo."""
+    _gia_lap_agent_dong_bo(monkeypatch, '{"intent": "transfer", "recipient": "Hoa"}', [])
+    _gia_lap_scam_match(monkeypatch, True, ["người nhận mới"],
+                        {"scenario_id": "S01", "advice_title": "x", "advice_body": "y", "recommended_action": "cancel"})
+    b = client.post("/api/chat-banking/parse",
+                    json={"message": "gửi Hoa 2 triệu tiền ăn trưa"}).json()
+    assert b.get("scamWarning") is None

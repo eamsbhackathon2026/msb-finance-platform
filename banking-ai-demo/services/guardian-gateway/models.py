@@ -678,6 +678,18 @@ class ChatBankingRequest(Contract):
     message: str
 
 
+class ChatScamWarning(Contract):
+    """Cảnh báo lừa đảo hiện NGAY trong chat khi câu khách gõ khớp playbook.
+
+    Bắt được cả khi người nhận KHÔNG có trong danh bạ (giả danh công an luôn dùng
+    tài khoản lạ) — vì dựa vào nội dung câu, không phụ thuộc danh bạ.
+    """
+    title: str
+    body: str
+    scenario_id: str
+    recommended_action: str
+
+
 class ChatBankingDraft(Contract):
     """Ý định chuyển tiền bóc từ MỘT câu của khách.
 
@@ -696,6 +708,9 @@ class ChatBankingDraft(Contract):
     # dẫn công an" thì chính câu đó thành memo, precheck khớp playbook và chặn.
     # Không có nó thì memo mặc định trung tính và mọi kịch bản lọt lưới.
     note: str | None = None
+    # Cảnh báo lừa đảo nếu nội dung câu khớp playbook — hiện ngay trong chat,
+    # kể cả khi người nhận không có trong danh bạ.
+    scam_warning: ChatScamWarning | None = None
     # "agent" = LLM hiểu câu; "fallback" = agent lỗi/chậm, FE tự dùng regex.
     source: Literal["agent", "fallback"] = "agent"
     steps: list[ChatStep] = []

@@ -67,6 +67,7 @@ from models import (
     DecisionRequest,
     GuardianAction,
     ChatBankingDraft,
+    ChatScamWarning,
     ChatBankingRequest,
     HomeContent,
     InterveneAdvice,
@@ -1958,14 +1959,49 @@ async def chat_banking_parse(payload: ChatBankingRequest) -> ChatBankingDraft:
         goi_y = got.get("amount")
         so_tien = goi_y if isinstance(goi_y, int) and goi_y > 0 else None
     nguoi_nhan = got.get("recipient") if isinstance(got.get("recipient"), str) else None
+    khop = _khop_nguoi_nhan(nguoi_nhan, danh_ba) if nguoi_nhan else []
     # Nội dung chuyển khoản mang NGUYÊN câu khách nói (cắt gọn), để màn chuyển
     # tiền và precheck đọc được ngữ cảnh — Guardian mới nhận ra kịch bản lừa đảo.
     noi_dung = payload.message.strip()[:140] if y_dinh == "transfer" else None
+    canh_bao = await _canh_bao_lua_dao(y_dinh, noi_dung, so_tien, khop)
     return ChatBankingDraft(
         intent=y_dinh, amount=so_tien, recipient=nguoi_nhan,
-        matches=_khop_nguoi_nhan(nguoi_nhan, danh_ba) if nguoi_nhan else [],
-        note=noi_dung,
+        matches=khop, note=noi_dung, scam_warning=canh_bao,
         source="agent", steps=[_chat_step(b) for b in buoc],
+    )
+
+
+async def _canh_bao_lua_dao(intent: str, note: str | None, amount: int | None,
+                            matches: list) -> ChatScamWarning | None:
+    """Đối chiếu câu khách gõ với playbook lừa đảo, cảnh báo ngay trong chat.
+
+    Bắt được cả khi người nhận KHÔNG có trong danh bạ — giả danh công an luôn
+    dùng tài khoản lạ, mà nhánh "người nhận mới" của chat lại đá sang màn khác
+    làm rơi mất ngữ cảnh; cảnh báo ở đây dựa vào NỘI DUNG nên không lọt.
+
+    Chỉ cảnh báo khi playbook khớp bằng TỪ KHÓA nội dung, không phải chỉ vì
+    "người nhận mới" — nếu không, mọi lần chuyển cho người lạ đều bị kêu oan.
+    """
+    if intent != "transfer" or not note:
+        return None
+    is_new = not any(getattr(b, "trusted", False) for b in matches)
+    match = await domain.scam_match({
+        "persona": "SENIOR", "memo": note, "amount": amount or 0,
+        "is_new_beneficiary": is_new,
+    }) or {}
+    if not match.get("matched"):
+        return None
+    cand = (match.get("candidates") or [{}])[0]
+    if not any("từ khóa" in str(s) for s in (cand.get("signals") or [])):
+        return None
+    scen = match.get("scenario") or {}
+    if not scen.get("advice_title"):
+        return None
+    return ChatScamWarning(
+        title=scen.get("advice_title") or "Giao dịch có dấu hiệu lừa đảo",
+        body=scen.get("advice_body") or "",
+        scenario_id=scen.get("scenario_id") or "",
+        recommended_action=scen.get("recommended_action") or "hold",
     )
 
 
