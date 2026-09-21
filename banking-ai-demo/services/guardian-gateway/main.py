@@ -68,6 +68,7 @@ from models import (
     GuardianAction,
     ChatBankingDraft,
     ChatScamWarning,
+    ChatGuardianHandoff,
     ChatBankingRequest,
     HomeContent,
     InterveneAdvice,
@@ -1964,10 +1965,74 @@ async def chat_banking_parse(payload: ChatBankingRequest) -> ChatBankingDraft:
     # tiền và precheck đọc được ngữ cảnh — Guardian mới nhận ra kịch bản lừa đảo.
     noi_dung = payload.message.strip()[:140] if y_dinh == "transfer" else None
     canh_bao = await _canh_bao_lua_dao(y_dinh, noi_dung, so_tien, khop)
+    # Có dấu hiệu lừa đảo → tạo sẵn quyết định để chat dẫn vào MÀN GUARDIAN đầy
+    # đủ (4 nút hành động + Scam Shield lượt 2), thay vì chỉ thẻ cảnh báo tĩnh.
+    guardian = None
+    if canh_bao:
+        guardian = await _guardian_tu_chat(payload.message, noi_dung, so_tien, nguoi_nhan)
     return ChatBankingDraft(
         intent=y_dinh, amount=so_tien, recipient=nguoi_nhan,
-        matches=khop, note=noi_dung, scam_warning=canh_bao,
+        matches=khop, note=noi_dung, scam_warning=canh_bao, guardian=guardian,
         source="agent", steps=[_chat_step(b) for b in buoc],
+    )
+
+
+# Mã ngân hàng phổ biến để bóc từ câu chatpay (không dấu, viết hoa).
+_MA_NGAN_HANG = {
+    "VCB": "VCB", "VIETCOMBANK": "VCB", "ACB": "ACB", "TCB": "TCB", "TECHCOMBANK": "TCB",
+    "MB": "MBB", "MBB": "MBB", "MBBANK": "MBB", "BIDV": "BIDV", "VPB": "VPB", "VPBANK": "VPB",
+    "MSB": "MSB", "VIB": "VIB", "TPB": "TPB", "TPBANK": "TPB", "STB": "STB", "SACOMBANK": "STB",
+    "AGRIBANK": "VBA", "VBA": "VBA", "HDBANK": "HDB", "HDB": "HDB", "OCB": "OCB", "SHB": "SHB",
+    "EXIMBANK": "EIB", "EIB": "EIB", "VIETINBANK": "CTG", "CTG": "CTG",
+}
+
+
+def _bank_tu_cau(text: str) -> str:
+    up = re.sub(r"[^A-Za-z ]", " ", _bo_dau(text).upper())
+    for tu in up.split():
+        if tu in _MA_NGAN_HANG:
+            return _MA_NGAN_HANG[tu]
+    return ""
+
+
+def _account_tu_cau(text: str, amount: int | None) -> str:
+    """Số tài khoản trong câu: dãy 8–19 chữ số, bỏ dãy trùng số tiền để không
+    nhầm "3000000" thành tài khoản."""
+    for m in re.findall(r"\d{8,19}", text.replace(" ", "")):
+        if amount and m == str(amount):
+            continue
+        return m
+    return ""
+
+
+async def _guardian_tu_chat(message: str, note: str | None, amount: int | None,
+                            recipient: str | None) -> ChatGuardianHandoff | None:
+    """Chấm điểm câu lừa đảo → nếu mức intervene, trả đủ dữ liệu để vào màn Guardian.
+
+    Người nhận thường KHÔNG có trong danh bạ (giả danh công an dùng tài khoản
+    lạ), nên bóc ngân hàng + số tài khoản (nếu có) thẳng từ câu; thiếu số thì
+    dùng một số lạ để engine chấm là "người nhận mới" — điểm và kịch bản vẫn do
+    engine + playbook quyết, chat chỉ dẫn đường.
+    """
+    if not amount:
+        return None
+    bank = _bank_tu_cau(message) or "VCB"
+    acc_that = _account_tu_cau(message, amount)
+    acc_precheck = acc_that or "0009999999"   # số lạ để resolve ra "người nhận mới"
+    try:
+        pre = await transfer_precheck(TransferPrecheckRequest(
+            bank_code=bank, account_no=acc_precheck, amount=amount,
+            note=note or "", holder_name=recipient or ""))
+    except Exception:
+        return None
+    if pre.level != "intervene" or not pre.decision_id:
+        return None
+    return ChatGuardianHandoff(
+        decision_id=pre.decision_id, score=pre.score, reasons=pre.top_factors,
+        question=pre.question or "Có ai đang hướng dẫn bạn thực hiện giao dịch này không?",
+        options=pre.options or ["Có, đang có người hướng dẫn", "Không, tôi tự chuyển", "Tôi không chắc"],
+        beneficiary_name=recipient or pre.beneficiary_name or "Người nhận",
+        bank=bank, account=acc_that, amount=amount, note=note or "",
     )
 
 

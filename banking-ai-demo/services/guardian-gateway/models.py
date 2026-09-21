@@ -690,6 +690,20 @@ class ChatScamWarning(Contract):
     recommended_action: str
 
 
+class ChatGuardianHandoff(Contract):
+    """Đủ dữ liệu để chat dẫn vào màn Guardian (giống lệnh chuyển tiền intervene)."""
+    decision_id: str
+    score: int
+    reasons: list[str]
+    question: str
+    options: list[str]
+    beneficiary_name: str
+    bank: str
+    account: str
+    amount: int
+    note: str
+
+
 class ChatBankingDraft(Contract):
     """Ý định chuyển tiền bóc từ MỘT câu của khách.
 
@@ -711,6 +725,10 @@ class ChatBankingDraft(Contract):
     # Cảnh báo lừa đảo nếu nội dung câu khớp playbook — hiện ngay trong chat,
     # kể cả khi người nhận không có trong danh bạ.
     scam_warning: ChatScamWarning | None = None
+    # Khi câu lừa đảo bị chấm mức intervene, gateway tạo sẵn quyết định để chat
+    # dẫn thẳng vào MÀN GUARDIAN đầy đủ (4 nút hành động + Scam Shield lượt 2),
+    # thay vì chỉ hiện thẻ cảnh báo tĩnh.
+    guardian: ChatGuardianHandoff | None = None
     # "agent" = LLM hiểu câu; "fallback" = agent lỗi/chậm, FE tự dùng regex.
     source: Literal["agent", "fallback"] = "agent"
     steps: list[ChatStep] = []

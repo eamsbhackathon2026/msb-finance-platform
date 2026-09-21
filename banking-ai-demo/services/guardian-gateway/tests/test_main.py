@@ -2285,3 +2285,40 @@ def test_chat_banking_khong_canh_bao_giao_dich_thuong_nguoi_moi(monkeypatch):
     b = client.post("/api/chat-banking/parse",
                     json={"message": "gửi Hoa 2 triệu tiền ăn trưa"}).json()
     assert b.get("scamWarning") is None
+
+
+def test_chat_banking_gia_danh_cong_an_dan_vao_man_guardian(monkeypatch):
+    """Câu giả danh công an với người nhận LẠ phải dẫn được vào màn Guardian
+    đầy đủ (có decision_id để chạy 4 nút + Scam Shield lượt 2), không chỉ thẻ tĩnh."""
+    _gia_lap_agent_dong_bo(monkeypatch, '{"intent": "transfer", "recipient": "Nguyễn Văn Bình"}', [])
+    _gia_lap_scam_match(monkeypatch, True, ["từ khóa: cong an", "người nhận mới"],
+                        {"scenario_id": "S01", "advice_title": "Công an không bao giờ yêu cầu chuyển tiền",
+                         "advice_body": "...", "recommended_action": "cancel"})
+    async def fake_precheck(payload):
+        from models import TransferPrecheckResponse
+        assert payload.bank_code == "VCB"          # bóc đúng ngân hàng từ câu
+        return TransferPrecheckResponse(
+            requires_review=True, trusted=False, is_new=True,
+            beneficiary_name=payload.holder_name, beneficiary_bank=payload.bank_code,
+            beneficiary_account="0009 ****", score=68, level="intervene",
+            top_factors=["Người nhận: hoàn toàn mới", "Quan hệ: chưa xác định"],
+            template_text="", decision_id="dec-chat-1",
+            question="Có ai gọi xưng công an bảo bác chuyển không?",
+            options=["Có, họ gọi cho tôi", "Không"], scenario_id="S01", tx_count=0)
+    monkeypatch.setattr(main, "transfer_precheck", fake_precheck)
+    b = client.post("/api/chat-banking/parse",
+                    json={"message": "công an vừa gọi phạt vi phạm giao thông 3 triệu, gửi Nguyễn Văn Bình VCB"}).json()
+    g = b.get("guardian")
+    assert g is not None, "phải có handoff để vào màn Guardian"
+    assert g["decisionId"] == "dec-chat-1" and g["score"] == 68
+    assert g["bank"] == "VCB" and g["beneficiaryName"] == "Nguyễn Văn Bình"
+    assert len(g["reasons"]) >= 1 and len(g["options"]) >= 2
+
+
+def test_chat_banking_giao_dich_thuong_khong_dan_vao_guardian(monkeypatch):
+    """Câu vô hại không có scam_warning nên cũng không dựng handoff Guardian."""
+    _gia_lap_agent_dong_bo(monkeypatch, '{"intent": "transfer", "recipient": "Hoa"}', [])
+    _gia_lap_scam_match(monkeypatch, True, ["người nhận mới"],
+                        {"scenario_id": "S01", "advice_title": "x", "advice_body": "y", "recommended_action": "cancel"})
+    b = client.post("/api/chat-banking/parse", json={"message": "gửi Hoa 2 triệu ăn trưa"}).json()
+    assert b.get("scamWarning") is None and b.get("guardian") is None
