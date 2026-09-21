@@ -184,7 +184,11 @@ Agent chỉ vào cuộc ở **lượt 2** của màn can thiệp.
 chỉ lên `soft_warn`.
 
 **Màn Guardian (intervene) — 2 lượt:**
-1. **Lượt 1** (hiện tức thì, rule): 3 lý do nặng nhất + câu hỏi ("có ai đang hướng dẫn bạn không").
+1. **Lượt 1** (hiện tức thì, rule): heading **"Cảnh báo:"** + 3 lý do nặng nhất **chữ đỏ**,
+   mỗi dòng có nhãn danh mục — vd *Người nhận: người nhận hoàn toàn mới, chưa từng chuyển* ·
+   *Quan hệ: chưa xác định quan hệ…; chưa có lịch sử giao dịch hai chiều* ·
+   *Số tiền: vượt ngưỡng p90 (…)*. Kèm câu hỏi ("có ai đang hướng dẫn bạn không") và
+   nút **"Vẫn tiếp tục"** (nhạt, cuối màn) để khách bỏ qua câu hỏi nếu muốn.
 2. **Lượt 2** (agent **Scam Shield** `01a0ba02` viết khuyến cáo, ~5–8s) + 4 nút:
    Khóa tạm 24h · Hủy · Gọi MSB 1900 6083 · Vẫn tiếp tục.
 
