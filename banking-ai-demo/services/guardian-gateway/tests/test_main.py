@@ -2322,3 +2322,63 @@ def test_chat_banking_giao_dich_thuong_khong_dan_vao_guardian(monkeypatch):
                         {"scenario_id": "S01", "advice_title": "x", "advice_body": "y", "recommended_action": "cancel"})
     b = client.post("/api/chat-banking/parse", json={"message": "gửi Hoa 2 triệu ăn trưa"}).json()
     assert b.get("scamWarning") is None and b.get("guardian") is None
+
+
+def _fake_precheck_intervene(monkeypatch, decision_id):
+    """Giả lập transfer_precheck trả mức intervene để dựng handoff Guardian."""
+    async def fake(payload):
+        from models import TransferPrecheckResponse
+        return TransferPrecheckResponse(
+            requires_review=True, trusted=False, is_new=True,
+            beneficiary_name=payload.holder_name, beneficiary_bank=payload.bank_code,
+            beneficiary_account="0009 ****", score=40, level="intervene",
+            top_factors=["Người nhận: hoàn toàn mới, chưa từng chuyển"],
+            template_text="", decision_id=decision_id,
+            question="Có ai gọi xưng công an bảo bác chuyển không?",
+            options=["Có, họ gọi cho tôi", "Không"], scenario_id="S01", tx_count=0)
+    monkeypatch.setattr(main, "transfer_precheck", fake)
+
+
+def test_chat_banking_agent_gan_nhan_other_van_bat_lua_dao(monkeypatch):
+    """Câu tường thuật lộn xộn (kèm số tài khoản ngắn) bị mô hình nhỏ xếp nhầm
+    intent='other', recipient rỗng — NHƯNG có số tiền (code tính) + nội dung khớp
+    từ khóa nên vẫn phải dẫn vào màn Guardian. Trước đây gate theo intent của
+    agent nên lọt; chống lừa đảo giờ chạy theo số tiền, không theo nhãn agent."""
+    _gia_lap_agent_dong_bo(monkeypatch, '{"intent": "other"}', [])
+    _gia_lap_scam_match(monkeypatch, True, ["từ khóa: cong an", "người nhận mới"],
+                        {"scenario_id": "S01", "advice_title": "Công an không bao giờ yêu cầu chuyển tiền",
+                         "advice_body": "...", "recommended_action": "cancel"})
+    _fake_precheck_intervene(monkeypatch, "dec-other-1")
+    cau = ("có người công an vừa gọi điện cho tôi, phạt vi phạm giao thông 3tr đồng, "
+           "gửi tới số tài khoản Nguyễn Văn Bình, ngân hàng VCB, Số tài khoản 235235 số tiền 3000000")
+    b = client.post("/api/chat-banking/parse", json={"message": cau}).json()
+    assert b["amount"] == 3_000_000                 # số tiền do code tính, độc lập intent
+    assert b["scamWarning"] is not None
+    assert b["guardian"] is not None and b["guardian"]["decisionId"] == "dec-other-1"
+    assert b["intent"] == "transfer"                # nâng từ 'other' cho nhất quán
+
+
+def test_chat_banking_agent_hong_van_bat_lua_dao(monkeypatch):
+    """Agent hỏng hẳn (fallback) không được làm rơi scam shield: nội dung khớp từ
+    khóa lừa đảo vẫn phải dẫn vào Guardian, vì chống lừa đảo là rule không cần agent."""
+    _gia_lap_agent_dong_bo(monkeypatch, None, [])   # agent trả rỗng → nhánh fallback
+    _gia_lap_scam_match(monkeypatch, True, ["từ khóa: cong an"],
+                        {"scenario_id": "S01", "advice_title": "Công an không bao giờ yêu cầu chuyển tiền",
+                         "advice_body": "...", "recommended_action": "cancel"})
+    _fake_precheck_intervene(monkeypatch, "dec-fb-1")
+    b = client.post("/api/chat-banking/parse",
+                    json={"message": "công an gọi phạt 3 triệu, chuyển gấp tới tài khoản lạ"}).json()
+    assert b["source"] == "fallback"
+    assert b["scamWarning"] is not None
+    assert b["guardian"] is not None and b["guardian"]["decisionId"] == "dec-fb-1"
+
+
+def test_chat_banking_fallback_giao_dich_thuong_khong_keu_oan(monkeypatch):
+    """Agent hỏng + câu chuyển vô hại: playbook không khớp từ khóa nên KHÔNG được
+    kêu oan là lừa đảo, chỉ trả số tiền để FE dựng thẻ như cũ."""
+    _gia_lap_agent_dong_bo(monkeypatch, None, [])
+    _gia_lap_scam_match(monkeypatch, False, [], {})   # playbook không khớp
+    b = client.post("/api/chat-banking/parse", json={"message": "chuyen 500k cho Son"}).json()
+    assert b["source"] == "fallback"
+    assert b.get("scamWarning") is None and b.get("guardian") is None
+    assert b["amount"] == 500_000

@@ -1941,39 +1941,55 @@ async def chat_banking_parse(payload: ChatBankingRequest) -> ChatBankingDraft:
         except Exception:
             raw, buoc = None, []
     got = _doc_json_agent(raw or "")
-    if not got:
-        # Agent lỗi/chậm: vẫn trả số tiền vì phần này do CODE tính, không cần
-        # mô hình. FE dùng bộ luật regex của nó cho phần còn lại.
-        return ChatBankingDraft(intent="other", amount=_tien_tu_chu(payload.message),
-                                source="fallback")
 
-    y_dinh = got.get("intent")
-    if y_dinh not in {"transfer", "list_beneficiaries", "other"}:
-        y_dinh = "transfer" if (got.get("amount") or got.get("recipient")) else "other"
     # SỐ TIỀN TÍNH BẰNG CODE, không lấy số của mô hình.
     # qwen3.6-flash trả "3 triệu rưỡi" = 4.500.000 và "20 triệu rưỡi" =
     # 30.000.000 — sai một chữ số ở đây là khách chuyển nhầm tiền thật. Ưu tiên
     # đọc thẳng từ câu gốc; chỉ khi câu không có dạng số nào nhận ra được mới
-    # dùng con số mô hình đưa, và vẫn phải là số nguyên dương.
+    # dùng con số mô hình đưa (nếu có), và vẫn phải là số nguyên dương.
     so_tien = _tien_tu_chu(payload.message)
-    if so_tien is None:
+    if so_tien is None and got:
         goi_y = got.get("amount")
         so_tien = goi_y if isinstance(goi_y, int) and goi_y > 0 else None
-    nguoi_nhan = got.get("recipient") if isinstance(got.get("recipient"), str) else None
-    khop = _khop_nguoi_nhan(nguoi_nhan, danh_ba) if nguoi_nhan else []
-    # Nội dung chuyển khoản mang NGUYÊN câu khách nói (cắt gọn), để màn chuyển
-    # tiền và precheck đọc được ngữ cảnh — Guardian mới nhận ra kịch bản lừa đảo.
-    noi_dung = payload.message.strip()[:140] if y_dinh == "transfer" else None
-    canh_bao = await _canh_bao_lua_dao(y_dinh, noi_dung, so_tien, khop)
-    # Có dấu hiệu lừa đảo → tạo sẵn quyết định để chat dẫn vào MÀN GUARDIAN đầy
-    # đủ (4 nút hành động + Scam Shield lượt 2), thay vì chỉ thẻ cảnh báo tĩnh.
+
+    if got:
+        y_dinh = got.get("intent")
+        if y_dinh not in {"transfer", "list_beneficiaries", "other"}:
+            y_dinh = "transfer" if (got.get("amount") or got.get("recipient")) else "other"
+        nguoi_nhan = got.get("recipient") if isinstance(got.get("recipient"), str) else None
+        khop = _khop_nguoi_nhan(nguoi_nhan, danh_ba) if nguoi_nhan else []
+        nguon, buoc_out = "agent", [_chat_step(b) for b in buoc]
+    else:
+        # Agent lỗi/chậm: FE có bộ luật regex riêng để dựng thẻ soạn lệnh, nên ở
+        # đây để trống người nhận/danh bạ. Nhưng phần CHỐNG LỪA ĐẢO vẫn phải chạy
+        # bên dưới — nó là rule/từ-khóa trên nội dung, không cần agent.
+        y_dinh, nguoi_nhan, khop = "other", None, []
+        nguon, buoc_out = "fallback", []
+
+    # CHỐNG LỪA ĐẢO KHÔNG PHỤ THUỘC AGENT. Đối chiếu playbook chạy khi câu có số
+    # tiền (do code tính) — bất kể agent gắn nhãn "transfer"/"other" hay agent
+    # hỏng hẳn. Câu tường thuật "công an gọi phạt… gửi tới tài khoản…" bị mô hình
+    # nhỏ xếp nhầm là "other", nhưng nội dung vẫn khớp từ khóa lừa đảo; trước đây
+    # gate theo intent của agent nên lọt. Nội dung mang NGUYÊN câu khách nói (cắt
+    # gọn) để precheck + playbook đọc được ngữ cảnh.
+    la_lenh_chuyen = y_dinh == "transfer" or bool(so_tien)
+    noi_dung = payload.message.strip()[:140] if la_lenh_chuyen else None
+    canh_bao = await _canh_bao_lua_dao(
+        "transfer" if la_lenh_chuyen else y_dinh, noi_dung, so_tien, khop)
     guardian = None
     if canh_bao:
+        # Có dấu hiệu lừa đảo → tạo sẵn quyết định để chat dẫn vào MÀN GUARDIAN
+        # đầy đủ (4 nút + Scam Shield lượt 2), thay vì chỉ thẻ cảnh báo tĩnh.
         guardian = await _guardian_tu_chat(payload.message, noi_dung, so_tien, nguoi_nhan)
+        # Agent lỡ gắn nhãn "other" cho câu lừa đảo → nâng lên "transfer" cho nhất
+        # quán; FE cũng ưu tiên guardian handoff bất kể source.
+        if y_dinh == "other":
+            y_dinh = "transfer"
+
     return ChatBankingDraft(
         intent=y_dinh, amount=so_tien, recipient=nguoi_nhan,
         matches=khop, note=noi_dung, scam_warning=canh_bao, guardian=guardian,
-        source="agent", steps=[_chat_step(b) for b in buoc],
+        source=nguon, steps=buoc_out,
     )
 
 
