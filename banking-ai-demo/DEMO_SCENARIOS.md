@@ -161,6 +161,7 @@ chặn ngay tại câu nói.*
 | **SC-05** Tình cảm | `chuyển 15 triệu gửi quà cho bạn trai nước ngoài` | 🔴 **Guardian chặn** (S08, 52đ) | cảnh báo lừa đảo tình cảm/gửi quà |
 | **SC-04** Shipper | `chuyển 500 nghìn phí ship cho người giao hàng` | 🟡 **Banner cảnh báo** (S11, 43đ) | *(mức trung bình — banner ngay trên màn, không chèn Guardian)* |
 | **SC-06** Nợ thuế / xuất cảnh | `tôi đang làm thủ tục xuất cảnh ở sân bay thì bị báo nợ thuế, có người hỗ trợ bảo chuyển 20 triệu để nộp thuế hộ cho qua, gửi Nguyễn Văn Bình ngân hàng VCB` | 🔴 **Guardian chặn** (S12, 43→intervene) | "Nộp thuế không bao giờ chuyển vào tài khoản cá nhân" + chỉ eTax Mobile / Cổng DVC |
+| **SC-07** Cán bộ thuế gọi điện | `có người tự xưng là nhân viên thuế gọi điện bảo tôi trốn thuế phải nộp phạt 20 triệu gấp nếu không sẽ khởi tố, chuyển cho Nguyễn Văn Bình ngân hàng VCB` | 🔴 **Guardian chặn** (S13, 43→intervene) | "Cơ quan thuế không gọi điện đòi chuyển tiền" — cúp máy, gọi lại chi cục thuế |
 
 ### 2B-bis. Người nhận LẠ (không có trong danh bạ) — vào màn Guardian đầy đủ ⭐
 Giả danh công an luôn dùng **tài khoản lạ**. Chatpay bắt ngay tại câu nói và dẫn vào **màn Guardian đầy đủ**, không cần người nhận có trong danh bạ:
@@ -180,7 +181,8 @@ Giả danh công an luôn dùng **tài khoản lạ**. Chatpay bắt ngay tại 
 **Lưu ý demo:**
 - SC-01..SC-03, SC-05 → điểm ≥ ngưỡng nên **chèn màn Guardian** (2 lượt: lý do + khuyến cáo Scam Shield). Đúng mức "nguy hiểm cao".
 - SC-04 shipper → **soft_warn** (43đ), chỉ hiện banner cảnh báo trên màn nhập lệnh, đúng mức "🟠 trung bình". Muốn cho lên màn Guardian đầy đủ thì tăng số tiền hoặc dựng kịch bản shipper nặng hơn.
-- Kịch bản **S11 (shipper)** và **S12 (nợ thuế / cấm xuất cảnh)** là các kịch bản **mới thêm vào playbook** cho demo này (S11 từ khóa: shipper, giao hàng, mã vận đơn, phí ship…; S12 từ khóa: nợ thuế, cấm xuất cảnh, nộp thuế hộ…).
+- Kịch bản **S11 (shipper)**, **S12 (nợ thuế / cấm xuất cảnh)** và **S13 (cán bộ thuế gọi điện)** là các kịch bản **mới thêm vào playbook** cho demo này (S11: shipper, giao hàng, mã vận đơn, phí ship…; S12: nợ thuế, cấm xuất cảnh, nộp thuế hộ…; S13: nhân viên/cán bộ thuế, truy thu, nộp phạt thuế, khởi tố, trốn thuế…).
+- **Hai chiêu thuế khác nhau — chọn đúng câu:** **S12** = bị chặn xuất cảnh ở sân bay, có người "nộp thuế hộ" (khuyến cáo: chỉ nộp qua eTax/Kho bạc, không nộp hộ). **S13** = có người **gọi điện** xưng cán bộ thuế đòi nộp phạt/truy thu, dọa khởi tố (khuyến cáo: cơ quan thuế không gọi điện đòi tiền, cúp máy gọi lại chi cục thuế). Cả hai đã kiểm chứng qua agent thật (`source=agent`).
 - Sau khi bấm chọn ở màn Guardian, **lượt 2 gọi agent Scam Shield** (`01a0ba02`) viết khuyến cáo đúng loại lừa đảo — mỗi kịch bản một thông điệp khác nhau.
 
 ---
